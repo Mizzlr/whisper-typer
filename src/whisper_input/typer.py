@@ -94,9 +94,23 @@ class TextTyper:
         )
 
     def _type_xdotool(self, text: str):
-        """Type using xdotool (X11 only)."""
+        """Type using xdotool (X11 only) via clipboard for instant paste."""
+        import time
+
+        # Copy text to clipboard
         subprocess.run(
-            ["xdotool", "type", "--delay", "0", "--clearmodifiers", "--", text],
+            ["xclip", "-selection", "clipboard"],
+            input=text,
+            text=True,
+            check=True,
+        )
+
+        # Small delay to ensure clipboard is ready
+        time.sleep(0.01)
+
+        # Paste using Ctrl+Shift+V (works in terminals)
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "ctrl+shift+v"],
             check=True,
             capture_output=True,
         )
