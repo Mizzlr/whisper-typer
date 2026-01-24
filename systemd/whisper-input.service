@@ -1,0 +1,27 @@
+[Unit]
+Description=Whisper Input - Speech to Text Dictation
+Documentation=https://github.com/your-repo/whisper-input
+After=graphical-session.target
+Wants=ydotoold.service
+
+[Service]
+Type=simple
+ExecStart=/home/mizzlr/whispher_input/.venv/bin/python -m whisper_input
+WorkingDirectory=/home/mizzlr/whispher_input
+Restart=on-failure
+RestartSec=5
+
+# Environment for display and audio
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits (adjust based on your GPU VRAM)
+MemoryHigh=8G
+MemoryMax=12G
+
+[Install]
+WantedBy=default.target

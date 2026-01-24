@@ -1,0 +1,34 @@
+# Whisper Input Configuration
+
+hotkey:
+  # Primary hotkey: Win+Alt
+  combo:
+    - KEY_LEFTMETA
+    - KEY_LEFTALT
+  # Alternate hotkeys
+  alt_combos:
+    - [KEY_LEFTCTRL, KEY_LEFTALT]   # Ctrl+Alt
+    - [KEY_RIGHTCTRL, KEY_RIGHTALT] # Right Ctrl+Right Alt
+
+audio:
+  sample_rate: 16000      # Whisper expects 16kHz
+  device_index: null      # null = system default microphone
+
+recording:
+  max_duration: 120       # Maximum recording length in seconds
+
+whisper:
+  model: "distil-whisper/distil-large-v3"
+  device: "cuda"          # cuda, cpu, or mps (Mac)
+
+ollama:
+  enabled: false
+  model: "llama3.2:3b"
+  host: "http://localhost:11434"
+
+typer:
+  backend: "xdotool"      # xdotool for X11 (respects keyboard layout)
+
+feedback:
+  notifications: true
+  sounds: false
