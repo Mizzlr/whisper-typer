@@ -34,3 +34,16 @@ typer:
 feedback:
   notifications: true
   sounds: false
+
+# Wake-word activation (say "Alexa" to start recording)
+wakeword:
+  enabled: true            # Wake-word is enabled
+  model: "alexa"           # Options: hey_jarvis, alexa, hey_mycroft
+  threshold: 0.5           # Detection sensitivity (0.1-0.9)
+
+# Silence detection for auto-stop (used with wake-word)
+silence:
+  threshold: 0.01          # RMS energy threshold
+  duration: 1.5            # Seconds of silence to stop
+  min_speech_duration: 0.5 # Minimum recording before checking
+  max_recording_duration: 30.0  # Maximum recording length

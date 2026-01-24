@@ -65,6 +65,16 @@ def parse_args():
         action="store_true",
         help="Disable Ollama processing entirely",
     )
+    parser.add_argument(
+        "--enable-wakeword",
+        action="store_true",
+        help="Enable wake-word activation (e.g., 'Hey Jarvis')",
+    )
+    parser.add_argument(
+        "--wakeword-model",
+        default=None,
+        help="Wake-word model to use (default: hey_jarvis)",
+    )
     return parser.parse_args()
 
 
@@ -126,6 +136,12 @@ def main():
 
     # Load configuration
     config = Config.load(args.config)
+
+    # Apply CLI overrides to config
+    if args.enable_wakeword:
+        config.wakeword.enabled = True
+    if args.wakeword_model:
+        config.wakeword.model = args.wakeword_model
 
     # Map CLI mode to OutputMode
     mode_map = {

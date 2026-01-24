@@ -50,6 +50,21 @@ class FeedbackConfig:
 
 
 @dataclass
+class WakeWordConfig:
+    enabled: bool = False
+    model: str = "hey_jarvis"
+    threshold: float = 0.5
+
+
+@dataclass
+class SilenceConfig:
+    threshold: float = 0.01
+    duration: float = 1.5
+    min_speech_duration: float = 0.5
+    max_recording_duration: float = 30.0
+
+
+@dataclass
 class Config:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -58,6 +73,8 @@ class Config:
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     typer: TyperConfig = field(default_factory=TyperConfig)
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
+    wakeword: WakeWordConfig = field(default_factory=WakeWordConfig)
+    silence: SilenceConfig = field(default_factory=SilenceConfig)
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "Config":
@@ -88,4 +105,6 @@ class Config:
             ollama=OllamaConfig(**data.get("ollama", {})),
             typer=TyperConfig(**data.get("typer", {})),
             feedback=FeedbackConfig(**data.get("feedback", {})),
+            wakeword=WakeWordConfig(**data.get("wakeword", {})),
+            silence=SilenceConfig(**data.get("silence", {})),
         )

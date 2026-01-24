@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pyaudio
@@ -10,6 +10,9 @@ import pyaudio
 from .config import AudioConfig, RecordingConfig
 
 logger = logging.getLogger(__name__)
+
+# Type alias for audio subscriber callbacks
+AudioSubscriber = Callable[[np.ndarray], None]
 
 
 class AudioRecorder:
@@ -31,11 +34,36 @@ class AudioRecorder:
             * audio_config.sample_rate
             / audio_config.chunk_size
         )
+        # Subscribers receive audio chunks for wake-word detection, silence detection, etc.
+        self._subscribers: list[AudioSubscriber] = []
+        self._subscribers_lock = threading.Lock()
+
+    def add_subscriber(self, callback: AudioSubscriber):
+        """Add a subscriber to receive audio chunks."""
+        with self._subscribers_lock:
+            self._subscribers.append(callback)
+
+    def remove_subscriber(self, callback: AudioSubscriber):
+        """Remove an audio subscriber."""
+        with self._subscribers_lock:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
         """PyAudio callback - runs in separate thread."""
         if status:
             logger.warning(f"PyAudio status: {status}")
+
+        # Convert to numpy for subscribers
+        audio_np = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+        # Notify all subscribers (wake-word detector, silence detector, etc.)
+        with self._subscribers_lock:
+            for subscriber in self._subscribers:
+                try:
+                    subscriber(audio_np)
+                except Exception as e:
+                    logger.error(f"Audio subscriber error: {e}")
 
         with self.lock:
             if self.is_recording:

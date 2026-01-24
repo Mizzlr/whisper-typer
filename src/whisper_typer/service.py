@@ -18,8 +18,10 @@ from .hotkey import HotkeyMonitor
 from .notifier import Notifier
 from .processor import OllamaProcessor
 from .recorder import AudioRecorder
+from .silence_detector import SilenceDetector
 from .transcriber import WhisperTranscriber
 from .typer import TextTyper
+from .wakeword import WakeWordDetector
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,8 @@ logger = logging.getLogger(__name__)
 class ServiceState(Enum):
     """Service state machine states."""
     IDLE = "idle"
-    RECORDING = "recording"
+    RECORDING = "recording"        # Hotkey-triggered recording
+    WAKE_RECORDING = "wake_recording"  # Wake-word triggered recording
     PROCESSING = "processing"
 
 
@@ -61,6 +64,17 @@ class DictationService:
         self.processor = OllamaProcessor(config.ollama)
         self.typer = TextTyper(config.typer)
         self.notifier = Notifier(config.feedback)
+
+        # Wake-word components
+        self.wakeword = WakeWordDetector(
+            config.wakeword,
+            on_detected=self._on_wakeword_detected,
+            sample_rate=config.audio.sample_rate,
+        )
+        self.silence_detector = SilenceDetector(
+            config.silence,
+            sample_rate=config.audio.sample_rate,
+        )
 
         # For async coordination
         self._process_task: Optional[asyncio.Task] = None
@@ -135,6 +149,52 @@ class DictationService:
             self._process_task = self._loop.create_task(
                 self._process_audio(audio_data)
             )
+
+    def _on_wakeword_detected(self):
+        """Called when wake-word is detected."""
+        if self.state != ServiceState.IDLE:
+            logger.debug(f"Ignoring wake-word, state is {self.state}")
+            return
+
+        logger.info("Wake-word detected - starting recording")
+        self.state = ServiceState.WAKE_RECORDING
+        self.notifier.recording_started()
+        self.silence_detector.reset()
+        self.recorder.start()
+
+    def _on_silence_detected(self):
+        """Called when silence is detected during wake-recording."""
+        if self.state != ServiceState.WAKE_RECORDING:
+            return
+
+        logger.info("Silence detected - stopping wake-recording")
+        self.state = ServiceState.PROCESSING
+        self.notifier.recording_stopped()
+
+        audio_data = self.recorder.stop()
+
+        if self._loop:
+            self._process_task = self._loop.create_task(
+                self._process_audio(audio_data)
+            )
+
+    def _audio_subscriber(self, audio_chunk):
+        """Process audio from recorder stream for wake-word and silence detection."""
+        import numpy as np
+
+        # Wake-word detection when idle
+        if self.state == ServiceState.IDLE:
+            if self.wakeword.enabled and self.wakeword.process_audio(audio_chunk):
+                # Schedule callback in main loop (we're in audio thread)
+                if self._loop:
+                    self._loop.call_soon_threadsafe(self._on_wakeword_detected)
+
+        # Silence detection during wake-recording
+        elif self.state == ServiceState.WAKE_RECORDING:
+            if self.silence_detector.process_chunk(audio_chunk):
+                # Schedule stop in main loop
+                if self._loop:
+                    self._loop.call_soon_threadsafe(self._on_silence_detected)
 
     async def _process_audio(self, audio_data: bytes):
         """Process recorded audio: transcribe, fix grammar, type."""
@@ -261,9 +321,22 @@ class DictationService:
         self.transcriber.load_model()
         logger.info("Whisper model loaded")
 
+        # Load wake-word model if enabled
+        if self.config.wakeword.enabled:
+            logger.info("Loading wake-word model...")
+            self.wakeword.load_model()
+
         # Pre-open audio stream for low-latency recording
         logger.info("Opening audio stream...")
         self.recorder.open_stream()
+
+        # Subscribe to audio stream for wake-word and silence detection
+        self.recorder.add_subscriber(self._audio_subscriber)
+
+        # Start audio stream immediately if wake-word is enabled (for continuous listening)
+        if self.wakeword.enabled:
+            logger.info("Starting continuous audio stream for wake-word detection...")
+            self.recorder.stream.start_stream()
 
         # Check Ollama availability
         if self.config.ollama.enabled:
@@ -282,12 +355,14 @@ class DictationService:
         # Service is ready
         self.notifier.service_ready()
         mode_str = self.output_mode.value.replace("_", " ").title()
+        wakeword_str = f"{self.config.wakeword.model}" if self.wakeword.enabled else "Disabled"
         logger.info(f"════════════════════════════════════════")
         logger.info(f"  WHISPER INPUT READY")
-        logger.info(f"  Whisper: {self.config.whisper.model.split('/')[-1]}")
-        logger.info(f"  Ollama:  {self.config.ollama.model if self.ollama_enabled else 'Disabled'}")
-        logger.info(f"  Mode:    {mode_str}")
-        logger.info(f"  Hotkeys: Win+Alt, Ctrl+Alt, PgDn+Right, PgDn+Down")
+        logger.info(f"  Whisper:  {self.config.whisper.model.split('/')[-1]}")
+        logger.info(f"  Ollama:   {self.config.ollama.model if self.ollama_enabled else 'Disabled'}")
+        logger.info(f"  Mode:     {mode_str}")
+        logger.info(f"  WakeWord: {wakeword_str}")
+        logger.info(f"  Hotkeys:  Win+Alt, Ctrl+Alt, PgDn+Right, PgDn+Down")
         logger.info(f"════════════════════════════════════════")
 
         # Start hotkey monitoring
@@ -316,8 +391,10 @@ class DictationService:
 
         # Clean up components
         self.hotkey.stop()
+        self.recorder.remove_subscriber(self._audio_subscriber)
         self.recorder.close()
         self.transcriber.unload_model()
+        self.wakeword.unload_model()
         await self.processor.close()
         self.notifier.close()
 
