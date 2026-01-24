@@ -169,6 +169,22 @@ IDLE ──(hotkey pressed)──▶ RECORDING ──(hotkey released)──▶ 
 - Ollama running locally (optional, for text correction)
 - X11 display server (for xdotool/xclip)
 
+## Roadmap
+
+### Streaming Transcription
+
+Currently, transcription happens after the hotkey is released. Future work could add real-time streaming output as you speak.
+
+**Options to explore**:
+
+| Approach | Library | Latency | Notes |
+|----------|---------|---------|-------|
+| VAD-based chunking | [silero-vad](https://github.com/snakers4/silero-vad) + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | ~1-2s | Transcribe on natural pauses |
+| LocalAgreement | [whisper_streaming](https://github.com/ufal/whisper_streaming) | ~3.3s | Emit when 2+ iterations agree |
+| SimulStreaming | [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) | <1s | SOTA 2025, AlignAtt policy |
+
+**Recommended starting point**: Silero-VAD + faster-whisper, since we already have silence detection infrastructure.
+
 ## License
 
 MIT
