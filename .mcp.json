@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "whisper-typer": {
-      "command": "python3",
+      "command": "/home/mizzlr/whisper-typer/.venv/bin/python",
       "args": ["-m", "whisper_typer.mcp_server"],
       "cwd": "/home/mizzlr/whisper-typer/src"
     }

@@ -136,6 +136,6 @@ def whisper_get_recent(count: int = 5) -> str:
 
 
 if __name__ == "__main__":
-    import sys
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8766
-    mcp.run(transport="sse", port=port)
+    # When run standalone (e.g., by Claude Code), use stdio transport
+    # When embedded in service, use SSE transport (set by service.py)
+    mcp.run(transport="stdio")
