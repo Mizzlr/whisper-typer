@@ -1,13 +1,18 @@
 """Main service orchestration."""
 
 import asyncio
+import json
 import logging
 import signal
 import time
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 from .config import Config
+
+# Shared state file for MCP control
+STATE_FILE = Path.home() / ".cache" / "whisper-input" / "state.json"
 from .hotkey import HotkeyMonitor
 from .notifier import Notifier
 from .processor import OllamaProcessor
@@ -41,6 +46,8 @@ class DictationService:
         self.running = False
         self.output_mode = output_mode
         self.ollama_enabled = config.ollama.enabled and not disable_ollama
+        self._last_state_check = 0
+        self._write_mcp_state()  # Initialize state file
 
         # Initialize components
         self.hotkey = HotkeyMonitor(
@@ -58,38 +65,41 @@ class DictationService:
         self._process_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-    def _check_meta_command(self, text: str) -> Optional[str]:
-        """Check if text is a voice meta command and execute it.
+    def _write_mcp_state(self):
+        """Write current state to MCP state file."""
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "output_mode": self.output_mode.value,
+            "ollama_enabled": self.ollama_enabled,
+            "recent_transcriptions": getattr(self, "_recent_transcriptions", []),
+        }
+        STATE_FILE.write_text(json.dumps(state, indent=2))
 
-        Returns status message if command was executed, None otherwise.
-        """
-        text_lower = text.lower().strip()
+    def _read_mcp_state(self):
+        """Read and apply state from MCP state file (if changed externally)."""
+        if not STATE_FILE.exists():
+            return
 
-        # Enable/disable Ollama
-        if any(phrase in text_lower for phrase in ["enable ollama", "enable olama", "ollama on", "olama on"]):
-            self.ollama_enabled = True
-            self.output_mode = OutputMode.BOTH
-            return "Ollama enabled - showing both outputs"
+        try:
+            state = json.loads(STATE_FILE.read_text())
+            new_mode = OutputMode(state.get("output_mode", "ollama_only"))
+            new_ollama = state.get("ollama_enabled", True)
 
-        if any(phrase in text_lower for phrase in ["disable ollama", "disable olama", "ollama off", "olama off"]):
-            self.ollama_enabled = False
-            self.output_mode = OutputMode.WHISPER_ONLY
-            return "Ollama disabled - whisper only mode"
+            if new_mode != self.output_mode or new_ollama != self.ollama_enabled:
+                self.output_mode = new_mode
+                self.ollama_enabled = new_ollama
+                logger.info(f"═══ MCP state change: mode={new_mode.value}, ollama={new_ollama} ═══")
+        except Exception as e:
+            logger.debug(f"Error reading MCP state: {e}")
 
-        # Output mode commands
-        if any(phrase in text_lower for phrase in ["whisper only", "whisper mode", "raw mode"]):
-            self.output_mode = OutputMode.WHISPER_ONLY
-            return "Whisper only mode"
+    def _add_transcription(self, text: str):
+        """Add transcription to recent list for MCP access."""
+        if not hasattr(self, "_recent_transcriptions"):
+            self._recent_transcriptions = []
+        self._recent_transcriptions.append(text)
+        self._recent_transcriptions = self._recent_transcriptions[-20:]  # Keep last 20
+        self._write_mcp_state()
 
-        if any(phrase in text_lower for phrase in ["ollama only", "olama only", "corrected only"]):
-            self.output_mode = OutputMode.OLLAMA_ONLY
-            return "Ollama only mode - no brackets"
-
-        if any(phrase in text_lower for phrase in ["show both", "both modes", "ollama plus whisper", "olama plus whisper"]):
-            self.output_mode = OutputMode.BOTH
-            return "Showing both: Ollama + [Whisper]"
-
-        return None
 
     def _on_hotkey_press(self):
         """Called when hotkey combination is pressed."""
@@ -128,10 +138,13 @@ class DictationService:
         """Process recorded audio: transcribe, fix grammar, type."""
         t_start = time.perf_counter()
 
+        # Check for MCP state changes
+        self._read_mcp_state()
+
         try:
             audio_duration = len(audio_data) / (self.config.audio.sample_rate * 2)  # 2 bytes per sample
             logger.info(f"{'─'*50}")
-            logger.info(f"📊 Processing {len(audio_data):,} bytes ({audio_duration:.1f}s audio)")
+            logger.info(f"Processing {len(audio_data):,} bytes ({audio_duration:.1f}s audio)")
 
             if len(audio_data) < 1000:
                 logger.warning("⚠️  Recording too short, ignoring")
@@ -158,14 +171,6 @@ class DictationService:
             if not text.strip():
                 logger.warning("⚠️  No speech detected")
                 self.notifier.error("No speech detected")
-                return
-
-
-            # Check for voice meta commands (silent - no text output)
-            meta_result = self._check_meta_command(text)
-            if meta_result:
-                logger.info(f"═══ Meta command: {meta_result} ═══")
-                self.notifier.transcription_complete(meta_result)
                 return
 
             # Filter common Whisper hallucinations
@@ -210,9 +215,10 @@ class DictationService:
             if self.ollama_enabled and t_ollama > 0:
                 logger.info(f"  Ollama  [{t_ollama:.0f}ms]: \"{processed_text}\"")
             logger.info(f"  Typed   [{t_type:.0f}ms]: {len(final_text)} chars")
-            logger.info(f"  Total: {t_total:.0f}ms | Audio: {audio_duration:.1f}s | RTF: {t_total/(audio_duration*1000):.2f}x")
+            logger.info(f"  Total: {t_total:.0f}ms | Audio: {audio_duration:.1f}s | Speed: {(audio_duration*1000)/t_total:.1f}x")
 
             self.notifier.transcription_complete(final_text)
+            self._add_transcription(final_text)
 
         except Exception as e:
             logger.exception(f"Processing failed: {e}")

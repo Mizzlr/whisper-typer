@@ -20,8 +20,13 @@ def setup_logging(verbose: bool = False):
     )
     # Reduce noise from libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("transformers").setLevel(logging.WARNING)
+    logging.getLogger("transformers").setLevel(logging.ERROR)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+    # Suppress deprecation warnings from transformers
+    import warnings
+    warnings.filterwarnings("ignore", message=".*return_token_timestamps.*")
+    warnings.filterwarnings("ignore", message=".*torch_dtype.*is deprecated.*")
 
 
 def parse_args():

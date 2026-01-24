@@ -69,8 +69,8 @@ class OllamaProcessor:
             processed_text = result.get("response", "").strip()
 
             if processed_text:
-                logger.info(f"Ollama input:  '{text}'")
-                logger.info(f"Ollama output: '{processed_text}'")
+                logger.debug(f"Ollama input:  '{text}'")
+                logger.debug(f"Ollama output: '{processed_text}'")
                 return processed_text
             else:
                 logger.warning("Ollama returned empty response, using original text")

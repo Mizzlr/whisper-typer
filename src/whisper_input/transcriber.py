@@ -78,7 +78,7 @@ class WhisperTranscriber:
 
         logger.debug(f"Whisper raw result: {result}")
         text = result["text"].strip()
-        logger.info(f"Whisper transcription: '{text}'")
+        logger.debug(f"Whisper transcription: '{text}'")
         return text
 
     def unload_model(self):

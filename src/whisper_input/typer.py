@@ -44,7 +44,7 @@ class TextTyper:
             logger.warning("Empty text, nothing to type")
             return
 
-        logger.info(f"Typing {len(text)} characters")
+        logger.debug(f"Typing {len(text)} characters")
 
         try:
             if self.backend == "ydotool":
