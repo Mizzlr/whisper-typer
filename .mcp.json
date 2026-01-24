@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "whisper-typer": {
+      "command": "python3",
+      "args": ["-m", "whisper_typer.mcp_server"],
+      "cwd": "/home/mizzlr/whisper-typer/src"
+    }
+  }
+}
