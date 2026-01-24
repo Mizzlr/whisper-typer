@@ -9,6 +9,7 @@ hotkey:
   alt_combos:
     - [KEY_LEFTCTRL, KEY_LEFTALT]   # Ctrl+Alt
     - [KEY_RIGHTCTRL, KEY_RIGHTALT] # Right Ctrl+Right Alt
+    - [KEY_PAGEDOWN, KEY_RIGHT]     # Page Down + Right Arrow
 
 audio:
   sample_rate: 16000      # Whisper expects 16kHz
@@ -22,9 +23,9 @@ whisper:
   device: "cuda"          # cuda, cpu, or mps (Mac)
 
 ollama:
-  enabled: false
-  model: "llama3.2:3b"
-  host: "http://localhost:11434"
+  enabled: true
+  model: "qwen2.5:1.5b"
+  host: "http://127.0.0.1:11434"
 
 typer:
   backend: "xdotool"      # xdotool for X11 (respects keyboard layout)

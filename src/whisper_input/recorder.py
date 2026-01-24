@@ -105,6 +105,22 @@ class AudioRecorder:
         # Normalize to [-1, 1] range as float32
         return audio_array.astype(np.float32) / 32768.0
 
+    def is_silent(self, audio_data: bytes, threshold: float = 0.01) -> bool:
+        """Check if audio is mostly silence based on RMS energy.
+
+        Args:
+            audio_data: Raw audio bytes
+            threshold: RMS threshold below which audio is considered silent
+                       (0.01 works well for typical microphone input)
+
+        Returns:
+            True if audio is silent, False if speech detected
+        """
+        audio = self.get_audio_as_numpy(audio_data)
+        rms = np.sqrt(np.mean(audio ** 2))
+        logger.debug(f"Audio RMS energy: {rms:.4f} (threshold: {threshold})")
+        return rms < threshold
+
     def list_devices(self) -> list[dict]:
         """List available audio input devices."""
         if self.audio is None:

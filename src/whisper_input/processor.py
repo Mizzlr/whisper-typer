@@ -1,6 +1,7 @@
 """Ollama text processing for grammar and punctuation."""
 
 import logging
+from collections import deque
 from typing import Optional
 
 import httpx
@@ -9,13 +10,16 @@ from .config import OllamaConfig
 
 logger = logging.getLogger(__name__)
 
-PROMPT_TEMPLATE = """Fix any typos, grammar, and punctuation in the following transcribed speech.
-Add proper capitalization and punctuation marks.
-Preserve the original meaning and tone.
+PROMPT_TEMPLATE = """Fix this speech transcription. Correct:
+- Grammar and punctuation
+- Misspelled names (Ulama→Ollama, Whispher→Whisper, etc.)
+- Technical terms
+
 Output ONLY the corrected text, nothing else.
 
-Text to fix:
-{text}"""
+Text: {text}
+
+Corrected:"""
 
 
 class OllamaProcessor:
@@ -24,6 +28,7 @@ class OllamaProcessor:
     def __init__(self, config: OllamaConfig):
         self.config = config
         self.client: Optional[httpx.AsyncClient] = None
+        self.recent_messages: deque[str] = deque(maxlen=5)  # Keep last 5 messages for context
 
     async def _ensure_client(self):
         """Create HTTP client if needed."""

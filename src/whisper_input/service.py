@@ -86,6 +86,12 @@ class DictationService:
                 self.notifier.error("Recording too short")
                 return
 
+            # Check for silence (prevents Whisper hallucinations like "Thank you")
+            if self.recorder.is_silent(audio_data):
+                logger.warning("Audio is silent, ignoring (prevents hallucination)")
+                self.notifier.error("No speech detected")
+                return
+
             # Convert to numpy array
             audio = self.recorder.get_audio_as_numpy(audio_data)
 
@@ -97,6 +103,18 @@ class DictationService:
 
             if not text.strip():
                 logger.warning("No speech detected")
+                self.notifier.error("No speech detected")
+                return
+
+            # Filter common Whisper hallucinations
+            hallucinations = {
+                "thank you", "thank you.", "thanks.", "thanks",
+                "thanks for watching", "thanks for watching.",
+                "subscribe", "like and subscribe",
+                "you", "bye", "bye.", "goodbye", "goodbye.",
+            }
+            if text.strip().lower() in hallucinations:
+                logger.warning(f"Filtered hallucination: '{text}'")
                 self.notifier.error("No speech detected")
                 return
 
