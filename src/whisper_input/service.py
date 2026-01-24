@@ -121,11 +121,17 @@ class DictationService:
             # Process with Ollama (if enabled)
             processed_text = await self.processor.process(text)
 
+            # Append raw Whisper output in brackets if Ollama changed it
+            if self.config.ollama.enabled and processed_text != text:
+                final_text = f"{processed_text} [{text}]"
+            else:
+                final_text = processed_text
+
             # Type the result
-            logger.info(f"Final text to type: '{processed_text}'")
-            self.typer.type_text(processed_text)
-            logger.info(f"Typing complete ({len(processed_text)} chars)")
-            self.notifier.transcription_complete(processed_text)
+            logger.info(f"Final text to type: '{final_text}'")
+            self.typer.type_text(final_text)
+            logger.info(f"Typing complete ({len(final_text)} chars)")
+            self.notifier.transcription_complete(final_text)
 
         except Exception as e:
             logger.exception(f"Processing failed: {e}")
