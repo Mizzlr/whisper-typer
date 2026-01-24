@@ -76,12 +76,13 @@ class AudioRecorder:
         if self.stream is None:
             self.open_stream()
 
+        # Start stream if not already running (keep it running always)
+        if not self.stream.is_active():
+            self.stream.start_stream()
+
         with self.lock:
             self.buffer = []
             self.is_recording = True
-
-        if not self.stream.is_active():
-            self.stream.start_stream()
 
         logger.info("Recording started")
 
@@ -92,10 +93,7 @@ class AudioRecorder:
             audio_data = b"".join(self.buffer)
             self.buffer = []
 
-        # Don't close the stream - just stop it for reuse
-        if self.stream and self.stream.is_active():
-            self.stream.stop_stream()
-
+        # Keep stream running for instant restart (no stop_stream call)
         logger.info(f"Recording stopped, captured {len(audio_data)} bytes")
         return audio_data
 

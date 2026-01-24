@@ -21,6 +21,7 @@ def setup_logging(verbose: bool = False):
     # Reduce noise from libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("transformers").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
 def parse_args():

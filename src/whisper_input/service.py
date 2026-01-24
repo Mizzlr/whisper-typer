@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import signal
+import time
 from enum import Enum
 from typing import Optional
 
@@ -96,10 +97,13 @@ class DictationService:
             logger.debug(f"Ignoring hotkey press, state is {self.state}")
             return
 
+        t_start = time.perf_counter()
         logger.info("Hotkey pressed - starting recording")
         self.state = ServiceState.RECORDING
         self.notifier.recording_started()
         self.recorder.start()
+        t_elapsed = (time.perf_counter() - t_start) * 1000
+        logger.info(f"Recording active (startup: {t_elapsed:.0f}ms)")
 
     def _on_hotkey_release(self):
         """Called when hotkey combination is released."""
@@ -122,15 +126,21 @@ class DictationService:
 
     async def _process_audio(self, audio_data: bytes):
         """Process recorded audio: transcribe, fix grammar, type."""
+        t_start = time.perf_counter()
+
         try:
+            audio_duration = len(audio_data) / (self.config.audio.sample_rate * 2)  # 2 bytes per sample
+            logger.info(f"{'─'*50}")
+            logger.info(f"📊 Processing {len(audio_data):,} bytes ({audio_duration:.1f}s audio)")
+
             if len(audio_data) < 1000:
-                logger.warning("Recording too short, ignoring")
+                logger.warning("⚠️  Recording too short, ignoring")
                 self.notifier.error("Recording too short")
                 return
 
             # Check for silence (prevents Whisper hallucinations like "Thank you")
             if self.recorder.is_silent(audio_data):
-                logger.warning("Audio is silent, ignoring (prevents hallucination)")
+                logger.warning("⚠️  Audio is silent, ignoring (prevents hallucination)")
                 self.notifier.error("No speech detected")
                 return
 
@@ -138,21 +148,23 @@ class DictationService:
             audio = self.recorder.get_audio_as_numpy(audio_data)
 
             # Transcribe with Whisper
+            t_whisper_start = time.perf_counter()
             text = self.transcriber.transcribe(
                 audio,
                 sample_rate=self.config.audio.sample_rate,
             )
+            t_whisper = (time.perf_counter() - t_whisper_start) * 1000
 
             if not text.strip():
-                logger.warning("No speech detected")
+                logger.warning("⚠️  No speech detected")
                 self.notifier.error("No speech detected")
                 return
 
-            # Check for voice meta commands
+
+            # Check for voice meta commands (silent - no text output)
             meta_result = self._check_meta_command(text)
             if meta_result:
-                logger.info(f"Meta command executed: {meta_result}")
-                self.typer.type_text(f"[{meta_result}]")
+                logger.info(f"═══ Meta command: {meta_result} ═══")
                 self.notifier.transcription_complete(meta_result)
                 return
 
@@ -169,10 +181,13 @@ class DictationService:
                 return
 
             # Process with Ollama (if enabled and not in whisper-only mode)
+            t_ollama_start = time.perf_counter()
             if self.ollama_enabled and self.output_mode != OutputMode.WHISPER_ONLY:
                 processed_text = await self.processor.process(text)
+                t_ollama = (time.perf_counter() - t_ollama_start) * 1000
             else:
                 processed_text = text
+                t_ollama = 0
 
             # Build final output based on mode
             if self.output_mode == OutputMode.BOTH and processed_text != text:
@@ -183,9 +198,20 @@ class DictationService:
                 final_text = processed_text
 
             # Type the result
-            logger.info(f"Final text to type: '{final_text}'")
+            t_type_start = time.perf_counter()
             self.typer.type_text(final_text)
-            logger.info(f"Typing complete ({len(final_text)} chars)")
+            t_type = (time.perf_counter() - t_type_start) * 1000
+
+            t_total = (time.perf_counter() - t_start) * 1000
+
+            # Log with latencies
+            logger.info(f"─── Dictation Complete ───")
+            logger.info(f"  Whisper [{t_whisper:.0f}ms]: \"{text}\"")
+            if self.ollama_enabled and t_ollama > 0:
+                logger.info(f"  Ollama  [{t_ollama:.0f}ms]: \"{processed_text}\"")
+            logger.info(f"  Typed   [{t_type:.0f}ms]: {len(final_text)} chars")
+            logger.info(f"  Total: {t_total:.0f}ms | Audio: {audio_duration:.1f}s | RTF: {t_total/(audio_duration*1000):.2f}x")
+
             self.notifier.transcription_complete(final_text)
 
         except Exception as e:
@@ -229,7 +255,14 @@ class DictationService:
 
         # Service is ready
         self.notifier.service_ready()
-        logger.info("Dictation service ready. Hold Win+Alt to dictate.")
+        mode_str = self.output_mode.value.replace("_", " ").title()
+        logger.info(f"════════════════════════════════════════")
+        logger.info(f"  WHISPER INPUT READY")
+        logger.info(f"  Whisper: {self.config.whisper.model.split('/')[-1]}")
+        logger.info(f"  Ollama:  {self.config.ollama.model if self.ollama_enabled else 'Disabled'}")
+        logger.info(f"  Mode:    {mode_str}")
+        logger.info(f"  Hotkeys: Win+Alt, Ctrl+Alt, PgDn+Right, PgDn+Down")
+        logger.info(f"════════════════════════════════════════")
 
         # Start hotkey monitoring
         try:
