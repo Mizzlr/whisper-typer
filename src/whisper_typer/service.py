@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import signal
+import threading
 import time
 from enum import Enum
 from pathlib import Path
@@ -64,6 +65,7 @@ class DictationService:
         # For async coordination
         self._process_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._mcp_thread: Optional[threading.Thread] = None
 
     def _write_mcp_state(self):
         """Write current state to MCP state file."""
@@ -227,10 +229,28 @@ class DictationService:
         finally:
             self.state = ServiceState.IDLE
 
+    def _start_mcp_server(self, port: int = 8766):
+        """Start MCP server on a background thread."""
+        from .mcp_server import mcp, set_service
+
+        # Connect MCP server to this service for direct state access
+        set_service(self)
+
+        def run_mcp():
+            logger.info(f"Starting MCP server on port {port}")
+            mcp.run(transport="sse", port=port)
+
+        self._mcp_thread = threading.Thread(target=run_mcp, daemon=True)
+        self._mcp_thread.start()
+        logger.info(f"MCP server thread started (port {port})")
+
     async def run(self):
         """Run the dictation service."""
         self._loop = asyncio.get_running_loop()
         self.running = True
+
+        # Start MCP server on background thread
+        self._start_mcp_server(port=8766)
 
         # Set up signal handlers
         for sig in (signal.SIGTERM, signal.SIGINT):

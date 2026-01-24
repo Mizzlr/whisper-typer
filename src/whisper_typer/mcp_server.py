@@ -1,26 +1,32 @@
-"""MCP Server for Whisper Input control."""
+"""MCP Server for WhisperTyper control using FastMCP."""
 
-import asyncio
 import json
-import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Literal, Optional
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from fastmcp import FastMCP
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from .service import DictationService
 
-# Shared state file for IPC with the dictation service
-STATE_FILE = Path.home() / ".cache" / "whisper-input" / "state.json"
+# Shared state file for IPC (fallback when service not connected)
+STATE_FILE = Path.home() / ".cache" / "whisper-typer" / "state.json"
+
+# Reference to the running service (set when embedded in service)
+_service: Optional["DictationService"] = None
 
 # Default state
 DEFAULT_STATE = {
-    "output_mode": "ollama_only",  # ollama_only, whisper_only, both
+    "output_mode": "ollama_only",
     "ollama_enabled": True,
     "recent_transcriptions": [],
 }
+
+
+def set_service(service: "DictationService"):
+    """Set the service reference for direct state access."""
+    global _service
+    _service = service
 
 
 def ensure_state_file():
@@ -31,7 +37,13 @@ def ensure_state_file():
 
 
 def read_state() -> dict:
-    """Read current state."""
+    """Read current state (from service if available, else file)."""
+    if _service is not None:
+        return {
+            "output_mode": _service.output_mode.value,
+            "ollama_enabled": _service.ollama_enabled,
+            "recent_transcriptions": getattr(_service, "_recent_transcriptions", []),
+        }
     ensure_state_file()
     try:
         return json.loads(STATE_FILE.read_text())
@@ -40,7 +52,18 @@ def read_state() -> dict:
 
 
 def write_state(state: dict):
-    """Write state to file."""
+    """Write state (to service if available, else file)."""
+    if _service is not None:
+        from .service import OutputMode
+        mode_map = {
+            "ollama_only": OutputMode.OLLAMA_ONLY,
+            "whisper_only": OutputMode.WHISPER_ONLY,
+            "both": OutputMode.BOTH,
+        }
+        _service.output_mode = mode_map.get(state.get("output_mode", "ollama_only"), OutputMode.OLLAMA_ONLY)
+        _service.ollama_enabled = state.get("ollama_enabled", True)
+        return
+
     ensure_state_file()
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
@@ -53,109 +76,66 @@ def update_state(**kwargs):
     return state
 
 
-# Create MCP server
-server = Server("whisper-input")
+# Create FastMCP server
+mcp = FastMCP("whisper-typer")
 
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available tools."""
-    return [
-        Tool(
-            name="whisper_set_mode",
-            description="Set the output mode for Whisper Input. Modes: 'ollama' (corrected text only), 'whisper' (raw transcription only), 'both' (corrected + [raw] in brackets)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "mode": {
-                        "type": "string",
-                        "enum": ["ollama", "whisper", "both"],
-                        "description": "Output mode to set",
-                    }
-                },
-                "required": ["mode"],
-            },
-        ),
-        Tool(
-            name="whisper_enable_ollama",
-            description="Enable Ollama processing for grammar/spelling correction",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="whisper_disable_ollama",
-            description="Disable Ollama processing, use raw Whisper output only",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="whisper_get_status",
-            description="Get current Whisper Input status and configuration",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="whisper_get_recent",
-            description="Get recent transcriptions",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "count": {
-                        "type": "integer",
-                        "description": "Number of recent transcriptions to return (default: 5)",
-                        "default": 5,
-                    }
-                },
-            },
-        ),
-    ]
+@mcp.tool()
+def whisper_set_mode(mode: Literal["ollama", "whisper", "both"]) -> str:
+    """Set the output mode for WhisperTyper.
+
+    Args:
+        mode: Output mode - 'ollama' (corrected text only), 'whisper' (raw transcription only), 'both' (corrected + [raw] in brackets)
+    """
+    mode_map = {
+        "ollama": "ollama_only",
+        "whisper": "whisper_only",
+        "both": "both",
+    }
+    update_state(output_mode=mode_map.get(mode, "ollama_only"))
+    return f"Output mode set to: {mode}"
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle tool calls."""
+@mcp.tool()
+def whisper_enable_ollama() -> str:
+    """Enable Ollama processing for grammar/spelling correction."""
+    update_state(ollama_enabled=True, output_mode="ollama_only")
+    return "Ollama enabled. Mode set to: ollama"
 
-    if name == "whisper_set_mode":
-        mode = arguments.get("mode", "ollama")
-        mode_map = {
-            "ollama": "ollama_only",
-            "whisper": "whisper_only",
-            "both": "both",
-        }
-        state = update_state(output_mode=mode_map.get(mode, "ollama_only"))
-        return [TextContent(type="text", text=f"Output mode set to: {mode}")]
 
-    elif name == "whisper_enable_ollama":
-        state = update_state(ollama_enabled=True, output_mode="ollama_only")
-        return [TextContent(type="text", text="Ollama enabled. Mode set to: ollama")]
+@mcp.tool()
+def whisper_disable_ollama() -> str:
+    """Disable Ollama processing, use raw Whisper output only."""
+    update_state(ollama_enabled=False, output_mode="whisper_only")
+    return "Ollama disabled. Mode set to: whisper"
 
-    elif name == "whisper_disable_ollama":
-        state = update_state(ollama_enabled=False, output_mode="whisper_only")
-        return [TextContent(type="text", text="Ollama disabled. Mode set to: whisper")]
 
-    elif name == "whisper_get_status":
-        state = read_state()
-        mode_display = state.get("output_mode", "unknown").replace("_", " ").title()
-        status = f"""Whisper Input Status:
+@mcp.tool()
+def whisper_get_status() -> str:
+    """Get current WhisperTyper status and configuration."""
+    state = read_state()
+    mode_display = state.get("output_mode", "unknown").replace("_", " ").title()
+    return f"""WhisperTyper Status:
 - Output Mode: {mode_display}
 - Ollama Enabled: {state.get('ollama_enabled', False)}
 - Recent Transcriptions: {len(state.get('recent_transcriptions', []))}"""
-        return [TextContent(type="text", text=status)]
-
-    elif name == "whisper_get_recent":
-        count = arguments.get("count", 5)
-        state = read_state()
-        recent = state.get("recent_transcriptions", [])[-count:]
-        if not recent:
-            return [TextContent(type="text", text="No recent transcriptions.")]
-        text = "Recent transcriptions:\n" + "\n".join(f"- {t}" for t in recent)
-        return [TextContent(type="text", text=text)]
-
-    return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 
-async def main():
-    """Run the MCP server."""
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+@mcp.tool()
+def whisper_get_recent(count: int = 5) -> str:
+    """Get recent transcriptions.
+
+    Args:
+        count: Number of recent transcriptions to return (default: 5)
+    """
+    state = read_state()
+    recent = state.get("recent_transcriptions", [])[-count:]
+    if not recent:
+        return "No recent transcriptions."
+    return "Recent transcriptions:\n" + "\n".join(f"- {t}" for t in recent)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8766
+    mcp.run(transport="sse", port=port)
