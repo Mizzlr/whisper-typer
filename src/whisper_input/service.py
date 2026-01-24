@@ -24,13 +24,22 @@ class ServiceState(Enum):
     PROCESSING = "processing"
 
 
+class OutputMode(Enum):
+    """Output mode for transcription."""
+    BOTH = "both"           # Ollama output + [Whisper raw] in brackets
+    WHISPER_ONLY = "whisper_only"  # Only raw Whisper output
+    OLLAMA_ONLY = "ollama_only"    # Only Ollama output (no brackets)
+
+
 class DictationService:
     """Main service that orchestrates all components."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, output_mode: OutputMode = OutputMode.OLLAMA_ONLY, disable_ollama: bool = False):
         self.config = config
         self.state = ServiceState.IDLE
         self.running = False
+        self.output_mode = output_mode
+        self.ollama_enabled = config.ollama.enabled and not disable_ollama
 
         # Initialize components
         self.hotkey = HotkeyMonitor(
@@ -47,6 +56,39 @@ class DictationService:
         # For async coordination
         self._process_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _check_meta_command(self, text: str) -> Optional[str]:
+        """Check if text is a voice meta command and execute it.
+
+        Returns status message if command was executed, None otherwise.
+        """
+        text_lower = text.lower().strip()
+
+        # Enable/disable Ollama
+        if any(phrase in text_lower for phrase in ["enable ollama", "enable olama", "ollama on", "olama on"]):
+            self.ollama_enabled = True
+            self.output_mode = OutputMode.BOTH
+            return "Ollama enabled - showing both outputs"
+
+        if any(phrase in text_lower for phrase in ["disable ollama", "disable olama", "ollama off", "olama off"]):
+            self.ollama_enabled = False
+            self.output_mode = OutputMode.WHISPER_ONLY
+            return "Ollama disabled - whisper only mode"
+
+        # Output mode commands
+        if any(phrase in text_lower for phrase in ["whisper only", "whisper mode", "raw mode"]):
+            self.output_mode = OutputMode.WHISPER_ONLY
+            return "Whisper only mode"
+
+        if any(phrase in text_lower for phrase in ["ollama only", "olama only", "corrected only"]):
+            self.output_mode = OutputMode.OLLAMA_ONLY
+            return "Ollama only mode - no brackets"
+
+        if any(phrase in text_lower for phrase in ["show both", "both modes", "ollama plus whisper", "olama plus whisper"]):
+            self.output_mode = OutputMode.BOTH
+            return "Showing both: Ollama + [Whisper]"
+
+        return None
 
     def _on_hotkey_press(self):
         """Called when hotkey combination is pressed."""
@@ -106,6 +148,14 @@ class DictationService:
                 self.notifier.error("No speech detected")
                 return
 
+            # Check for voice meta commands
+            meta_result = self._check_meta_command(text)
+            if meta_result:
+                logger.info(f"Meta command executed: {meta_result}")
+                self.typer.type_text(f"[{meta_result}]")
+                self.notifier.transcription_complete(meta_result)
+                return
+
             # Filter common Whisper hallucinations
             hallucinations = {
                 "thank you", "thank you.", "thanks.", "thanks",
@@ -118,12 +168,17 @@ class DictationService:
                 self.notifier.error("No speech detected")
                 return
 
-            # Process with Ollama (if enabled)
-            processed_text = await self.processor.process(text)
+            # Process with Ollama (if enabled and not in whisper-only mode)
+            if self.ollama_enabled and self.output_mode != OutputMode.WHISPER_ONLY:
+                processed_text = await self.processor.process(text)
+            else:
+                processed_text = text
 
-            # Append raw Whisper output in brackets if Ollama changed it
-            if self.config.ollama.enabled and processed_text != text:
+            # Build final output based on mode
+            if self.output_mode == OutputMode.BOTH and processed_text != text:
                 final_text = f"{processed_text} [{text}]"
+            elif self.output_mode == OutputMode.WHISPER_ONLY:
+                final_text = text
             else:
                 final_text = processed_text
 

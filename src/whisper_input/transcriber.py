@@ -73,7 +73,7 @@ class WhisperTranscriber:
 
         result = self.pipe(
             {"raw": audio, "sampling_rate": sample_rate},
-            return_timestamps=False,
+            return_timestamps=True,  # Required for audio > 30 seconds
         )
 
         logger.debug(f"Whisper raw result: {result}")

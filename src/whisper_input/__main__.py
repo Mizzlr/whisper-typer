@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
-from .service import DictationService
+from .service import DictationService, OutputMode
 
 
 def setup_logging(verbose: bool = False):
@@ -47,6 +47,17 @@ def parse_args():
         "--test-hotkey",
         action="store_true",
         help="Test hotkey detection and exit",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["ollama", "whisper", "both"],
+        default="ollama",
+        help="Output mode: ollama (default), whisper (raw only), both (corrected + [raw])",
+    )
+    parser.add_argument(
+        "--no-ollama",
+        action="store_true",
+        help="Disable Ollama processing entirely",
     )
     return parser.parse_args()
 
@@ -110,8 +121,16 @@ def main():
     # Load configuration
     config = Config.load(args.config)
 
+    # Map CLI mode to OutputMode
+    mode_map = {
+        "ollama": OutputMode.OLLAMA_ONLY,
+        "whisper": OutputMode.WHISPER_ONLY,
+        "both": OutputMode.BOTH,
+    }
+    output_mode = mode_map[args.mode]
+
     # Create and run service
-    service = DictationService(config)
+    service = DictationService(config, output_mode=output_mode, disable_ollama=args.no_ollama)
 
     try:
         asyncio.run(service.run())
