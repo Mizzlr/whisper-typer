@@ -133,18 +133,67 @@ Available MCP tools:
 ## Architecture
 
 ```
-whisper_typer/
-├── service.py      # Main orchestration, state machine
-├── hotkey.py       # evdev-based hotkey detection
-├── recorder.py     # PyAudio recording with always-running stream
-├── transcriber.py  # Whisper ASR via HuggingFace transformers
-├── processor.py    # Ollama integration for correction
-├── typer.py        # xdotool + xclip for clipboard paste
-├── mcp_server.py   # MCP server for external control
-└── notifier.py     # Desktop notifications
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              WhisperTyper                                   │
+│                                                                             │
+│  ┌──────────────┐         ┌──────────────────────────────────────────────┐  │
+│  │   Hotkey     │ trigger │              Service (State Machine)         │  │
+│  │   Detector   │────────▶│                                              │  │
+│  │  (evdev)     │         │   ┌───────┐    ┌───────────┐    ┌───────┐   │  │
+│  └──────────────┘         │   │ IDLE  │───▶│ RECORDING │───▶│PROCESS│   │  │
+│                           │   └───────┘    └───────────┘    └───────┘   │  │
+│                           │       ▲                              │       │  │
+│                           │       └──────────────────────────────┘       │  │
+│                           └──────────────────────────────────────────────┘  │
+│                                          │                                  │
+│                    ┌─────────────────────┼─────────────────────┐            │
+│                    ▼                     ▼                     ▼            │
+│             ┌────────────┐        ┌────────────┐        ┌────────────┐      │
+│             │  Recorder  │        │Transcriber │        │ Processor  │      │
+│             │ (PyAudio)  │───────▶│ (Whisper)  │───────▶│ (Ollama)   │      │
+│             │            │  WAV   │            │  text  │            │      │
+│             └────────────┘        └────────────┘        └────────────┘      │
+│                                                                │            │
+│                                                                ▼            │
+│  ┌──────────────┐                                       ┌────────────┐      │
+│  │  MCP Server  │◀─ ─ ─ ─ ─ ─ state sync ─ ─ ─ ─ ─ ─ ─ ▶│   Typer    │      │
+│  │(Claude Code) │                                       │(xdotool/   │      │
+│  └──────────────┘                                       │ xclip)     │      │
+│        │                                                └────────────┘      │
+│        │                                                       │            │
+│        ▼                                                       ▼            │
+│  ┌──────────────┐                                       ┌────────────┐      │
+│  │   External   │                                       │  Notifier  │      │
+│  │   Control    │                                       │ (libnotify)│      │
+│  └──────────────┘                                       └────────────┘      │
+│                                                                │            │
+└────────────────────────────────────────────────────────────────┼────────────┘
+                                                                 ▼
+                                                         ┌──────────────┐
+                                                         │  Any App     │
+                                                         │ (clipboard   │
+                                                         │   paste)     │
+                                                         └──────────────┘
 ```
 
-State machine: `IDLE → RECORDING → PROCESSING → IDLE`
+### Components
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Service | `service.py` | Main orchestration, state machine |
+| Hotkey | `hotkey.py` | evdev-based hotkey detection |
+| Recorder | `recorder.py` | PyAudio with always-running stream (~10ms latency) |
+| Transcriber | `transcriber.py` | Whisper ASR via HuggingFace transformers |
+| Processor | `processor.py` | Ollama integration for grammar/spelling correction |
+| Typer | `typer.py` | xdotool + xclip for clipboard paste output |
+| MCP Server | `mcp_server.py` | External control from Claude Code |
+| Notifier | `notifier.py` | Desktop notifications via libnotify |
+
+### State Machine
+
+```
+IDLE ──(hotkey pressed)──▶ RECORDING ──(hotkey released)──▶ PROCESSING ──(done)──▶ IDLE
+```
 
 ## Requirements
 
