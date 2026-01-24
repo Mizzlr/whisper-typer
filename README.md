@@ -185,6 +185,20 @@ Currently, transcription happens after the hotkey is released. Future work could
 
 **Recommended starting point**: Silero-VAD + faster-whisper, since we already have silence detection infrastructure.
 
+### Wake Word Detection
+
+Replace hotkey activation with voice-triggered recording using a wake word like "Hey Claude".
+
+**Options to explore**:
+
+| Library | Notes |
+|---------|-------|
+| [Porcupine](https://github.com/Picovoice/porcupine) | Commercial, custom wake words, low latency |
+| [OpenWakeWord](https://github.com/dscripka/openWakeWord) | Open source, pre-trained models, custom training |
+| [Whisper-based](https://github.com/snakers4/silero-vad) | Use VAD + small Whisper model to detect phrase |
+
+**Recommended starting point**: OpenWakeWord - open source, supports custom wake words, runs on CPU.
+
 ## License
 
 MIT
