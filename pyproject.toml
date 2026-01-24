@@ -1,5 +1,5 @@
 [project]
-name = "whisper-input"
+name = "whisper-typer"
 version = "0.1.0"
 description = "Speech-to-text dictation service with hotkey activation"
 requires-python = ">=3.10"
@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-whisper-input = "whisper_input.__main__:main"
+whisper-typer = "whisper_typer.__main__:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

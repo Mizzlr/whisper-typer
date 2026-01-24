@@ -12,7 +12,7 @@ from typing import Optional
 from .config import Config
 
 # Shared state file for MCP control
-STATE_FILE = Path.home() / ".cache" / "whisper-input" / "state.json"
+STATE_FILE = Path.home() / ".cache" / "whisper-typer" / "state.json"
 from .hotkey import HotkeyMonitor
 from .notifier import Notifier
 from .processor import OllamaProcessor

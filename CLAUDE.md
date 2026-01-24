@@ -1,4 +1,4 @@
-# Whisper Input
+# WhisperTyper
 
 Speech-to-text dictation service for Linux using Whisper and Ollama.
 
@@ -18,17 +18,17 @@ Speech-to-text dictation service for Linux using Whisper and Ollama.
 - **Clipboard paste** instead of character-by-character typing (works with Dvorak)
 - **Always-running audio stream** for instant recording start (~10ms latency)
 - **Silence detection** via RMS energy to prevent Whisper hallucinations
-- **State file sync** (`~/.cache/whisper-input/state.json`) for MCP control
+- **State file sync** (`~/.cache/whisper-typer/state.json`) for MCP control
 
 ## Running
 
 ```bash
 # Development
-cd src && python3 -m whisper_input --verbose
+cd src && python3 -m whisper_typer --verbose
 
 # Service
-systemctl --user start whisper-input.service
-journalctl --user -u whisper-input.service -f
+systemctl --user start whisper-typer.service
+journalctl --user -u whisper-typer.service -f
 ```
 
 ## CLI Options

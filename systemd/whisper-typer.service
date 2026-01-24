@@ -1,13 +1,12 @@
 [Unit]
-Description=Whisper Input - Speech to Text Dictation
-Documentation=https://github.com/your-repo/whisper-input
+Description=Whisper Typer - Speech to Text Dictation
+Documentation=https://github.com/Mizzlr/whisper-typer
 After=graphical-session.target
-Wants=ydotoold.service
 
 [Service]
 Type=simple
-ExecStart=/home/mizzlr/whispher_input/.venv/bin/python -m whisper_input
-WorkingDirectory=/home/mizzlr/whispher_input
+ExecStart=/home/mizzlr/whisper-typer/.venv/bin/python -m whisper_typer
+WorkingDirectory=/home/mizzlr/whisper-typer
 Restart=on-failure
 RestartSec=5
 
