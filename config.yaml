@@ -10,6 +10,7 @@ hotkey:
     - [KEY_LEFTCTRL, KEY_LEFTALT]   # Ctrl+Alt
     - [KEY_RIGHTCTRL, KEY_RIGHTALT] # Right Ctrl+Right Alt
     - [KEY_PAGEDOWN, KEY_RIGHT]     # Page Down + Right Arrow
+    - [KEY_PAGEDOWN, KEY_DOWN]      # Page Down + Down Arrow
 
 audio:
   sample_rate: 16000      # Whisper expects 16kHz
