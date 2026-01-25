@@ -1,12 +1,101 @@
 """Text typing using ydotool/dotool/xdotool."""
 
 import logging
+import os
 import shutil
 import subprocess
+from pathlib import Path
 
 from .config import TyperConfig
 
 logger = logging.getLogger(__name__)
+
+
+def detect_display() -> tuple[str | None, str | None]:
+    """
+    Detect the active X11 display and Xauthority file.
+
+    Returns:
+        Tuple of (DISPLAY, XAUTHORITY) or (None, None) if not found.
+    """
+    # Check if current DISPLAY already works
+    current_display = os.environ.get("DISPLAY")
+    current_xauth = os.environ.get("XAUTHORITY")
+
+    if current_display and _test_display(current_display, current_xauth):
+        logger.debug(f"Current DISPLAY={current_display} is working")
+        return current_display, current_xauth
+
+    # Try to detect from running X sessions
+    uid = os.getuid()
+
+    # Common Xauthority locations
+    xauth_paths = [
+        f"/run/user/{uid}/gdm/Xauthority",
+        f"/run/user/{uid}/.mutter-Xwaylandauth.*",
+        os.path.expanduser("~/.Xauthority"),
+    ]
+
+    # Find valid Xauthority
+    xauthority = None
+    for path_pattern in xauth_paths:
+        if "*" in path_pattern:
+            # Glob pattern
+            matches = list(Path(path_pattern).parent.glob(Path(path_pattern).name))
+            if matches:
+                xauthority = str(matches[0])
+                break
+        elif os.path.exists(path_pattern):
+            xauthority = path_pattern
+            break
+
+    # Try displays :0 through :3
+    for display_num in range(4):
+        display = f":{display_num}"
+        if _test_display(display, xauthority):
+            logger.info(f"Detected working display: DISPLAY={display}, XAUTHORITY={xauthority}")
+            return display, xauthority
+
+    # Try to get display from 'w' command (shows logged-in users and their displays)
+    try:
+        result = subprocess.run(
+            ["w", "-hs"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                possible_display = parts[2]
+                if possible_display.startswith(":"):
+                    if _test_display(possible_display, xauthority):
+                        logger.info(f"Detected display from 'w': {possible_display}")
+                        return possible_display, xauthority
+    except Exception as e:
+        logger.debug(f"Failed to detect display from 'w' command: {e}")
+
+    logger.warning("Could not detect a working X11 display")
+    return None, None
+
+
+def _test_display(display: str, xauthority: str | None) -> bool:
+    """Test if a display is accessible."""
+    env = os.environ.copy()
+    env["DISPLAY"] = display
+    if xauthority:
+        env["XAUTHORITY"] = xauthority
+
+    try:
+        result = subprocess.run(
+            ["xdotool", "getactivewindow"],
+            capture_output=True,
+            env=env,
+            timeout=2
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 class TextTyper:
@@ -15,7 +104,24 @@ class TextTyper:
     def __init__(self, config: TyperConfig):
         self.config = config
         self.backend = self._detect_backend()
+        self._display_env: dict[str, str] | None = None
         logger.info(f"Using typing backend: {self.backend}")
+
+        # Pre-detect display for X11-based backends
+        if self.backend == "xdotool":
+            self._setup_display_env()
+
+    def _setup_display_env(self):
+        """Setup display environment for X11 tools."""
+        display, xauthority = detect_display()
+        if display:
+            self._display_env = os.environ.copy()
+            self._display_env["DISPLAY"] = display
+            if xauthority:
+                self._display_env["XAUTHORITY"] = xauthority
+            logger.info(f"X11 environment: DISPLAY={display}, XAUTHORITY={xauthority}")
+        else:
+            logger.warning("No working X11 display found, xdotool may fail")
 
     def _detect_backend(self) -> str:
         """Detect available typing backend."""
@@ -97,12 +203,19 @@ class TextTyper:
         """Type using xdotool (X11 only) via clipboard for instant paste."""
         import time
 
+        # Re-detect display if not set or if it stops working
+        if not self._display_env:
+            self._setup_display_env()
+            if not self._display_env:
+                raise RuntimeError("No working X11 display available")
+
         # Copy text to clipboard
         subprocess.run(
             ["xclip", "-selection", "clipboard"],
             input=text,
             text=True,
             check=True,
+            env=self._display_env,
         )
 
         # Small delay to ensure clipboard is ready
@@ -113,6 +226,7 @@ class TextTyper:
             ["xdotool", "key", "--clearmodifiers", "ctrl+shift+v"],
             check=True,
             capture_output=True,
+            env=self._display_env,
         )
 
     def check_backend_ready(self) -> bool:
