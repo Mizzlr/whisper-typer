@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 PROMPT_TEMPLATE = """Fix this speech transcription. Correct:
 - Grammar and punctuation
-- Misspelled names (Ulama→Ollama, Whispher→Whisper, etc.)
+- Misspelled names
 - Technical terms
 
 Output ONLY the corrected text, nothing else.
