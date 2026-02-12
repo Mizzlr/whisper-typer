@@ -37,6 +37,9 @@ class KokoroTTS:
         self._speak_lock = asyncio.Lock()
         self._playback_done = threading.Event()
         self._playback_done.set()  # Not playing initially
+        # Serializes all sounddevice operations (play/wait/stop) to prevent
+        # PortAudio double-free when cancel races with playback teardown.
+        self._sd_lock = threading.Lock()
 
     @property
     def is_loaded(self) -> bool:
@@ -169,15 +172,20 @@ class KokoroTTS:
         )
 
     async def _play_audio(self, samples, sample_rate: int):
-        """Play audio samples through speakers with proper cancellation."""
+        """Play audio samples through speakers with proper cancellation.
+
+        Holds _sd_lock during the entire play+wait cycle to prevent a
+        concurrent sd.stop() from racing with PortAudio stream teardown.
+        """
         import sounddevice as sd
 
         self._playback_done.clear()
 
         def _play():
             try:
-                sd.play(samples, sample_rate)
-                sd.wait()
+                with self._sd_lock:
+                    sd.play(samples, sample_rate)
+                    sd.wait()
             except Exception:
                 pass
             finally:
@@ -186,16 +194,22 @@ class KokoroTTS:
         await asyncio.to_thread(_play)
 
     def cancel(self):
-        """Cancel current speech immediately."""
+        """Cancel current speech immediately.
+
+        Sets the cancel event first (so the speak loop stops between sentences),
+        then acquires _sd_lock to call sd.stop() safely — this blocks until
+        any in-progress sd.play()+sd.wait() finishes or the stop takes effect.
+        """
         self._cancel_event.set()
         try:
             import sounddevice as sd
 
-            sd.stop()
+            with self._sd_lock:
+                sd.stop()
         except Exception:
             pass
-        # Wait for playback thread to finish (max 100ms)
-        self._playback_done.wait(timeout=0.1)
+        # Wait for the _play thread to fully exit (lock released + finally block)
+        self._playback_done.wait(timeout=0.5)
         self._speaking = False
         logger.info("TTS cancelled")
 
