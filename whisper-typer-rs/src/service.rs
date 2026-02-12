@@ -7,8 +7,32 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
+use crate::notifier::Notifier;
+use crate::processor::OllamaProcessor;
 use crate::recorder::AudioRecorder;
 use crate::transcriber::WhisperTranscriber;
+use crate::typer::TextTyper;
+
+/// Output mode: what gets typed into the active window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMode {
+    /// Only Ollama-corrected text
+    Ollama,
+    /// Only raw Whisper transcription
+    Whisper,
+    /// Corrected text + [raw] in brackets
+    Both,
+}
+
+impl OutputMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "whisper" => Self::Whisper,
+            "both" => Self::Both,
+            _ => Self::Ollama,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
@@ -32,21 +56,36 @@ pub struct DictationService {
     state: ServiceState,
     recorder: AudioRecorder,
     transcriber: WhisperTranscriber,
+    processor: OllamaProcessor,
+    typer: TextTyper,
+    notifier: Notifier,
+    output_mode: OutputMode,
 }
 
 impl DictationService {
-    pub fn new(config: Config, transcriber: WhisperTranscriber) -> Self {
+    pub fn new(
+        config: Config,
+        transcriber: WhisperTranscriber,
+        output_mode: OutputMode,
+    ) -> Self {
         let recorder = AudioRecorder::new(
             config.audio.clone(),
             config.recording.clone(),
             config.silence.clone(),
         );
+        let processor = OllamaProcessor::new(config.ollama.clone());
+        let typer = TextTyper::new(&config.typer);
+        let notifier = Notifier::new(config.feedback.notifications);
 
         Self {
             config,
             state: ServiceState::Idle,
             recorder,
             transcriber,
+            processor,
+            typer,
+            notifier,
+            output_mode,
         }
     }
 
@@ -63,7 +102,7 @@ impl DictationService {
             hotkey_monitor.run().await;
         });
 
-        info!("Service ready — press hotkey to start recording");
+        info!("Service ready — press hotkey to start recording (mode: {:?})", self.output_mode);
 
         // Auto-stop poll interval
         let mut auto_stop_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
@@ -131,21 +170,56 @@ impl DictationService {
 
         // Transcribe with Whisper (blocking — runs on tokio thread pool)
         let transcriber = self.transcriber.clone();
-        match tokio::task::spawn_blocking(move || transcriber.transcribe(&samples)).await {
+        let raw_text = match tokio::task::spawn_blocking(move || transcriber.transcribe(&samples)).await {
             Ok(Ok(result)) => {
                 info!(
                     "Transcription ({:.0}ms): \"{}\"",
                     result.latency_ms, result.text
                 );
-                // TODO Phase 3: Process with Ollama, then type with arboard+enigo
+                result.text
             }
             Ok(Err(e)) => {
                 warn!("Transcription failed: {e}");
+                self.state = ServiceState::Idle;
+                info!("State: PROCESSING → IDLE");
+                return;
             }
             Err(e) => {
                 warn!("Transcription task panicked: {e}");
+                self.state = ServiceState::Idle;
+                info!("State: PROCESSING → IDLE");
+                return;
             }
+        };
+
+        if raw_text.is_empty() {
+            info!("Empty transcription, returning to IDLE");
+            self.state = ServiceState::Idle;
+            info!("State: PROCESSING → IDLE");
+            return;
         }
+
+        // Process through Ollama + type output based on mode
+        let output = match self.output_mode {
+            OutputMode::Whisper => {
+                raw_text.clone()
+            }
+            OutputMode::Ollama => {
+                let corrected = self.processor.process(&raw_text).await;
+                info!("Ollama corrected: \"{}\"", corrected);
+                corrected
+            }
+            OutputMode::Both => {
+                let corrected = self.processor.process(&raw_text).await;
+                info!("Ollama corrected: \"{}\"", corrected);
+                format!("{corrected} [{raw_text}]")
+            }
+        };
+
+        // Type into active window (blocking — enigo/xdotool uses X11 calls)
+        self.typer.type_text(&output);
+
+        self.notifier.notify("Whisper Typer", &output);
 
         self.state = ServiceState::Idle;
         info!("State: PROCESSING → IDLE");

@@ -2,9 +2,12 @@
 
 mod config;
 mod hotkey;
+mod notifier;
+mod processor;
 mod recorder;
 mod service;
 mod transcriber;
+mod typer;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -17,6 +20,14 @@ struct Args {
     /// Path to config.yaml
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Output mode: ollama, whisper, or both
+    #[arg(short, long, default_value = "ollama")]
+    mode: String,
+
+    /// Disable Ollama processing (same as --mode whisper)
+    #[arg(long)]
+    no_ollama: bool,
 
     /// Enable verbose (debug) logging
     #[arg(short, long)]
@@ -41,6 +52,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::Config::load(args.config.as_deref());
     info!("Config loaded: {:?}", config.hotkey);
 
+    // Determine output mode
+    let output_mode = if args.no_ollama {
+        service::OutputMode::Whisper
+    } else {
+        service::OutputMode::from_str(&args.mode)
+    };
+    info!("Output mode: {:?}", output_mode);
+
     // Load Whisper model (blocking, takes a few seconds)
     info!("Loading Whisper model...");
     let transcriber = tokio::task::spawn_blocking({
@@ -50,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await??;
 
     // Run the service
-    let mut service = service::DictationService::new(config, transcriber);
+    let mut service = service::DictationService::new(config, transcriber, output_mode);
     service.run().await?;
 
     Ok(())
