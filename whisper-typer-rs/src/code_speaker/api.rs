@@ -186,13 +186,13 @@ async fn handle_set_voice(
 }
 
 async fn handle_cancel(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
-    state.tts.cancel();
+    state.tts.interrupt();
     Json(SimpleResponse::ok("cancelled"))
 }
 
 async fn handle_cancel_reminder(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
     let count = state.reminder.cancel();
-    state.tts.cancel();
+    state.tts.interrupt();
     Json(SimpleResponse {
         reminders_fired: Some(count),
         ..SimpleResponse::ok("cancelled")

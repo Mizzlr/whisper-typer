@@ -42,11 +42,11 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize logging
+    // Initialize logging (suppress noisy ort/rmcp internals)
     let filter = if args.verbose {
-        EnvFilter::new("debug")
+        EnvFilter::new("debug,ort=info,rmcp=info")
     } else {
-        EnvFilter::new("info")
+        EnvFilter::new("info,ort=warn,rmcp=warn")
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
