@@ -67,16 +67,16 @@ class TTSRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "empty text"}, 400)
                 return
 
+            preview = text[:80].replace('\n', ' ')
             logger.info(
-                f"HTTP /speak: event={event_type} text={len(text)} chars summarize={summarize}"
+                f"HTTP /speak [{event_type}]: \"{preview}{'…' if len(text) > 80 else ''}\" ({len(text)} chars, summarize={summarize})"
             )
 
             # Fire-and-forget: schedule TTS on the event loop
-            future = asyncio.run_coroutine_threadsafe(
+            asyncio.run_coroutine_threadsafe(
                 self.server.handle_speak(text, summarize, event_type, start_reminder),
                 self.server.loop,
             )
-            logger.info(f"HTTP /speak: coroutine scheduled, future={future}")
             self._send_json({"status": "speaking"})
 
         elif self.path == "/set-voice":
@@ -182,8 +182,11 @@ class TTSHTTPServer(HTTPServer):
             # Wait for voice input to finish before playing audio
             if self.voice_idle and not self.voice_idle.is_set():
                 logger.info("TTS deferred — waiting for voice input to complete")
-                await self.voice_idle.wait()
-                logger.info("TTS resumed — voice input complete")
+                try:
+                    await asyncio.wait_for(self.voice_idle.wait(), timeout=60.0)
+                    logger.info("TTS resumed — voice input complete")
+                except asyncio.TimeoutError:
+                    logger.warning("TTS gate timeout (60s) — speaking anyway")
 
             # Speak (lock is inside speak())
             result: SpeakResult = await self.tts.speak(spoken_text)

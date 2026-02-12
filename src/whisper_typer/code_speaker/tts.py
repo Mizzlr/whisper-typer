@@ -174,8 +174,8 @@ class KokoroTTS:
     async def _play_audio(self, samples, sample_rate: int):
         """Play audio samples through speakers with proper cancellation.
 
-        Holds _sd_lock during the entire play+wait cycle to prevent a
-        concurrent sd.stop() from racing with PortAudio stream teardown.
+        Uses _sd_lock only around sd.play() to prevent overlapping playback.
+        sd.wait() runs outside the lock so cancel() can call sd.stop() immediately.
         """
         import sounddevice as sd
 
@@ -185,7 +185,8 @@ class KokoroTTS:
             try:
                 with self._sd_lock:
                     sd.play(samples, sample_rate)
-                    sd.wait()
+                # Wait outside the lock — allows cancel() to call sd.stop() immediately
+                sd.wait()
             except Exception:
                 pass
             finally:
@@ -197,19 +198,17 @@ class KokoroTTS:
         """Cancel current speech immediately.
 
         Sets the cancel event first (so the speak loop stops between sentences),
-        then acquires _sd_lock to call sd.stop() safely — this blocks until
-        any in-progress sd.play()+sd.wait() finishes or the stop takes effect.
+        then calls sd.stop() to interrupt playback. sd.stop() is safe to call
+        from any thread — it signals PortAudio to stop the stream.
         """
         self._cancel_event.set()
         try:
             import sounddevice as sd
-
-            with self._sd_lock:
-                sd.stop()
+            sd.stop()
         except Exception:
             pass
-        # Wait for the _play thread to fully exit (lock released + finally block)
-        self._playback_done.wait(timeout=0.5)
+        # Wait for the _play thread to fully exit
+        self._playback_done.wait(timeout=0.2)
         self._speaking = False
         logger.info("TTS cancelled")
 
