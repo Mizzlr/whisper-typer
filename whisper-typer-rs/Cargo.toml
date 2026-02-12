@@ -59,7 +59,7 @@ tokio-util = "0.7"
 axum = "0.8"
 
 # TTS (Kokoro ONNX) - native implementation
-ort = "=2.0.0-rc.11"
+ort = { version = "=2.0.0-rc.11", features = ["cuda"] }
 misaki-rs = "0.3"
 ndarray = "0.17"
 ndarray-npy = "0.10"

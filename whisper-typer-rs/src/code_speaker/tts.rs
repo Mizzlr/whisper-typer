@@ -22,6 +22,8 @@ use rodio::{OutputStream, OutputStreamBuilder, Sink};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tracing::{debug, info, warn};
 
+use ort::ep::ExecutionProvider;
+
 use crate::config::TTSConfig;
 
 const SAMPLE_RATE: u32 = 24000;
@@ -165,14 +167,24 @@ impl KokoroTtsEngine {
         self.voices = load_voices(&self.voices_path)?;
         info!("Loaded {} voices", self.voices.len());
 
-        // 3. Load ONNX model
+        // 3. Load ONNX model (prefer GPU via CUDA, falls back to CPU)
         info!("Loading ONNX model from {}", self.model_path.display());
-        let session = ort::session::Session::builder()
+        let cuda_ep = ort::ep::CUDA::default();
+        let cuda_available = cuda_ep.is_available().unwrap_or(false);
+        info!("ONNX CUDA EP available: {cuda_available}");
+        let mut builder = ort::session::Session::builder()
             .map_err(|e| format!("Failed to create ONNX session builder: {e}"))?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
             .map_err(|e| format!("Failed to set optimization level: {e}"))?
             .with_intra_threads(4)
-            .map_err(|e| format!("Failed to set thread count: {e}"))?
+            .map_err(|e| format!("Failed to set thread count: {e}"))?;
+        if cuda_available {
+            builder = builder
+                .with_execution_providers([cuda_ep.build()])
+                .map_err(|e| format!("Failed to configure CUDA EP: {e}"))?;
+            info!("ONNX session configured with CUDA execution provider");
+        }
+        let session = builder
             .commit_from_file(&self.model_path)
             .map_err(|e| format!("Failed to load ONNX model: {e}"))?;
         *self.session.lock().unwrap() = Some(session);
