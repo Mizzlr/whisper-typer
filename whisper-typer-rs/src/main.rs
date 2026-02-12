@@ -3,6 +3,7 @@
 mod config;
 mod history;
 mod hotkey;
+mod mcp_server;
 mod notifier;
 mod processor;
 mod recorder;
@@ -68,6 +69,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         move || transcriber::WhisperTranscriber::load(&whisper_config)
     })
     .await??;
+
+    // Start MCP server (background task)
+    if config.mcp.enabled {
+        let mcp_port = config.mcp.port;
+        let tts_port = config.tts.api_port;
+        mcp_server::start_mcp_server(mcp_port, tts_port).await;
+    }
 
     // Run the service
     let mut service = service::DictationService::new(config, transcriber, output_mode);

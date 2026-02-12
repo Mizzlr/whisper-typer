@@ -167,6 +167,22 @@ impl Default for TTSConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 8766,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -179,6 +195,7 @@ pub struct Config {
     pub feedback: FeedbackConfig,
     pub silence: SilenceConfig,
     pub tts: TTSConfig,
+    pub mcp: McpConfig,
 }
 
 impl Config {

@@ -52,6 +52,12 @@ notify-rust = "4"
 # Date/time
 chrono = "0.4"
 
+# MCP server
+rmcp = { version = "0.5", features = ["server", "transport-sse-server"] }
+schemars = "1"
+tokio-util = "0.7"
+axum = "0.8"
+
 [features]
 default = []
 cuda = ["whisper-rs/cuda"]
