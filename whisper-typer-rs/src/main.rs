@@ -4,6 +4,7 @@ mod config;
 mod hotkey;
 mod recorder;
 mod service;
+mod transcriber;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -40,8 +41,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::Config::load(args.config.as_deref());
     info!("Config loaded: {:?}", config.hotkey);
 
+    // Load Whisper model (blocking, takes a few seconds)
+    info!("Loading Whisper model...");
+    let transcriber = tokio::task::spawn_blocking({
+        let whisper_config = config.whisper.clone();
+        move || transcriber::WhisperTranscriber::load(&whisper_config)
+    })
+    .await??;
+
     // Run the service
-    let mut service = service::DictationService::new(config);
+    let mut service = service::DictationService::new(config, transcriber);
     service.run().await?;
 
     Ok(())

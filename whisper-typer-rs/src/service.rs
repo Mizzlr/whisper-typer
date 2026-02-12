@@ -2,13 +2,13 @@
 //!
 //! IDLE → RECORDING → PROCESSING → IDLE
 
-use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::recorder::AudioRecorder;
+use crate::transcriber::WhisperTranscriber;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
@@ -31,10 +31,11 @@ pub struct DictationService {
     config: Config,
     state: ServiceState,
     recorder: AudioRecorder,
+    transcriber: WhisperTranscriber,
 }
 
 impl DictationService {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, transcriber: WhisperTranscriber) -> Self {
         let recorder = AudioRecorder::new(
             config.audio.clone(),
             config.recording.clone(),
@@ -45,6 +46,7 @@ impl DictationService {
             config,
             state: ServiceState::Idle,
             recorder,
+            transcriber,
         }
     }
 
@@ -127,42 +129,25 @@ impl DictationService {
         let duration = samples.len() as f64 / self.recorder.sample_rate() as f64;
         info!("Captured {:.1}s of audio ({} samples)", duration, samples.len());
 
-        // Phase 1: Save as WAV for testing
-        self.save_wav(&samples);
-
-        // TODO Phase 2: Transcribe with whisper-rs
-        // TODO Phase 3: Process with Ollama, type with arboard+enigo
+        // Transcribe with Whisper (blocking — runs on tokio thread pool)
+        let transcriber = self.transcriber.clone();
+        match tokio::task::spawn_blocking(move || transcriber.transcribe(&samples)).await {
+            Ok(Ok(result)) => {
+                info!(
+                    "Transcription ({:.0}ms): \"{}\"",
+                    result.latency_ms, result.text
+                );
+                // TODO Phase 3: Process with Ollama, then type with arboard+enigo
+            }
+            Ok(Err(e)) => {
+                warn!("Transcription failed: {e}");
+            }
+            Err(e) => {
+                warn!("Transcription task panicked: {e}");
+            }
+        }
 
         self.state = ServiceState::Idle;
         info!("State: PROCESSING → IDLE");
-    }
-
-    /// Save audio samples to a WAV file for Phase 1 testing.
-    fn save_wav(&self, samples: &[f32]) {
-        let path = PathBuf::from("/tmp/whisper-typer-rs-last.wav");
-        let spec = hound::WavSpec {
-            channels: self.config.audio.channels,
-            sample_rate: self.config.audio.sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        match hound::WavWriter::create(&path, spec) {
-            Ok(mut writer) => {
-                for &sample in samples {
-                    // f32 [-1, 1] → i16
-                    let s = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                    if writer.write_sample(s).is_err() {
-                        break;
-                    }
-                }
-                if writer.finalize().is_ok() {
-                    info!("Saved WAV to {}", path.display());
-                }
-            }
-            Err(e) => {
-                warn!("Failed to save WAV: {e}");
-            }
-        }
     }
 }

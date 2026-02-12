@@ -34,3 +34,10 @@ hound = "3.5"
 
 # Home directory
 dirs = "5"
+
+# Whisper ASR
+whisper-rs = { version = "0.15", features = ["tracing_backend"] }
+
+[features]
+default = []
+cuda = ["whisper-rs/cuda"]
