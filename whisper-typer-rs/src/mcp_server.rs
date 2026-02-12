@@ -6,6 +6,7 @@
 //! - code_speaker_speak, code_speaker_set_voice, code_speaker_enable/disable
 //! - code_speaker_voices, code_speaker_report
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -104,6 +105,20 @@ pub struct SetVoiceRequest {
 pub struct ReportRequest {
     #[schemars(description = "Date for report - 'today' (default), 'list', or YYYY-MM-DD")]
     pub date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct TeachRequest {
+    #[schemars(description = "Vocabulary terms to teach Whisper (comma-separated, e.g., 'Ollama, Kokoro, ndarray')")]
+    pub terms: String,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct AddCorrectionRequest {
+    #[schemars(description = "The wrong/misrecognized text")]
+    pub wrong: String,
+    #[schemars(description = "The correct text")]
+    pub right: String,
 }
 
 // --- MCP Server handler ---
@@ -365,6 +380,132 @@ impl WhisperTyperMcp {
 
         let report = history::generate_report(date);
         Ok(CallToolResult::success(vec![Content::text(report)]))
+    }
+
+    // --- Vocabulary & Corrections tools ---
+
+    #[tool(description = "Teach WhisperTyper vocabulary terms for better speech recognition. Terms are added to .whisper/vocabulary.txt and used as Whisper initial prompt.\n\nArgs:\n    terms: Comma-separated vocabulary terms (e.g., 'Ollama, Kokoro, ndarray')")]
+    async fn whisper_teach(
+        &self,
+        Parameters(req): Parameters<TeachRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let new_terms: Vec<String> = req
+            .terms
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        if new_terms.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No terms provided.",
+            )]));
+        }
+
+        let vocab_path = PathBuf::from(".whisper/vocabulary.txt");
+
+        // Read existing terms
+        let mut existing: HashSet<String> = if vocab_path.exists() {
+            fs::read_to_string(&vocab_path)
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+
+        // Add new terms (deduplicate)
+        let mut added = Vec::new();
+        for term in &new_terms {
+            if existing.insert(term.clone()) {
+                added.push(term.as_str());
+            }
+        }
+
+        // Write back
+        if let Some(parent) = vocab_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut sorted: Vec<&String> = existing.iter().collect();
+        sorted.sort();
+        let contents = sorted.iter().map(|t| t.as_str()).collect::<Vec<_>>().join("\n");
+        if let Err(e) = fs::write(&vocab_path, format!("{contents}\n")) {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Failed to write vocabulary file: {e}"
+            ))]));
+        }
+
+        // Signal service to reload
+        update_state(json!({ "vocabulary_updated": true }));
+
+        let msg = if added.is_empty() {
+            format!("All {} terms already existed in vocabulary.", new_terms.len())
+        } else {
+            format!(
+                "Added {} new term(s): {}. Total vocabulary: {} terms.",
+                added.len(),
+                added.join(", "),
+                existing.len()
+            )
+        };
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
+    }
+
+    #[tool(description = "Add a speech correction mapping. When Whisper misrecognizes a word, this teaches Ollama the correct replacement. Stored in .whisper/corrections.yaml.\n\nArgs:\n    wrong: The misrecognized text\n    right: The correct replacement")]
+    async fn whisper_add_correction(
+        &self,
+        Parameters(req): Parameters<AddCorrectionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        if req.wrong.trim().is_empty() || req.right.trim().is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Both 'wrong' and 'right' must be non-empty.",
+            )]));
+        }
+
+        let corrections_path = PathBuf::from(".whisper/corrections.yaml");
+
+        // Read existing corrections
+        let mut corrections: HashMap<String, String> = if corrections_path.exists() {
+            let contents = fs::read_to_string(&corrections_path).unwrap_or_default();
+            serde_yml::from_str(&contents).unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
+        let wrong = req.wrong.trim().to_string();
+        let right = req.right.trim().to_string();
+        let is_update = corrections.contains_key(&wrong);
+        corrections.insert(wrong.clone(), right.clone());
+
+        // Write back as YAML
+        if let Some(parent) = corrections_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match serde_yml::to_string(&corrections) {
+            Ok(yaml) => {
+                if let Err(e) = fs::write(&corrections_path, &yaml) {
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Failed to write corrections file: {e}"
+                    ))]));
+                }
+            }
+            Err(e) => {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Failed to serialize corrections: {e}"
+                ))]));
+            }
+        }
+
+        // Signal service to reload
+        update_state(json!({ "corrections_updated": true }));
+
+        let action = if is_update { "Updated" } else { "Added" };
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{action} correction: \"{wrong}\" → \"{right}\". Total corrections: {}.",
+            corrections.len()
+        ))]))
     }
 }
 

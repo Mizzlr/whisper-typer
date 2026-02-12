@@ -88,6 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("Loading Kokoro TTS model...");
         let mut tts_engine = code_speaker::tts::KokoroTtsEngine::new(&config.tts);
+        // Connect TTS to voice gate so it waits during recording, stops on cancel
+        tts_engine.set_voice_gate(voice_gate.is_idle.clone(), voice_gate.idle_notify.clone());
         match tts_engine.load_model_sync() {
             Ok(()) => {
                 let tts = Arc::new(tts_engine);
@@ -103,7 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tts,
                     summarizer,
                     reminder,
-                    voice_gate,
                     max_direct_chars: config.tts.max_direct_chars,
                 };
                 code_speaker::api::start_tts_api(api_state, config.tts.api_port).await;

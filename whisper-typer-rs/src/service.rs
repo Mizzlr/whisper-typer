@@ -6,10 +6,11 @@
 //! When the user presses the hotkey, any active TTS is cancelled immediately.
 //! TTS waits for `voice_idle` before playing so it never talks over the user.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use chrono::Local;
@@ -131,6 +132,48 @@ impl VoiceGate {
     }
 }
 
+/// Load vocabulary terms from `.whisper/vocabulary.txt` (one term per line).
+/// Returns a comma-separated string suitable as Whisper initial prompt.
+fn load_vocabulary() -> String {
+    let path = PathBuf::from(".whisper/vocabulary.txt");
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let terms: Vec<&str> = contents
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect();
+            if !terms.is_empty() {
+                info!("Loaded {} vocabulary terms from .whisper/vocabulary.txt", terms.len());
+            }
+            terms.join(", ")
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// Load correction mappings from `.whisper/corrections.yaml` (wrong: right).
+fn load_corrections() -> HashMap<String, String> {
+    let path = PathBuf::from(".whisper/corrections.yaml");
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            match serde_yml::from_str::<HashMap<String, String>>(&contents) {
+                Ok(map) => {
+                    if !map.is_empty() {
+                        info!("Loaded {} corrections from .whisper/corrections.yaml", map.len());
+                    }
+                    map
+                }
+                Err(e) => {
+                    warn!("Failed to parse .whisper/corrections.yaml: {e}");
+                    HashMap::new()
+                }
+            }
+        }
+        Err(_) => HashMap::new(),
+    }
+}
+
 pub struct DictationService {
     config: Config,
     state: ServiceState,
@@ -143,6 +186,10 @@ pub struct DictationService {
     recent_transcriptions: Vec<String>,
     voice_gate: VoiceGate,
     tts_cancel_client: reqwest::Client,
+    /// Whisper initial prompt from .whisper/vocabulary.txt
+    vocabulary: Arc<RwLock<String>>,
+    /// Ollama correction mappings from .whisper/corrections.yaml
+    corrections: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl DictationService {
@@ -167,6 +214,9 @@ impl DictationService {
             .build()
             .expect("Failed to create TTS cancel client");
 
+        let vocabulary = Arc::new(RwLock::new(load_vocabulary()));
+        let corrections = Arc::new(RwLock::new(load_corrections()));
+
         let svc = Self {
             config,
             state: ServiceState::Idle,
@@ -179,6 +229,8 @@ impl DictationService {
             recent_transcriptions: Vec::new(),
             voice_gate,
             tts_cancel_client,
+            vocabulary,
+            corrections,
         };
         svc.write_mcp_state();
         svc
@@ -317,10 +369,17 @@ impl DictationService {
         let audio_duration = samples.len() as f64 / self.recorder.sample_rate() as f64;
         info!("Captured {:.1}s of audio ({} samples)", audio_duration, samples.len());
 
+        // Check if vocabulary/corrections need reloading (MCP tools set flags in state file)
+        self.check_whisper_reload();
+
         // --- Whisper transcription ---
         let t_whisper_start = Instant::now();
         let transcriber = self.transcriber.clone();
-        let raw_text = match tokio::task::spawn_blocking(move || transcriber.transcribe(&samples)).await {
+        let vocab = self.vocabulary.read().unwrap().clone();
+        let vocab_prompt = if vocab.is_empty() { None } else { Some(vocab) };
+        let raw_text = match tokio::task::spawn_blocking(move || {
+            transcriber.transcribe(&samples, vocab_prompt.as_deref())
+        }).await {
             Ok(Ok(result)) => {
                 info!(
                     "Transcription ({:.0}ms): \"{}\"",
@@ -373,10 +432,12 @@ impl DictationService {
 
         // --- Ollama correction ---
         let t_ollama_start = Instant::now();
+        let corrections = self.corrections.read().unwrap().clone();
+        let corrections_ref = if corrections.is_empty() { None } else { Some(&corrections) };
         let (processed_text, ollama_text) = match self.output_mode {
             OutputMode::Whisper => (None, None),
             OutputMode::Ollama | OutputMode::Both => {
-                let corrected = self.processor.process(&raw_text).await;
+                let corrected = self.processor.process(&raw_text, corrections_ref).await;
                 info!("Ollama corrected: \"{}\"", corrected);
                 (Some(corrected.clone()), Some(corrected))
             }
@@ -440,5 +501,42 @@ impl DictationService {
         self.state = ServiceState::Idle;
         self.voice_gate.end_voice_input();
         info!("State: → IDLE");
+    }
+
+    /// Check state file for vocabulary/corrections reload flags (set by MCP tools).
+    fn check_whisper_reload(&self) {
+        let state = {
+            let path = state_file();
+            match fs::read_to_string(&path) {
+                Ok(contents) => serde_json::from_str::<serde_json::Value>(&contents).unwrap_or_default(),
+                Err(_) => return,
+            }
+        };
+
+        if state.get("vocabulary_updated").and_then(|v| v.as_bool()) == Some(true) {
+            let new_vocab = load_vocabulary();
+            *self.vocabulary.write().unwrap() = new_vocab;
+            // Clear the flag
+            let path = state_file();
+            if let Ok(contents) = fs::read_to_string(&path) {
+                if let Ok(mut s) = serde_json::from_str::<serde_json::Value>(&contents) {
+                    s.as_object_mut().map(|o| o.remove("vocabulary_updated"));
+                    let _ = fs::write(&path, serde_json::to_string_pretty(&s).unwrap());
+                }
+            }
+        }
+
+        if state.get("corrections_updated").and_then(|v| v.as_bool()) == Some(true) {
+            let new_corrections = load_corrections();
+            *self.corrections.write().unwrap() = new_corrections;
+            // Clear the flag
+            let path = state_file();
+            if let Ok(contents) = fs::read_to_string(&path) {
+                if let Ok(mut s) = serde_json::from_str::<serde_json::Value>(&contents) {
+                    s.as_object_mut().map(|o| o.remove("corrections_updated"));
+                    let _ = fs::write(&path, serde_json::to_string_pretty(&s).unwrap());
+                }
+            }
+        }
     }
 }

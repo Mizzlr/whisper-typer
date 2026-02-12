@@ -19,7 +19,7 @@ use ndarray_npy::NpzReader;
 use ort::value::Tensor;
 use rodio::buffer::SamplesBuffer;
 use rodio::{OutputStream, OutputStreamBuilder, Sink};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tracing::{debug, info, warn};
 
 use crate::config::TTSConfig;
@@ -68,6 +68,12 @@ pub struct KokoroTtsEngine {
     speak_lock: AsyncMutex<()>,
     active_sink: Arc<Mutex<Option<Sink>>>,
 
+    /// External flag: true when voice input is idle (safe to speak).
+    /// Connected to VoiceGate.is_idle from the dictation service.
+    voice_idle: Arc<AtomicBool>,
+    /// Notified when voice input returns to idle (for async waiting).
+    voice_idle_notify: Arc<Notify>,
+
     // Paths
     model_path: PathBuf,
     voices_path: PathBuf,
@@ -99,6 +105,8 @@ impl KokoroTtsEngine {
             speaking: Arc::new(AtomicBool::new(false)),
             speak_lock: AsyncMutex::new(()),
             active_sink: Arc::new(Mutex::new(None)),
+            voice_idle: Arc::new(AtomicBool::new(true)),
+            voice_idle_notify: Arc::new(Notify::new()),
             model_path,
             voices_path,
             tokenizer_path,
@@ -133,6 +141,13 @@ impl KokoroTtsEngine {
         let mut names: Vec<String> = self.voices.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    /// Connect the TTS engine to the dictation service's voice gate.
+    /// When voice_idle is false, speak() waits for it before playing.
+    pub fn set_voice_gate(&mut self, idle_flag: Arc<AtomicBool>, idle_notify: Arc<Notify>) {
+        self.voice_idle = idle_flag;
+        self.voice_idle_notify = idle_notify;
     }
 
     /// Load the ONNX model, tokenizer, voices, and phonemizer.
@@ -179,15 +194,66 @@ impl KokoroTtsEngine {
     }
 
     /// Speak text aloud with sentence-level streaming and cancellation.
+    ///
+    /// Behavior:
+    /// - If explicitly cancelled (hotkey press) while waiting → bail, discard.
+    /// - If voice input is active (user recording) → wait for idle, then play.
     pub async fn speak(&self, text: &str) -> SpeakResult {
         let _guard = self.speak_lock.lock().await;
+
+        // Bail if explicitly cancelled while waiting for lock (hotkey press).
+        if self.cancel_flag.load(Ordering::Relaxed) {
+            info!("TTS skipped — cancelled while waiting for lock");
+            self.cancel_flag.store(false, Ordering::Relaxed);
+            return SpeakResult {
+                generate_ms: 0.0,
+                playback_ms: 0.0,
+                cancelled: true,
+            };
+        }
+
+        // If voice input is active, wait for it to finish (with timeout).
+        // This defers TTS until the user is done recording.
+        if !self.voice_idle.load(Ordering::Relaxed) {
+            info!("TTS deferred — waiting for voice input to complete");
+            let wait_result = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                self.wait_for_voice_idle(),
+            )
+            .await;
+            match wait_result {
+                Ok(()) => info!("TTS resumed — voice input complete"),
+                Err(_) => {
+                    warn!("TTS voice gate timeout (60s) — speaking anyway");
+                }
+            }
+            // Re-check cancel after waiting — user may have cancelled during recording
+            if self.cancel_flag.load(Ordering::Relaxed) {
+                info!("TTS skipped — cancelled during voice wait");
+                self.cancel_flag.store(false, Ordering::Relaxed);
+                return SpeakResult {
+                    generate_ms: 0.0,
+                    playback_ms: 0.0,
+                    cancelled: true,
+                };
+            }
+        }
+
         self.cancel_flag.store(false, Ordering::Relaxed);
         self.speaking.store(true, Ordering::Relaxed);
 
         let result = self.speak_inner(text).await;
 
         self.speaking.store(false, Ordering::Relaxed);
+        self.cancel_flag.store(false, Ordering::Relaxed);
         result
+    }
+
+    /// Wait until voice input is idle, checking cancel_flag periodically.
+    async fn wait_for_voice_idle(&self) {
+        while !self.voice_idle.load(Ordering::Relaxed) {
+            self.voice_idle_notify.notified().await;
+        }
     }
 
     async fn speak_inner(&self, text: &str) -> SpeakResult {
@@ -388,7 +454,7 @@ impl KokoroTtsEngine {
                     return false;
                 }
 
-                // Check cancel
+                // Check cancel (explicit hotkey press via cancel_tts)
                 if cancel_flag.load(Ordering::Relaxed) {
                     if let Some(sink) = active_sink.lock().unwrap().take() {
                         sink.stop();
@@ -408,7 +474,21 @@ impl KokoroTtsEngine {
         was_cancelled
     }
 
-    /// Cancel current speech immediately.
+    /// Interrupt current speech so a new one can take over.
+    /// Only sets cancel_flag if something is actually speaking.
+    /// If nothing is playing, this is a no-op (won't poison the next speak).
+    pub fn interrupt(&self) {
+        if self.speaking.load(Ordering::Relaxed) {
+            self.cancel_flag.store(true, Ordering::Relaxed);
+            if let Some(sink) = self.active_sink.lock().unwrap().take() {
+                sink.stop();
+            }
+            info!("TTS interrupted for replacement");
+        }
+    }
+
+    /// Hard cancel: stop current speech AND prevent queued speaks from starting.
+    /// Used when user presses hotkey — they want silence.
     pub fn cancel(&self) {
         self.cancel_flag.store(true, Ordering::Relaxed);
         if let Some(sink) = self.active_sink.lock().unwrap().take() {

@@ -47,7 +47,12 @@ impl WhisperTranscriber {
     }
 
     /// Transcribe audio samples (f32, 16kHz, mono) to text.
-    pub fn transcribe(&self, samples: &[f32]) -> Result<TranscribeResult, String> {
+    /// If `initial_prompt` is provided, it biases Whisper toward recognizing those terms.
+    pub fn transcribe(
+        &self,
+        samples: &[f32],
+        initial_prompt: Option<&str>,
+    ) -> Result<TranscribeResult, String> {
         let t0 = Instant::now();
 
         let mut state = self
@@ -63,6 +68,10 @@ impl WhisperTranscriber {
         params.set_print_timestamps(false);
         params.set_single_segment(true);
         params.set_token_timestamps(false);
+
+        if let Some(prompt) = initial_prompt {
+            params.set_initial_prompt(prompt);
+        }
 
         state
             .full(params, samples)

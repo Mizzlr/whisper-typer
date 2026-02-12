@@ -20,9 +20,9 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') PARSED_EVENT: '$EVENT'" >> /tmp/tts-hook-debu
 
 case "$EVENT" in
   SessionStart)
-    # Only announce on fresh startup, not on resume (prevents double-speak)
+    # Only announce on fresh startup — skip resume and compaction restarts
     SOURCE=$(echo "$INPUT" | jq -r '.source // empty' 2>/dev/null)
-    if [ "$SOURCE" = "resume" ]; then
+    if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ]; then
       exit 0
     fi
 

@@ -5,15 +5,12 @@
 //! Runs on port 8767 (configurable) using axum.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
-
-use crate::service::VoiceGate;
 
 use super::history::{save_tts_record, TTSRecord};
 use super::reminder::ReminderManager;
@@ -25,7 +22,6 @@ pub struct TtsApiState {
     pub tts: Arc<KokoroTtsEngine>,
     pub summarizer: Arc<OllamaSummarizer>,
     pub reminder: Arc<ReminderManager>,
-    pub voice_gate: VoiceGate,
     pub max_direct_chars: usize,
 }
 
@@ -156,7 +152,6 @@ async fn handle_speak(
     let tts = state.tts.clone();
     let summarizer = state.summarizer.clone();
     let reminder = state.reminder.clone();
-    let voice_gate = state.voice_gate.clone();
     let max_direct_chars = state.max_direct_chars;
 
     tokio::spawn(async move {
@@ -164,7 +159,6 @@ async fn handle_speak(
             tts,
             summarizer,
             reminder,
-            voice_gate,
             max_direct_chars,
             req.text,
             req.summarize,
@@ -205,12 +199,11 @@ async fn handle_cancel_reminder(State(state): State<TtsApiState>) -> Json<Simple
     })
 }
 
-/// Execute the speak pipeline: cancel previous → summarize → voice gate → speak → reminder.
+/// Execute the speak pipeline: cancel previous → summarize → speak → reminder.
 async fn do_speak(
     tts: Arc<KokoroTtsEngine>,
     summarizer: Arc<OllamaSummarizer>,
     reminder: Arc<ReminderManager>,
-    voice_gate: VoiceGate,
     max_direct_chars: usize,
     text: String,
     summarize: bool,
@@ -222,8 +215,8 @@ async fn do_speak(
     // Cancel any existing reminder
     reminder.cancel();
 
-    // Cancel any in-flight speech
-    tts.cancel();
+    // Interrupt any in-flight speech (so this new one can take over)
+    tts.interrupt();
 
     // Optionally summarize long text
     let (spoken_text, ollama_ms, summarized) =
@@ -234,16 +227,7 @@ async fn do_speak(
             (text.clone(), 0.0, false)
         };
 
-    // Wait for voice input to finish before playing
-    if !voice_gate.is_voice_idle() {
-        info!("TTS deferred — waiting for voice input to complete");
-        match tokio::time::timeout(Duration::from_secs(60), voice_gate.wait_for_idle()).await {
-            Ok(_) => info!("TTS resumed — voice input complete"),
-            Err(_) => warn!("TTS gate timeout (60s) — speaking anyway"),
-        }
-    }
-
-    // Speak
+    // Speak (voice gate waiting is handled inside tts.speak())
     let result = tts.speak(&spoken_text).await;
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;

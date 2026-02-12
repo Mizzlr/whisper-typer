@@ -3,6 +3,8 @@
 //! Sends transcribed text to Ollama's /api/generate endpoint for
 //! grammar/spelling fixes. Falls back gracefully if Ollama is unavailable.
 
+use std::collections::HashMap;
+
 use reqwest::Client;
 use serde_json::json;
 use tracing::{debug, warn};
@@ -38,12 +40,25 @@ impl OllamaProcessor {
 
     /// Process text through Ollama for grammar correction.
     /// Returns the original text if Ollama is disabled or unavailable.
-    pub async fn process(&self, text: &str) -> String {
+    /// If `corrections` is provided, known substitutions are appended to the prompt.
+    pub async fn process(&self, text: &str, corrections: Option<&HashMap<String, String>>) -> String {
         if !self.config.enabled || text.trim().is_empty() {
             return text.to_string();
         }
 
-        let prompt = PROMPT_TEMPLATE.replace("{text}", text);
+        let mut prompt = PROMPT_TEMPLATE.replace("{text}", text);
+
+        // Inject per-project corrections into the prompt
+        if let Some(corrections) = corrections {
+            if !corrections.is_empty() {
+                let mut section = String::from("\n\nKnown corrections (apply these substitutions):\n");
+                for (wrong, right) in corrections {
+                    section.push_str(&format!("- \"{wrong}\" → \"{right}\"\n"));
+                }
+                // Insert before the "Text:" line
+                prompt = prompt.replacen("\nText:", &format!("{section}\nText:"), 1);
+            }
+        }
         debug!("Sending to Ollama model '{}': {}", self.config.model, text);
 
         let body = json!({
