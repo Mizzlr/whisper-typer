@@ -1,6 +1,7 @@
 //! whisper-typer-rs: Speech-to-text dictation service for Linux.
 
 mod config;
+mod history;
 mod hotkey;
 mod notifier;
 mod processor;

@@ -2,16 +2,30 @@
 //!
 //! IDLE → RECORDING → PROCESSING → IDLE
 
+use std::fs;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use chrono::Local;
+use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::history::{self, TranscriptionRecord};
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::notifier::Notifier;
 use crate::processor::OllamaProcessor;
 use crate::recorder::AudioRecorder;
 use crate::transcriber::WhisperTranscriber;
 use crate::typer::TextTyper;
+
+/// MCP state file path.
+fn state_file() -> PathBuf {
+    dirs::home_dir()
+        .expect("No home directory")
+        .join(".cache/whisper-typer/state.json")
+}
 
 /// Output mode: what gets typed into the active window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +44,14 @@ impl OutputMode {
             "whisper" => Self::Whisper,
             "both" => Self::Both,
             _ => Self::Ollama,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama_only",
+            Self::Whisper => "whisper_only",
+            Self::Both => "both",
         }
     }
 }
@@ -60,6 +82,7 @@ pub struct DictationService {
     typer: TextTyper,
     notifier: Notifier,
     output_mode: OutputMode,
+    recent_transcriptions: Vec<String>,
 }
 
 impl DictationService {
@@ -77,7 +100,7 @@ impl DictationService {
         let typer = TextTyper::new(&config.typer);
         let notifier = Notifier::new(config.feedback.notifications);
 
-        Self {
+        let svc = Self {
             config,
             state: ServiceState::Idle,
             recorder,
@@ -86,7 +109,38 @@ impl DictationService {
             typer,
             notifier,
             output_mode,
+            recent_transcriptions: Vec::new(),
+        };
+        svc.write_mcp_state();
+        svc
+    }
+
+    /// Write current state to MCP state file for external control.
+    fn write_mcp_state(&self) {
+        let path = state_file();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
         }
+
+        let state = json!({
+            "output_mode": self.output_mode.as_str(),
+            "ollama_enabled": self.config.ollama.enabled,
+            "recent_transcriptions": self.recent_transcriptions,
+        });
+
+        if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&state).unwrap()) {
+            warn!("Failed to write MCP state: {e}");
+        }
+    }
+
+    /// Add a transcription to the recent list and update state file.
+    fn add_transcription(&mut self, text: &str) {
+        self.recent_transcriptions.push(text.to_string());
+        if self.recent_transcriptions.len() > 20 {
+            let excess = self.recent_transcriptions.len() - 20;
+            self.recent_transcriptions.drain(..excess);
+        }
+        self.write_mcp_state();
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -147,6 +201,7 @@ impl DictationService {
             return;
         }
 
+        let t_start = Instant::now();
         self.state = ServiceState::Processing;
         info!("State: RECORDING → PROCESSING");
 
@@ -165,10 +220,11 @@ impl DictationService {
             return;
         }
 
-        let duration = samples.len() as f64 / self.recorder.sample_rate() as f64;
-        info!("Captured {:.1}s of audio ({} samples)", duration, samples.len());
+        let audio_duration = samples.len() as f64 / self.recorder.sample_rate() as f64;
+        info!("Captured {:.1}s of audio ({} samples)", audio_duration, samples.len());
 
-        // Transcribe with Whisper (blocking — runs on tokio thread pool)
+        // --- Whisper transcription ---
+        let t_whisper_start = Instant::now();
         let transcriber = self.transcriber.clone();
         let raw_text = match tokio::task::spawn_blocking(move || transcriber.transcribe(&samples)).await {
             Ok(Ok(result)) => {
@@ -191,6 +247,7 @@ impl DictationService {
                 return;
             }
         };
+        let t_whisper = t_whisper_start.elapsed().as_secs_f64() * 1000.0;
 
         if raw_text.is_empty() {
             info!("Empty transcription, returning to IDLE");
@@ -199,27 +256,66 @@ impl DictationService {
             return;
         }
 
-        // Process through Ollama + type output based on mode
-        let output = match self.output_mode {
-            OutputMode::Whisper => {
-                raw_text.clone()
-            }
-            OutputMode::Ollama => {
+        // --- Ollama correction ---
+        let t_ollama_start = Instant::now();
+        let (processed_text, ollama_text) = match self.output_mode {
+            OutputMode::Whisper => (None, None),
+            OutputMode::Ollama | OutputMode::Both => {
                 let corrected = self.processor.process(&raw_text).await;
                 info!("Ollama corrected: \"{}\"", corrected);
-                corrected
+                (Some(corrected.clone()), Some(corrected))
             }
+        };
+        let t_ollama = t_ollama_start.elapsed().as_secs_f64() * 1000.0;
+
+        // Build final output
+        let final_text = match self.output_mode {
+            OutputMode::Whisper => format!("{raw_text} "),
+            OutputMode::Ollama => format!("{} ", processed_text.as_deref().unwrap_or(&raw_text)),
             OutputMode::Both => {
-                let corrected = self.processor.process(&raw_text).await;
-                info!("Ollama corrected: \"{}\"", corrected);
-                format!("{corrected} [{raw_text}]")
+                format!("{} [{raw_text}] ", processed_text.as_deref().unwrap_or(&raw_text))
             }
         };
 
-        // Type into active window (blocking — enigo/xdotool uses X11 calls)
-        self.typer.type_text(&output);
+        // --- Type into active window ---
+        let t_type_start = Instant::now();
+        self.typer.type_text(&final_text);
+        let t_type = t_type_start.elapsed().as_secs_f64() * 1000.0;
 
-        self.notifier.notify("Whisper Typer", &output);
+        let t_total = t_start.elapsed().as_secs_f64() * 1000.0;
+
+        info!(
+            "  Whisper: {:.0}ms | Ollama: {:.0}ms | Typing: {:.0}ms | Total: {:.0}ms | Audio: {:.1}s | Speed: {:.1}x",
+            t_whisper, t_ollama, t_type, t_total, audio_duration,
+            if t_total > 0.0 { (audio_duration * 1000.0) / t_total } else { 0.0 }
+        );
+
+        self.notifier.notify("Whisper Typer", &final_text);
+        self.add_transcription(&final_text);
+
+        // --- Save history record ---
+        let speed_ratio = if t_total > 0.0 {
+            ((audio_duration * 1000.0) / t_total * 10.0).round() / 10.0
+        } else {
+            0.0
+        };
+
+        let record = TranscriptionRecord {
+            timestamp: Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+            whisper_text: raw_text,
+            ollama_text: if t_ollama > 0.0 { ollama_text } else { None },
+            final_text: final_text.clone(),
+            output_mode: self.output_mode.as_str().to_string(),
+            whisper_latency_ms: t_whisper as i64,
+            ollama_latency_ms: if t_ollama > 0.0 { Some(t_ollama as i64) } else { None },
+            typing_latency_ms: t_type as i64,
+            total_latency_ms: t_total as i64,
+            audio_duration_s: (audio_duration * 100.0).round() / 100.0,
+            char_count: final_text.len(),
+            word_count: final_text.split_whitespace().count(),
+            speed_ratio,
+        };
+        history::save_record(&record);
 
         self.state = ServiceState::Idle;
         info!("State: PROCESSING → IDLE");
