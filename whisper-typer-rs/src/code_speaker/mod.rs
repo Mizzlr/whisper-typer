@@ -12,4 +12,5 @@ pub mod api;
 pub mod history;
 pub mod reminder;
 pub mod summarizer;
+pub mod transcript;
 pub mod tts;
