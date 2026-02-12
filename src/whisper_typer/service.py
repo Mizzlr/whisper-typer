@@ -339,7 +339,7 @@ class DictationService:
 
         def run_mcp():
             logger.info(f"Starting MCP server on port {port}")
-            mcp.run(transport="streamable-http", port=port)
+            mcp.run(transport="sse", port=port)
 
         self._mcp_thread = threading.Thread(target=run_mcp, daemon=True)
         self._mcp_thread.start()
