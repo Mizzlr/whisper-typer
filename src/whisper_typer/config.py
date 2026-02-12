@@ -65,6 +65,17 @@ class SilenceConfig:
 
 
 @dataclass
+class TTSConfig:
+    enabled: bool = False
+    voice: str = "af_heart"
+    speed: float = 1.0
+    api_port: int = 8767
+    max_direct_chars: int = 150
+    reminder_interval: int = 300
+    model_path: str = ""  # Empty = auto-detect in working dir
+
+
+@dataclass
 class Config:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -75,6 +86,7 @@ class Config:
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
     wakeword: WakeWordConfig = field(default_factory=WakeWordConfig)
     silence: SilenceConfig = field(default_factory=SilenceConfig)
+    tts: TTSConfig = field(default_factory=TTSConfig)
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "Config":
@@ -107,4 +119,5 @@ class Config:
             feedback=FeedbackConfig(**data.get("feedback", {})),
             wakeword=WakeWordConfig(**data.get("wakeword", {})),
             silence=SilenceConfig(**data.get("silence", {})),
+            tts=TTSConfig(**data.get("tts", {})),
         )

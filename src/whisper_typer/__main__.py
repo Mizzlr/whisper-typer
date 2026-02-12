@@ -75,6 +75,34 @@ def parse_args():
         default=None,
         help="Wake-word model to use (default: hey_jarvis)",
     )
+    parser.add_argument(
+        "--report",
+        nargs="?",
+        const="today",
+        metavar="DATE",
+        help="Show productivity report and exit (today, YYYY-MM-DD, or 'list' to show available dates)",
+    )
+    # Code Speaker TTS options
+    parser.add_argument(
+        "--enable-tts",
+        action="store_true",
+        help="Enable Code Speaker TTS (Kokoro) for Claude Code events",
+    )
+    parser.add_argument(
+        "--tts-voice",
+        default=None,
+        help="Set TTS voice (e.g., 'af_heart', 'bf_emma', 'am_adam')",
+    )
+    parser.add_argument(
+        "--list-tts-voices",
+        action="store_true",
+        help="List available TTS voices and exit",
+    )
+    parser.add_argument(
+        "--test-tts",
+        metavar="TEXT",
+        help="Speak given text using Kokoro TTS and exit",
+    )
     return parser.parse_args()
 
 
@@ -134,6 +162,45 @@ def main():
         asyncio.run(test_hotkey())
         return 0
 
+    if args.report:
+        from .history import generate_report, list_available_dates
+        if args.report == "list":
+            dates = list_available_dates()
+            if not dates:
+                print("No history records found.")
+            else:
+                print("Available dates:")
+                for d in dates:
+                    print(f"  {d}")
+        else:
+            print(generate_report(args.report))
+        return 0
+
+    if args.list_tts_voices:
+        print("\nAvailable Kokoro TTS voices:")
+        print("-" * 40)
+        print("  American Female: af_heart, af_bella, af_nova, af_sarah, af_sky")
+        print("  American Male:   am_adam, am_michael, am_echo")
+        print("  British Female:  bf_emma, bf_alice, bf_lily")
+        print("  British Male:    bm_george, bm_lewis")
+        print()
+        return 0
+
+    if args.test_tts:
+        async def _test_tts():
+            from .config import TTSConfig
+            from .code_speaker.tts import KokoroTTS
+            tts_config = TTSConfig(enabled=True, voice=args.tts_voice or "af_heart")
+            tts = KokoroTTS(tts_config)
+            await tts.load_model()
+            result = await tts.speak(args.test_tts)
+            print(f"Spoke: \"{args.test_tts}\"")
+            print(f"  Generate: {result.generate_ms:.0f}ms, Playback: {result.playback_ms:.0f}ms")
+            tts.unload_model()
+
+        asyncio.run(_test_tts())
+        return 0
+
     # Load configuration
     config = Config.load(args.config)
 
@@ -142,6 +209,10 @@ def main():
         config.wakeword.enabled = True
     if args.wakeword_model:
         config.wakeword.model = args.wakeword_model
+    if args.enable_tts:
+        config.tts.enabled = True
+    if args.tts_voice:
+        config.tts.voice = args.tts_voice
 
     # Map CLI mode to OutputMode
     mode_map = {

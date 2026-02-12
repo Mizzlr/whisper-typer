@@ -21,3 +21,7 @@ build/
 # Logs
 *.log
 .grepai/
+
+# Kokoro TTS model files (large binaries, download separately)
+kokoro-v1.0.onnx
+voices-v1.0.bin

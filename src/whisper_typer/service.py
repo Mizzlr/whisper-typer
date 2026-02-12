@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config
+from .history import TranscriptionRecord, save_record
 
 # Shared state file for MCP control
 STATE_FILE = Path.home() / ".cache" / "whisper-typer" / "state.json"
@@ -76,6 +77,13 @@ class DictationService:
             sample_rate=config.audio.sample_rate,
         )
 
+        # code_speaker TTS components (lazy init in run())
+        self.tts_config = config.tts
+        self.kokoro_tts = None
+        self._tts_summarizer = None
+        self._tts_reminder = None
+        self._tts_api = None
+
         # For async coordination
         self._process_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -123,6 +131,12 @@ class DictationService:
             logger.debug(f"Ignoring hotkey press, state is {self.state}")
             return
 
+        # Cancel any TTS speech — user starts speaking, Claude stops talking
+        if self.kokoro_tts:
+            self.kokoro_tts.cancel()
+        if self._tts_reminder:
+            self._tts_reminder.cancel()
+
         t_start = time.perf_counter()
         logger.info("Hotkey pressed - starting recording")
         self.state = ServiceState.RECORDING
@@ -155,6 +169,12 @@ class DictationService:
         if self.state != ServiceState.IDLE:
             logger.debug(f"Ignoring wake-word, state is {self.state}")
             return
+
+        # Cancel TTS on wake-word too
+        if self.kokoro_tts:
+            self.kokoro_tts.cancel()
+        if self._tts_reminder:
+            self._tts_reminder.cancel()
 
         logger.info("Wake-word detected - starting recording")
         self.state = ServiceState.WAKE_RECORDING
@@ -264,6 +284,8 @@ class DictationService:
             else:
                 final_text = processed_text
 
+            final_text += " "
+
             # Type the result
             t_type_start = time.perf_counter()
             self.typer.type_text(final_text)
@@ -281,6 +303,25 @@ class DictationService:
 
             self.notifier.transcription_complete(final_text)
             self._add_transcription(final_text)
+
+            # Save to history for productivity tracking
+            from datetime import datetime
+            record = TranscriptionRecord(
+                timestamp=datetime.now().isoformat(),
+                whisper_text=text,
+                ollama_text=processed_text if self.ollama_enabled and t_ollama > 0 else None,
+                final_text=final_text,
+                output_mode=self.output_mode.value,
+                whisper_latency_ms=int(t_whisper),
+                ollama_latency_ms=int(t_ollama) if t_ollama > 0 else None,
+                typing_latency_ms=int(t_type),
+                total_latency_ms=int(t_total),
+                audio_duration_s=round(audio_duration, 2),
+                char_count=len(final_text),
+                word_count=len(final_text.split()),
+                speed_ratio=round((audio_duration * 1000) / t_total, 1) if t_total > 0 else 0,
+            )
+            save_record(record)
 
         except Exception as e:
             logger.exception(f"Processing failed: {e}")
@@ -352,6 +393,60 @@ class DictationService:
         if not self.typer.check_backend_ready():
             logger.warning("Typing backend may not work correctly")
 
+        # Initialize code_speaker TTS if enabled
+        tts_str = "Disabled"
+        if self.tts_config.enabled:
+            try:
+                from .code_speaker.tts import KokoroTTS
+                from .code_speaker.summarizer import OllamaSummarizer
+                from .code_speaker.reminder import ReminderManager
+                from .code_speaker.api import TTSApiServer
+                from .code_speaker.history import TTSRecord, save_tts_record
+
+                logger.info("Loading Kokoro TTS model...")
+                self.kokoro_tts = KokoroTTS(self.tts_config)
+                await self.kokoro_tts.load_model()
+
+                self._tts_summarizer = OllamaSummarizer(
+                    model=self.config.ollama.model,
+                    host=self.config.ollama.host,
+                )
+                self._tts_reminder = ReminderManager(interval=self.tts_config.reminder_interval)
+
+                def on_tts_complete(**kwargs):
+                    """Save TTS event to history."""
+                    from datetime import datetime
+                    record = TTSRecord(
+                        timestamp=datetime.now().isoformat(),
+                        event_type=kwargs.get("event_type", "unknown"),
+                        input_text_chars=len(kwargs.get("input_text", "")),
+                        summarized=kwargs.get("summarized", False),
+                        summary_text=kwargs.get("spoken_text", ""),
+                        ollama_latency_ms=int(kwargs.get("ollama_ms", 0)),
+                        kokoro_latency_ms=int(kwargs.get("kokoro_ms", 0)),
+                        playback_duration_ms=int(kwargs.get("playback_ms", 0)),
+                        total_latency_ms=int(kwargs.get("total_ms", 0)),
+                        voice=self.tts_config.voice,
+                        cancelled=kwargs.get("cancelled", False),
+                        reminder_count=self._tts_reminder.reminder_count if self._tts_reminder else 0,
+                    )
+                    save_tts_record(record)
+
+                self._tts_api = TTSApiServer(
+                    tts=self.kokoro_tts,
+                    summarizer=self._tts_summarizer,
+                    reminder=self._tts_reminder,
+                    loop=self._loop,
+                    port=self.tts_config.api_port,
+                    on_tts_complete=on_tts_complete,
+                )
+                self._tts_api.start()
+                tts_str = f"{self.tts_config.voice} (port {self.tts_config.api_port})"
+                logger.info(f"Code Speaker TTS ready: {tts_str}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Code Speaker TTS: {e}")
+                tts_str = f"Error: {e}"
+
         # Service is ready
         self.notifier.service_ready()
         mode_str = self.output_mode.value.replace("_", " ").title()
@@ -362,6 +457,7 @@ class DictationService:
         logger.info(f"  Ollama:   {self.config.ollama.model if self.ollama_enabled else 'Disabled'}")
         logger.info(f"  Mode:     {mode_str}")
         logger.info(f"  WakeWord: {wakeword_str}")
+        logger.info(f"  TTS:      {tts_str}")
         logger.info(f"  Hotkeys:  Win+Alt, Ctrl+Alt, PgDn+Right, PgDn+Down")
         logger.info(f"════════════════════════════════════════")
 
@@ -397,5 +493,16 @@ class DictationService:
         self.wakeword.unload_model()
         await self.processor.close()
         self.notifier.close()
+
+        # Clean up code_speaker TTS
+        if self._tts_reminder:
+            self._tts_reminder.cancel()
+        if self.kokoro_tts:
+            self.kokoro_tts.cancel()
+            self.kokoro_tts.unload_model()
+        if self._tts_api:
+            self._tts_api.stop()
+        if self._tts_summarizer:
+            await self._tts_summarizer.close()
 
         logger.info("Shutdown complete")

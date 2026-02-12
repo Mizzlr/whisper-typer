@@ -1,0 +1,176 @@
+"""Kokoro TTS engine with async speak/cancel and sentence streaming."""
+
+import asyncio
+import logging
+import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from ..config import TTSConfig
+
+logger = logging.getLogger(__name__)
+
+# Sentence boundary pattern: split on .!? followed by whitespace
+SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+')
+
+
+@dataclass
+class SpeakResult:
+    """Result of a speak operation with timing info."""
+    generate_ms: float
+    playback_ms: float
+    cancelled: bool
+    text_spoken: str
+
+
+class KokoroTTS:
+    """Text-to-speech using Kokoro-82M ONNX model."""
+
+    def __init__(self, config: TTSConfig):
+        self.config = config
+        self._kokoro = None
+        self._cancel_event = asyncio.Event()
+        self._speaking = False
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._kokoro is not None
+
+    @property
+    def is_speaking(self) -> bool:
+        return self._speaking
+
+    async def load_model(self):
+        """Load the Kokoro ONNX model. Blocking call wrapped in to_thread."""
+        if self._kokoro is not None:
+            return
+
+        def _load():
+            from kokoro_onnx import Kokoro
+
+            # Find model files
+            model_dir = Path(self.config.model_path) if self.config.model_path else Path.cwd()
+            onnx_path = model_dir / "kokoro-v1.0.onnx"
+            voices_path = model_dir / "voices-v1.0.bin"
+
+            # Fallback: check whisper-typer root
+            if not onnx_path.exists():
+                wt_root = Path(__file__).parent.parent.parent.parent
+                onnx_path = wt_root / "kokoro-v1.0.onnx"
+                voices_path = wt_root / "voices-v1.0.bin"
+
+            if not onnx_path.exists():
+                raise FileNotFoundError(
+                    f"Kokoro model not found. Download with:\n"
+                    f"  wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx\n"
+                    f"  wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+                )
+
+            logger.info(f"Loading Kokoro model from {onnx_path}")
+            return Kokoro(str(onnx_path), str(voices_path))
+
+        t0 = time.perf_counter()
+        self._kokoro = await asyncio.to_thread(_load)
+        t_load = (time.perf_counter() - t0) * 1000
+        logger.info(f"Kokoro model loaded in {t_load:.0f}ms")
+
+    async def speak(self, text: str) -> SpeakResult:
+        """Speak text aloud with sentence-level streaming.
+
+        Generates audio for each sentence and plays them sequentially.
+        Checks cancel event between sentences for quick interruption.
+        """
+        if not self._kokoro:
+            await self.load_model()
+
+        self._cancel_event.clear()
+        self._speaking = True
+        total_gen_ms = 0.0
+        total_play_ms = 0.0
+        cancelled = False
+
+        try:
+            sentences = SENTENCE_SPLIT.split(text.strip())
+            sentences = [s.strip() for s in sentences if s.strip()]
+
+            if not sentences:
+                return SpeakResult(0, 0, False, "")
+
+            for i, sentence in enumerate(sentences):
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+
+                # Generate audio
+                t_gen_start = time.perf_counter()
+                samples, sample_rate = await asyncio.to_thread(
+                    self._kokoro.create,
+                    sentence,
+                    voice=self.config.voice,
+                    speed=self.config.speed,
+                )
+                gen_ms = (time.perf_counter() - t_gen_start) * 1000
+                total_gen_ms += gen_ms
+
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+
+                # Play audio
+                t_play_start = time.perf_counter()
+                await self._play_audio(samples, sample_rate)
+                play_ms = (time.perf_counter() - t_play_start) * 1000
+                total_play_ms += play_ms
+
+                duration = len(samples) / sample_rate
+                logger.debug(
+                    f"Sentence {i+1}/{len(sentences)}: "
+                    f"gen={gen_ms:.0f}ms play={duration:.1f}s"
+                )
+
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception as e:
+            logger.warning(f"TTS speak failed: {e}")
+        finally:
+            self._speaking = False
+
+        return SpeakResult(
+            generate_ms=total_gen_ms,
+            playback_ms=total_play_ms,
+            cancelled=cancelled,
+            text_spoken=text,
+        )
+
+    async def _play_audio(self, samples, sample_rate: int):
+        """Play audio samples through speakers."""
+        import sounddevice as sd
+
+        def _play():
+            sd.play(samples, sample_rate)
+            sd.wait()
+
+        await asyncio.to_thread(_play)
+
+    def cancel(self):
+        """Cancel current speech immediately."""
+        self._cancel_event.set()
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:
+            pass
+        self._speaking = False
+
+    def list_voices(self) -> list[str]:
+        """Return available Kokoro voices."""
+        if not self._kokoro:
+            return []
+        return sorted(self._kokoro.get_voices())
+
+    def unload_model(self):
+        """Free the ONNX model."""
+        self._kokoro = None
+        logger.info("Kokoro model unloaded")

@@ -14,6 +14,7 @@ PROMPT_TEMPLATE = """Fix this speech transcription. Correct:
 - Grammar and punctuation
 - Misspelled names
 - Technical terms
+- Every sentence must end with a full stop or question mark
 
 Output ONLY the corrected text, nothing else.
 

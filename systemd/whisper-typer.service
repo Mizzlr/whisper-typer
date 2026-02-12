@@ -5,7 +5,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/home/mizzlr/whisper-typer/.venv/bin/python -m whisper_typer
+ExecStart=/home/mizzlr/whisper-typer/.venv/bin/python -m whisper_typer --enable-tts
 WorkingDirectory=/home/mizzlr/whisper-typer
 Restart=on-failure
 RestartSec=5
@@ -18,9 +18,9 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 StandardOutput=journal
 StandardError=journal
 
-# Resource limits (adjust based on your GPU VRAM)
-MemoryHigh=8G
-MemoryMax=12G
+# Resource limits (adjust based on your GPU VRAM + Kokoro ONNX)
+MemoryHigh=10G
+MemoryMax=14G
 
 [Install]
 WantedBy=default.target
