@@ -332,18 +332,28 @@ impl WhisperTyperMcp {
 
     #[tool(description = "Enable code_speaker TTS output.")]
     async fn code_speaker_enable(&self) -> Result<CallToolResult, McpError> {
-        update_state(json!({ "tts_enabled": true }));
-        Ok(CallToolResult::success(vec![Content::text(
-            "Code Speaker TTS enabled",
-        )]))
+        let url = format!("http://127.0.0.1:{}/enable", self.tts_port);
+        match self.http_client.post(&url).send().await {
+            Ok(_) => Ok(CallToolResult::success(vec![Content::text(
+                "Code Speaker TTS enabled",
+            )])),
+            Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Failed to enable TTS: {e}"
+            ))])),
+        }
     }
 
     #[tool(description = "Disable code_speaker TTS output.")]
     async fn code_speaker_disable(&self) -> Result<CallToolResult, McpError> {
-        update_state(json!({ "tts_enabled": false }));
-        Ok(CallToolResult::success(vec![Content::text(
-            "Code Speaker TTS disabled",
-        )]))
+        let url = format!("http://127.0.0.1:{}/disable", self.tts_port);
+        match self.http_client.post(&url).send().await {
+            Ok(_) => Ok(CallToolResult::success(vec![Content::text(
+                "Code Speaker TTS disabled",
+            )])),
+            Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Failed to disable TTS: {e}"
+            ))])),
+        }
     }
 
     #[tool(description = "List available TTS voices for code_speaker.")]

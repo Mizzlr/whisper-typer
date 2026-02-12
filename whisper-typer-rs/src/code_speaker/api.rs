@@ -4,6 +4,7 @@
 //! for backward compatibility with tts-hook.sh and MCP tools.
 //! Runs on port 8767 (configurable) using axum.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -23,6 +24,7 @@ pub struct TtsApiState {
     pub summarizer: Arc<OllamaSummarizer>,
     pub reminder: Arc<ReminderManager>,
     pub max_direct_chars: usize,
+    pub enabled: Arc<AtomicBool>,
 }
 
 // --- Request/Response types ---
@@ -49,6 +51,7 @@ struct SetVoiceRequest {
 
 #[derive(Serialize)]
 struct StatusResponse {
+    enabled: bool,
     speaking: bool,
     voice: String,
     model_loaded: bool,
@@ -95,6 +98,8 @@ pub fn router(state: TtsApiState) -> Router {
         .route("/set-voice", post(handle_set_voice))
         .route("/cancel", post(handle_cancel))
         .route("/cancel-reminder", post(handle_cancel_reminder))
+        .route("/enable", post(handle_enable))
+        .route("/disable", post(handle_disable))
         .with_state(state)
 }
 
@@ -122,6 +127,7 @@ pub async fn start_tts_api(state: TtsApiState, port: u16) {
 
 async fn handle_status(State(state): State<TtsApiState>) -> Json<StatusResponse> {
     Json(StatusResponse {
+        enabled: state.enabled.load(Ordering::Relaxed),
         speaking: state.tts.is_speaking(),
         voice: state.tts.current_voice(),
         model_loaded: state.tts.is_loaded(),
@@ -134,6 +140,10 @@ async fn handle_speak(
     State(state): State<TtsApiState>,
     Json(req): Json<SpeakRequest>,
 ) -> Json<SimpleResponse> {
+    if !state.enabled.load(Ordering::Relaxed) {
+        return Json(SimpleResponse::ok("disabled"));
+    }
+
     if req.text.trim().is_empty() {
         return Json(SimpleResponse::err("empty text"));
     }
@@ -197,6 +207,20 @@ async fn handle_cancel_reminder(State(state): State<TtsApiState>) -> Json<Simple
         reminders_fired: Some(count),
         ..SimpleResponse::ok("cancelled")
     })
+}
+
+async fn handle_enable(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
+    state.enabled.store(true, Ordering::Relaxed);
+    info!("TTS enabled");
+    Json(SimpleResponse::ok("enabled"))
+}
+
+async fn handle_disable(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
+    state.enabled.store(false, Ordering::Relaxed);
+    state.tts.interrupt();
+    state.reminder.cancel();
+    info!("TTS disabled (do-not-disturb)");
+    Json(SimpleResponse::ok("disabled"))
 }
 
 /// Execute the speak pipeline: cancel previous → summarize → speak → reminder.

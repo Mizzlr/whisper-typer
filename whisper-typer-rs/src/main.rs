@@ -106,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     summarizer,
                     reminder,
                     max_direct_chars: config.tts.max_direct_chars,
+                    enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 };
                 code_speaker::api::start_tts_api(api_state, config.tts.api_port).await;
                 info!(
