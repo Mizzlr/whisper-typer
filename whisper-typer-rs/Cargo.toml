@@ -1,0 +1,36 @@
+[package]
+name = "whisper-typer-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Speech-to-text dictation service for Linux using Whisper and Ollama"
+
+[[bin]]
+name = "whisper-typer-rs"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+serde = { version = "1", features = ["derive"] }
+serde_yml = "0.0.12"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Hotkey detection
+evdev = { version = "0.12", features = ["tokio"] }
+
+# Audio capture
+cpal = "0.15"
+
+# WAV output (for Phase 1 testing)
+hound = "3.5"
+
+# Home directory
+dirs = "5"
