@@ -46,7 +46,7 @@ silence:
   threshold: 0.01          # RMS energy threshold
   duration: 1.5            # Seconds of silence to stop
   min_speech_duration: 0.5 # Minimum recording before checking
-  max_recording_duration: 30.0  # Maximum recording length
+  max_recording_duration: 120.0  # Maximum recording length (matches recording.max_duration)
 
 # Code Speaker TTS (Kokoro) for Claude Code events
 tts:

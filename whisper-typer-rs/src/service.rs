@@ -381,7 +381,6 @@ impl DictationService {
             if t_total > 0.0 { (audio_duration * 1000.0) / t_total } else { 0.0 }
         );
 
-        self.notifier.notify("Whisper Typer", &final_text);
         self.add_transcription(&final_text);
 
         // --- Save history record ---
