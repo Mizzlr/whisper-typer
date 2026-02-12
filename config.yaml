@@ -50,7 +50,7 @@ silence:
 
 # Code Speaker TTS (Kokoro) for Claude Code events
 tts:
-  enabled: false           # Enable with --enable-tts or set to true
+  enabled: true            # Native Rust Kokoro TTS
   voice: "am_michael"      # Kokoro voice (af_heart, bf_emma, am_adam, etc.)
   speed: 1.0               # Speech speed multiplier
   api_port: 8767           # HTTP API port for hook integration

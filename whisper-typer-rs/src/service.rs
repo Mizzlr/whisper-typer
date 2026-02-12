@@ -347,6 +347,30 @@ impl DictationService {
             return;
         }
 
+        // Filter common Whisper hallucinations (ported from Python service.py)
+        const HALLUCINATIONS: &[&str] = &[
+            "thank you",
+            "thank you.",
+            "thanks.",
+            "thanks",
+            "thanks for watching",
+            "thanks for watching.",
+            "subscribe",
+            "like and subscribe",
+            "you",
+            "bye",
+            "bye.",
+            "goodbye",
+            "goodbye.",
+        ];
+
+        let normalized = raw_text.trim().to_lowercase();
+        if HALLUCINATIONS.contains(&normalized.as_str()) {
+            info!("Filtered hallucination: '{raw_text}'");
+            self.transition_to_idle();
+            return;
+        }
+
         // --- Ollama correction ---
         let t_ollama_start = Instant::now();
         let (processed_text, ollama_text) = match self.output_mode {

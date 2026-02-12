@@ -1,5 +1,6 @@
 //! whisper-typer-rs: Speech-to-text dictation service for Linux.
 
+mod code_speaker;
 mod config;
 mod history;
 mod hotkey;
@@ -13,6 +14,7 @@ mod typer;
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -78,7 +80,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Run the service
-    let mut service = service::DictationService::new(config, transcriber, output_mode);
+    let mut service = service::DictationService::new(config.clone(), transcriber, output_mode);
+
+    // Start native TTS server (replaces Python code-speaker.service)
+    if config.tts.enabled {
+        let voice_gate = service.voice_gate();
+
+        info!("Loading Kokoro TTS model...");
+        let mut tts_engine = code_speaker::tts::KokoroTtsEngine::new(&config.tts);
+        match tts_engine.load_model().await {
+            Ok(()) => {
+                let tts = Arc::new(tts_engine);
+                let summarizer = Arc::new(code_speaker::summarizer::OllamaSummarizer::new(
+                    &config.ollama.model,
+                    &config.ollama.host,
+                ));
+                let reminder = Arc::new(code_speaker::reminder::ReminderManager::new(
+                    config.tts.reminder_interval,
+                ));
+
+                let api_state = code_speaker::api::TtsApiState {
+                    tts,
+                    summarizer,
+                    reminder,
+                    voice_gate,
+                    max_direct_chars: config.tts.max_direct_chars,
+                };
+                code_speaker::api::start_tts_api(api_state, config.tts.api_port).await;
+                info!(
+                    "Native TTS server started on port {} (voice: {}, speed: {})",
+                    config.tts.api_port, config.tts.voice, config.tts.speed
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load TTS model: {e}");
+                info!("TTS disabled — continuing without voice output");
+            }
+        }
+    }
+
     service.run().await?;
 
     Ok(())
