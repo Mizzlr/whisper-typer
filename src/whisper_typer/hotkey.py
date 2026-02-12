@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Callable, Optional
+from typing import Callable
 
 from evdev import InputDevice, categorize, ecodes, list_devices
 

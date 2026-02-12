@@ -9,7 +9,9 @@ import yaml
 @dataclass
 class HotkeyConfig:
     combo: list[str] = field(default_factory=lambda: ["KEY_LEFTMETA", "KEY_LEFTALT"])
-    alt_combos: list[list[str]] = field(default_factory=list)  # Alternative hotkey combos
+    alt_combos: list[list[str]] = field(
+        default_factory=list
+    )  # Alternative hotkey combos
 
 
 @dataclass

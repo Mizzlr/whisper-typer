@@ -10,6 +10,9 @@ from .config import WakeWordConfig
 
 logger = logging.getLogger(__name__)
 
+INT16_MAX_F = 32768.0
+_WAKEWORD_COOLDOWN_S = 2.0
+
 
 class WakeWordDetector:
     """Detect wake-word from audio stream using OpenWakeWord."""
@@ -81,7 +84,7 @@ class WakeWordDetector:
             return False
 
         # OpenWakeWord expects int16 audio
-        audio_int16 = (audio_chunk * 32768).astype(np.int16)
+        audio_int16 = (audio_chunk * INT16_MAX_F).astype(np.int16)
 
         # Get predictions
         predictions = self.model.predict(audio_int16)
@@ -92,7 +95,7 @@ class WakeWordDetector:
             # Match model name (partial match)
             if target in model_name.lower() and score >= self.config.threshold:
                 logger.info(f"Wake-word detected: {model_name} (score: {score:.3f})")
-                self._cooldown_until = time.time() + 2.0  # 2s cooldown
+                self._cooldown_until = time.time() + _WAKEWORD_COOLDOWN_S
                 return True
 
         return False

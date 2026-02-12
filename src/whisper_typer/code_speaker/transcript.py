@@ -7,7 +7,9 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def extract_last_assistant_text(transcript_path: str, max_chars: int = 2000) -> Optional[str]:
+def extract_last_assistant_text(
+    transcript_path: str, max_chars: int = 2000
+) -> Optional[str]:
     """Extract the last assistant text message from a Claude Code JSONL transcript.
 
     Walks the file backwards to find the most recent assistant message

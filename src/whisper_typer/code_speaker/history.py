@@ -3,7 +3,7 @@
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -15,19 +15,20 @@ HISTORY_DIR = Path.home() / ".code-speaker-history"
 @dataclass
 class TTSRecord:
     """Record of a single TTS event with per-stage latency."""
+
     timestamp: str
-    event_type: str           # stop, permission, notification, manual
-    input_text_chars: int     # Original text length
-    summarized: bool          # Whether Ollama was used
-    summary_text: str         # What was actually spoken
-    ollama_latency_ms: int    # Summarization time (0 if not summarized)
-    kokoro_latency_ms: int    # Audio generation time
-    playback_duration_ms: int # Playback time
-    total_latency_ms: int     # End-to-end TTS pipeline
-    voice: str                # Kokoro voice used
+    event_type: str  # stop, permission, notification, manual
+    input_text_chars: int  # Original text length
+    summarized: bool  # Whether Ollama was used
+    summary_text: str  # What was actually spoken
+    ollama_latency_ms: int  # Summarization time (0 if not summarized)
+    kokoro_latency_ms: int  # Audio generation time
+    playback_duration_ms: int  # Playback time
+    total_latency_ms: int  # End-to-end TTS pipeline
+    voice: str  # Kokoro voice used
     cancelled: bool = False
     claude_session_ms: Optional[int] = None  # Time Claude spent thinking
-    reminder_count: int = 0   # Reminders fired before user responded
+    reminder_count: int = 0  # Reminders fired before user responded
 
 
 def save_tts_record(record: TTSRecord):
@@ -105,7 +106,8 @@ def generate_tts_report(target_date: str = "today") -> str:
 
     # Claude session duration (stop events only)
     claude_durations = [
-        r.claude_session_ms for r in records
+        r.claude_session_ms
+        for r in records
         if r.event_type == "stop" and r.claude_session_ms is not None
     ]
     avg_claude = avg(claude_durations)
@@ -124,32 +126,38 @@ def generate_tts_report(target_date: str = "today") -> str:
     for etype, recs in sorted(by_type.items()):
         lines.append(f"  {etype}: {len(recs)}")
 
-    lines.extend([
-        "",
-        "--- Latency (non-cancelled events) ---",
-        f"  Ollama summarize: {avg_ollama:.0f}ms avg"
-        f" ({sum(1 for r in non_cancelled if r.summarized)} summarized)",
-        f"  Kokoro generate:  {avg_kokoro:.0f}ms avg",
-        f"  Playback:         {avg_playback:.0f}ms avg",
-        f"  Total pipeline:   {avg_total:.0f}ms avg",
-    ])
+    lines.extend(
+        [
+            "",
+            "--- Latency (non-cancelled events) ---",
+            f"  Ollama summarize: {avg_ollama:.0f}ms avg"
+            f" ({sum(1 for r in non_cancelled if r.summarized)} summarized)",
+            f"  Kokoro generate:  {avg_kokoro:.0f}ms avg",
+            f"  Playback:         {avg_playback:.0f}ms avg",
+            f"  Total pipeline:   {avg_total:.0f}ms avg",
+        ]
+    )
 
     if claude_durations:
-        lines.extend([
-            "",
-            "--- Claude Session Duration ---",
-            f"  Avg thinking time: {avg_claude/1000:.1f}s",
-            f"  Events with timing: {len(claude_durations)}",
-        ])
+        lines.extend(
+            [
+                "",
+                "--- Claude Session Duration ---",
+                f"  Avg thinking time: {avg_claude / 1000:.1f}s",
+                f"  Events with timing: {len(claude_durations)}",
+            ]
+        )
 
     if reminder_counts:
-        lines.extend([
-            "",
-            "--- Reminders ---",
-            f"  Events with reminders: {len(reminder_counts)}",
-            f"  Avg reminders before response: {avg_reminders:.1f}",
-            f"  Max reminders: {max(reminder_counts)}",
-        ])
+        lines.extend(
+            [
+                "",
+                "--- Reminders ---",
+                f"  Events with reminders: {len(reminder_counts)}",
+                f"  Avg reminders before response: {avg_reminders:.1f}",
+                f"  Max reminders: {max(reminder_counts)}",
+            ]
+        )
 
     # Cancelled events
     cancelled = [r for r in records if r.cancelled]

@@ -55,12 +55,15 @@ def write_state(state: dict):
     """Write state (to service if available, else file)."""
     if _service is not None:
         from .service import OutputMode
+
         mode_map = {
             "ollama_only": OutputMode.OLLAMA_ONLY,
             "whisper_only": OutputMode.WHISPER_ONLY,
             "both": OutputMode.BOTH,
         }
-        _service.output_mode = mode_map.get(state.get("output_mode", "ollama_only"), OutputMode.OLLAMA_ONLY)
+        _service.output_mode = mode_map.get(
+            state.get("output_mode", "ollama_only"), OutputMode.OLLAMA_ONLY
+        )
         _service.ollama_enabled = state.get("ollama_enabled", True)
         return
 
@@ -117,8 +120,8 @@ def whisper_get_status() -> str:
     mode_display = state.get("output_mode", "unknown").replace("_", " ").title()
     return f"""WhisperTyper Status:
 - Output Mode: {mode_display}
-- Ollama Enabled: {state.get('ollama_enabled', False)}
-- Recent Transcriptions: {len(state.get('recent_transcriptions', []))}"""
+- Ollama Enabled: {state.get("ollama_enabled", False)}
+- Recent Transcriptions: {len(state.get("recent_transcriptions", []))}"""
 
 
 @mcp.tool()
@@ -155,6 +158,7 @@ def whisper_get_daily_report(date: str = "today") -> str:
 
 # ─── code_speaker TTS tools ────────────────────────────────────────────
 
+
 @mcp.tool()
 def code_speaker_speak(text: str) -> str:
     """Speak text aloud using Kokoro TTS.
@@ -163,11 +167,12 @@ def code_speaker_speak(text: str) -> str:
         text: The text to speak aloud
     """
     import httpx
+
     try:
         port = 8767
         if _service and hasattr(_service, "tts_config"):
             port = _service.tts_config.api_port
-        resp = httpx.post(
+        httpx.post(
             f"http://localhost:{port}/speak",
             json={"text": text, "summarize": False, "event_type": "manual"},
             timeout=5.0,
@@ -185,6 +190,7 @@ def code_speaker_set_voice(voice: str) -> str:
         voice: Voice name (e.g., 'af_heart', 'bf_emma', 'am_adam')
     """
     import httpx
+
     try:
         port = 8767
         if _service and hasattr(_service, "tts_config"):
@@ -260,10 +266,11 @@ def code_speaker_report(date: str = "today") -> str:
 
     # Get both STT and TTS reports
     from .history import generate_report
+
     stt_report = generate_report(date)
     tts_report = generate_tts_report(date)
 
-    return f"{stt_report}\n\n{'='*50}\n\n{tts_report}"
+    return f"{stt_report}\n\n{'=' * 50}\n\n{tts_report}"
 
 
 if __name__ == "__main__":

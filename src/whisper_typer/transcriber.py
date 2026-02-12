@@ -1,7 +1,6 @@
 """Whisper transcription using transformers pipeline."""
 
 import logging
-from typing import Optional
 
 import numpy as np
 import torch

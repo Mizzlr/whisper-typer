@@ -1,7 +1,6 @@
 """Desktop notifications using libnotify."""
 
 import logging
-from typing import Optional
 
 from .config import FeedbackConfig
 
@@ -10,8 +9,10 @@ logger = logging.getLogger(__name__)
 # Try to import Notify, but don't fail if not available
 try:
     import gi
+
     gi.require_version("Notify", "0.7")
     from gi.repository import Notify
+
     HAS_NOTIFY = True
 except (ImportError, ValueError):
     HAS_NOTIFY = False
@@ -59,44 +60,26 @@ class Notifier:
 
     def recording_started(self):
         """Notification when recording starts."""
-        self.show(
-            "Recording",
-            "Speak now... Release keys when done.",
-            "media-record"
-        )
+        self.show("Recording", "Speak now... Release keys when done.", "media-record")
 
     def recording_stopped(self):
         """Notification when recording stops."""
-        self.show(
-            "Processing",
-            "Transcribing your speech...",
-            "system-run"
-        )
+        self.show("Processing", "Transcribing your speech...", "system-run")
 
     def transcription_complete(self, text: str):
         """Notification when transcription is done and typed."""
         # Show a preview of what was typed
         preview = text[:80] + "..." if len(text) > 80 else text
-        self.show(
-            "Typed",
-            preview,
-            "dialog-ok"
-        )
+        self.show("Typed", preview, "dialog-ok")
 
     def error(self, message: str):
         """Notification for errors."""
-        self.show(
-            "Error",
-            message,
-            "dialog-error"
-        )
+        self.show("Error", message, "dialog-error")
 
     def service_ready(self):
         """Notification when service is ready."""
         self.show(
-            "Whisper Input Ready",
-            "Hold Win+Alt to dictate",
-            "audio-input-microphone"
+            "Whisper Input Ready", "Hold Win+Alt to dictate", "audio-input-microphone"
         )
 
     def close(self):

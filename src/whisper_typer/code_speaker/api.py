@@ -9,7 +9,6 @@ import json
 import logging
 import threading
 import time
-from functools import partial
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
 
@@ -36,13 +35,15 @@ class TTSRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/status":
-            self._send_json({
-                "speaking": self.server.tts.is_speaking,
-                "voice": self.server.tts.config.voice,
-                "model_loaded": self.server.tts.is_loaded,
-                "reminder_active": self.server.reminder.is_active,
-                "reminder_count": self.server.reminder.reminder_count,
-            })
+            self._send_json(
+                {
+                    "speaking": self.server.tts.is_speaking,
+                    "voice": self.server.tts.config.voice,
+                    "model_loaded": self.server.tts.is_loaded,
+                    "reminder_active": self.server.reminder.is_active,
+                    "reminder_count": self.server.reminder.reminder_count,
+                }
+            )
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -66,7 +67,9 @@ class TTSRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "empty text"}, 400)
                 return
 
-            logger.info(f"HTTP /speak: event={event_type} text={len(text)} chars summarize={summarize}")
+            logger.info(
+                f"HTTP /speak: event={event_type} text={len(text)} chars summarize={summarize}"
+            )
 
             # Fire-and-forget: schedule TTS on the event loop
             future = asyncio.run_coroutine_threadsafe(
@@ -131,7 +134,9 @@ class TTSHTTPServer(HTTPServer):
         Cancels any in-flight speak task before starting a new one.
         The speak lock in KokoroTTS ensures only one speak() runs at a time.
         """
-        logger.info(f"handle_speak START [{event_type}]: text={len(text)} chars, summarize={summarize}")
+        logger.info(
+            f"handle_speak START [{event_type}]: text={len(text)} chars, summarize={summarize}"
+        )
 
         # Cancel any existing reminder
         self.reminder.cancel()
@@ -168,7 +173,9 @@ class TTSHTTPServer(HTTPServer):
             if summarize and len(text) > max_chars:
                 spoken_text, ollama_ms = await self.summarizer.summarize(text)
                 summarized = True
-                logger.info(f"Summarized {len(text)} chars → {len(spoken_text)} chars ({ollama_ms:.0f}ms)")
+                logger.info(
+                    f"Summarized {len(text)} chars → {len(spoken_text)} chars ({ollama_ms:.0f}ms)"
+                )
 
             # Speak (lock is inside speak())
             result: SpeakResult = await self.tts.speak(spoken_text)

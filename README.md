@@ -2,15 +2,20 @@
 
 Speech-to-text dictation service for Linux using Whisper and Ollama.
 
-Press a hotkey, speak, and your words are transcribed and typed into any application.
+Press a hotkey (or say a wake word), speak, and your words are transcribed and typed into any application.
 
 ## Features
 
-- **Instant recording** - Always-running audio stream for ~10ms latency
+- **Instant recording** - Always-running audio stream for ~10ms startup latency
 - **Whisper transcription** - Uses distil-whisper/distil-large-v3 for fast, accurate ASR
 - **Ollama correction** - Optional grammar/spelling correction via local LLM
-- **Clipboard paste** - Works with any keyboard layout (Dvorak, Colemak, etc.)
+- **Wake word activation** - Hands-free recording with OpenWakeWord (e.g., "Hey Jarvis")
+- **Silence detection** - Auto-stops recording after speech ends (wake word mode)
+- **Hallucination filtering** - Blocks common Whisper phantom outputs ("Thank you", "Bye", etc.)
+- **Multiple typing backends** - ydotool, dotool, or xdotool with auto-detection
+- **Code Speaker TTS** - Text-to-speech output via Kokoro ONNX for Claude Code events
 - **MCP integration** - Control from Claude Code via MCP server
+- **Productivity reports** - Daily transcription history with latency breakdowns
 - **Desktop notifications** - Visual feedback via libnotify
 
 ## Installation
@@ -55,6 +60,18 @@ python -m whisper_typer --verbose
 python -m whisper_typer --mode whisper    # Raw transcription only
 python -m whisper_typer --mode ollama     # Ollama-corrected only (default)
 python -m whisper_typer --mode both       # Show both outputs
+
+# Enable wake word activation
+python -m whisper_typer --enable-wakeword
+python -m whisper_typer --enable-wakeword --wakeword-model hey_jarvis
+
+# Enable Code Speaker TTS
+python -m whisper_typer --enable-tts --tts-voice af_heart
+
+# View productivity report
+python -m whisper_typer --report            # Today's report
+python -m whisper_typer --report 2026-02-12  # Specific date
+python -m whisper_typer --report list        # List available dates
 ```
 
 ### Run as systemd service
@@ -84,6 +101,7 @@ Default hotkey combinations (configurable in `config.yaml`):
 |--------|-------------|
 | Win + Alt | Primary hotkey |
 | Ctrl + Alt | Alternative |
+| Page Down + Right Arrow | Alternative |
 | Page Down + Down Arrow | Alternative |
 
 Press and hold to record, release to transcribe.
@@ -94,17 +112,41 @@ Create `config.yaml` in the working directory:
 
 ```yaml
 hotkey:
-  combo: win+alt
+  combo: [KEY_LEFTMETA, KEY_LEFTALT]
   alt_combos:
-    - ctrl+alt
-    - pagedown+down
+    - [KEY_LEFTCTRL, KEY_LEFTALT]
+    - [KEY_PAGEDOWN, KEY_DOWN]
 
-ollama:
-  model: qwen2.5:1.5b
-  host: http://127.0.0.1:11434
+audio:
+  sample_rate: 16000
+  # device_index: null  # null = default device
 
 whisper:
   model: distil-whisper/distil-large-v3
+  device: cuda  # cuda, cpu, or mps
+
+ollama:
+  enabled: true
+  model: qwen2.5:1.5b
+  host: http://127.0.0.1:11434
+
+typer:
+  backend: auto  # auto, ydotool, dotool, or xdotool
+
+wakeword:
+  enabled: false
+  model: hey_jarvis
+  threshold: 0.5
+
+silence:
+  threshold: 0.01
+  duration: 1.5
+
+tts:
+  enabled: false
+  voice: af_heart
+  speed: 1.0
+  api_port: 8767
 ```
 
 ## MCP Integration
@@ -129,53 +171,81 @@ Available MCP tools:
 - `whisper_enable_ollama` / `whisper_disable_ollama` - Toggle Ollama
 - `whisper_get_status` - Get current configuration
 - `whisper_get_recent` - Get recent transcriptions
+- `whisper_report` - View productivity reports
+- `code_speaker_speak` - Speak text aloud via Kokoro TTS
+- `code_speaker_set_voice` - Change TTS voice
+- `code_speaker_report` - View TTS latency reports
 
 ## Architecture
 
 ```
-Hotkey ──▶ Recorder ──▶ Whisper ──▶ Ollama ──▶ Clipboard ──▶ App
-(evdev)    (PyAudio)    (ASR)       (LLM)      (xclip)
+                    ┌─────────────┐
+Wake Word ─────────▶│             │
+(OpenWakeWord)      │             │
+                    │   Service   │──▶ Notifier (libnotify)
+Hotkey ────────────▶│   (state    │
+(evdev)             │   machine)  │──▶ MCP Server (FastMCP)
+                    │             │
+                    └──────┬──────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+          Recorder      Ollama       Typer
+         (PyAudio)     Client      (ydotool/
+              │        (httpx)      xdotool)
+              ▼            │
+         Transcriber       ├──▶ Processor (grammar)
+         (Whisper)         └──▶ Summarizer (TTS)
+                                     │
+                                     ▼
+                               Code Speaker
+                               (Kokoro TTS)
+```
 
-           ┌───────┐    ┌───────────┐    ┌────────────┐
-State:     │ IDLE  │───▶│ RECORDING │───▶│ PROCESSING │──┐
-           └───────┘    └───────────┘    └────────────┘  │
-               ▲                                         │
-               └─────────────────────────────────────────┘
+### State Machine
+
+```
+                    ┌──(hotkey pressed)──▶ RECORDING ──(hotkey released)──┐
+                    │                                                     │
+IDLE ◀──(done)──────┤                                                     ├──▶ PROCESSING
+                    │                                                     │
+                    └──(wake word)──▶ WAKE_RECORDING ──(silence)─────────┘
 ```
 
 ### Components
 
 | Component | File | Description |
 |-----------|------|-------------|
-| Service | `service.py` | Main orchestration, state machine |
-| Hotkey | `hotkey.py` | evdev-based hotkey detection |
-| Recorder | `recorder.py` | PyAudio with always-running stream (~10ms latency) |
+| Service | `service.py` | Main orchestration and state machine |
+| Ollama Client | `ollama_client.py` | Shared async HTTP client for Ollama API |
+| Hotkey | `hotkey.py` | evdev-based global hotkey detection |
+| Recorder | `recorder.py` | PyAudio with always-running stream, subscriber pattern |
 | Transcriber | `transcriber.py` | Whisper ASR via HuggingFace transformers |
-| Processor | `processor.py` | Ollama integration for grammar/spelling correction |
-| Typer | `typer.py` | xdotool + xclip for clipboard paste output |
-| MCP Server | `mcp_server.py` | External control from Claude Code |
+| Processor | `processor.py` | Ollama grammar/spelling correction |
+| Typer | `typer.py` | Multi-backend text typing (ydotool/dotool/xdotool) |
+| Wake Word | `wakeword.py` | OpenWakeWord-based voice activation |
+| Silence Detector | `silence_detector.py` | RMS-based silence detection for auto-stop |
+| MCP Server | `mcp_server.py` | FastMCP server for Claude Code control |
 | Notifier | `notifier.py` | Desktop notifications via libnotify |
-
-### State Machine
-
-```
-IDLE ──(hotkey pressed)──▶ RECORDING ──(hotkey released)──▶ PROCESSING ──(done)──▶ IDLE
-```
+| History | `history.py` | Transcription logging and productivity reports |
+| TTS Engine | `code_speaker/tts.py` | Kokoro ONNX text-to-speech |
+| TTS API | `code_speaker/api.py` | HTTP API server for TTS requests |
+| Summarizer | `code_speaker/summarizer.py` | Ollama text summarization for TTS |
+| Reminder | `code_speaker/reminder.py` | Escalating TTS reminders |
+| Config | `config.py` | Dataclass-based YAML configuration |
 
 ## Requirements
 
 - Python 3.10+
 - CUDA-capable GPU (recommended for Whisper)
 - Ollama running locally (optional, for text correction)
-- X11 display server (for xdotool/xclip)
+- X11 display server (for xdotool/xclip) or Wayland (for ydotool/dotool)
 
 ## Roadmap
 
 ### Streaming Transcription
 
 Currently, transcription happens after the hotkey is released. Future work could add real-time streaming output as you speak.
-
-**Options to explore**:
 
 | Approach | Library | Latency | Notes |
 |----------|---------|---------|-------|
@@ -184,20 +254,6 @@ Currently, transcription happens after the hotkey is released. Future work could
 | SimulStreaming | [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) | <1s | SOTA 2025, AlignAtt policy |
 
 **Recommended starting point**: Silero-VAD + faster-whisper, since we already have silence detection infrastructure.
-
-### Wake Word Detection
-
-Replace hotkey activation with voice-triggered recording using a wake word like "Hey Claude".
-
-**Options to explore**:
-
-| Library | Notes |
-|---------|-------|
-| [Porcupine](https://github.com/Picovoice/porcupine) | Commercial, custom wake words, low latency |
-| [OpenWakeWord](https://github.com/dscripka/openWakeWord) | Open source, pre-trained models, custom training |
-| [Whisper-based](https://github.com/snakers4/silero-vad) | Use VAD + small Whisper model to detect phrase |
-
-**Recommended starting point**: OpenWakeWord - open source, supports custom wake words, runs on CPU.
 
 ## License
 

@@ -16,6 +16,7 @@ HISTORY_DIR = Path.home() / ".whisper-typer-history"
 @dataclass
 class TranscriptionRecord:
     """Record of a single transcription."""
+
     timestamp: str  # ISO 8601 format
     whisper_text: str
     ollama_text: Optional[str]
@@ -98,7 +99,7 @@ def _truncate(text: str, max_len: int = 50) -> str:
     """Truncate text for table display."""
     if len(text) <= max_len:
         return text
-    return text[:max_len - 3] + "..."
+    return text[: max_len - 3] + "..."
 
 
 def generate_report(date: str = "today") -> str:
@@ -123,9 +124,15 @@ def generate_report(date: str = "today") -> str:
     ollama_latencies = [r.ollama_latency_ms for r in records if r.ollama_latency_ms]
     typing_latencies = [r.typing_latency_ms for r in records]
 
-    avg_whisper = sum(whisper_latencies) / len(whisper_latencies) if whisper_latencies else 0
-    avg_ollama = sum(ollama_latencies) / len(ollama_latencies) if ollama_latencies else 0
-    avg_typing = sum(typing_latencies) / len(typing_latencies) if typing_latencies else 0
+    avg_whisper = (
+        sum(whisper_latencies) / len(whisper_latencies) if whisper_latencies else 0
+    )
+    avg_ollama = (
+        sum(ollama_latencies) / len(ollama_latencies) if ollama_latencies else 0
+    )
+    avg_typing = (
+        sum(typing_latencies) / len(typing_latencies) if typing_latencies else 0
+    )
     avg_speed = sum(r.speed_ratio for r in records) / len(records) if records else 0
 
     # Build report
@@ -149,13 +156,15 @@ def generate_report(date: str = "today") -> str:
     lines.append(f"- Typing: {avg_typing:.0f}ms")
 
     # Transcription log table
-    lines.extend([
-        "",
-        "## Transcription Log",
-        "",
-        "| Time | Whisper | Ollama | Chars | Speed |",
-        "|------|---------|--------|-------|-------|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Transcription Log",
+            "",
+            "| Time | Whisper | Ollama | Chars | Speed |",
+            "|------|---------|--------|-------|-------|",
+        ]
+    )
 
     for r in records:
         # Extract time from timestamp

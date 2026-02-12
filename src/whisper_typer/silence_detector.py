@@ -40,7 +40,9 @@ class SilenceDetector:
 
         # Check max recording duration
         if elapsed >= self.config.max_recording_duration:
-            logger.info(f"Max recording duration reached ({self.config.max_recording_duration}s)")
+            logger.info(
+                f"Max recording duration reached ({self.config.max_recording_duration}s)"
+            )
             return True
 
         # Don't check silence until minimum duration passed
@@ -48,7 +50,7 @@ class SilenceDetector:
             return False
 
         # Calculate RMS energy
-        rms = np.sqrt(np.mean(audio_chunk ** 2))
+        rms = np.sqrt(np.mean(audio_chunk**2))
         is_silent = rms < self.config.threshold
 
         if is_silent:

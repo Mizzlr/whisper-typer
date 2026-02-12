@@ -7,19 +7,19 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from ..config import TTSConfig
 
 logger = logging.getLogger(__name__)
 
 # Sentence boundary pattern: split on .!? followed by whitespace
-SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+')
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 @dataclass
 class SpeakResult:
     """Result of a speak operation with timing info."""
+
     generate_ms: float
     playback_ms: float
     cancelled: bool
@@ -55,7 +55,9 @@ class KokoroTTS:
             from kokoro_onnx import Kokoro
 
             # Find model files
-            model_dir = Path(self.config.model_path) if self.config.model_path else Path.cwd()
+            model_dir = (
+                Path(self.config.model_path) if self.config.model_path else Path.cwd()
+            )
             onnx_path = model_dir / "kokoro-v1.0.onnx"
             voices_path = model_dir / "voices-v1.0.bin"
 
@@ -67,9 +69,9 @@ class KokoroTTS:
 
             if not onnx_path.exists():
                 raise FileNotFoundError(
-                    f"Kokoro model not found. Download with:\n"
-                    f"  wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx\n"
-                    f"  wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+                    "Kokoro model not found. Download with:\n"
+                    "  wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx\n"
+                    "  wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
                 )
 
             logger.info(f"Loading Kokoro model from {onnx_path}")
@@ -111,7 +113,7 @@ class KokoroTTS:
             for i, sentence in enumerate(sentences):
                 if self._cancel_event.is_set():
                     cancelled = True
-                    logger.info(f"Cancelled before sentence {i+1}/{len(sentences)}")
+                    logger.info(f"Cancelled before sentence {i + 1}/{len(sentences)}")
                     break
 
                 # Generate audio
@@ -127,7 +129,9 @@ class KokoroTTS:
 
                 if self._cancel_event.is_set():
                     cancelled = True
-                    logger.info(f"Cancelled after generating sentence {i+1}/{len(sentences)}")
+                    logger.info(
+                        f"Cancelled after generating sentence {i + 1}/{len(sentences)}"
+                    )
                     break
 
                 # Play audio
@@ -139,12 +143,14 @@ class KokoroTTS:
                 # Check if playback was cancelled (sd.stop() called)
                 if self._cancel_event.is_set():
                     cancelled = True
-                    logger.info(f"Cancelled during playback of sentence {i+1}/{len(sentences)}")
+                    logger.info(
+                        f"Cancelled during playback of sentence {i + 1}/{len(sentences)}"
+                    )
                     break
 
                 duration = len(samples) / sample_rate
                 logger.debug(
-                    f"Sentence {i+1}/{len(sentences)}: "
+                    f"Sentence {i + 1}/{len(sentences)}: "
                     f"gen={gen_ms:.0f}ms play={duration:.1f}s"
                 )
 
@@ -184,6 +190,7 @@ class KokoroTTS:
         self._cancel_event.set()
         try:
             import sounddevice as sd
+
             sd.stop()
         except Exception:
             pass

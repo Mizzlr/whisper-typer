@@ -11,6 +11,9 @@ from .config import AudioConfig, RecordingConfig
 
 logger = logging.getLogger(__name__)
 
+# Audio normalization: int16 range is [-32768, 32767], divide by this for [-1, 1] float32
+INT16_MAX_F = 32768.0
+
 # Type alias for audio subscriber callbacks
 AudioSubscriber = Callable[[np.ndarray], None]
 
@@ -55,7 +58,9 @@ class AudioRecorder:
             logger.warning(f"PyAudio status: {status}")
 
         # Convert to numpy for subscribers
-        audio_np = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+        audio_np = (
+            np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / INT16_MAX_F
+        )
 
         # Notify all subscribers (wake-word detector, silence detector, etc.)
         with self._subscribers_lock:
@@ -129,7 +134,7 @@ class AudioRecorder:
         """Convert raw audio bytes to numpy array for Whisper."""
         audio_array = np.frombuffer(audio_data, dtype=np.int16)
         # Normalize to [-1, 1] range as float32
-        return audio_array.astype(np.float32) / 32768.0
+        return audio_array.astype(np.float32) / INT16_MAX_F
 
     def is_silent(self, audio_data: bytes, threshold: float = 0.01) -> bool:
         """Check if audio is mostly silence based on RMS energy.
@@ -143,7 +148,7 @@ class AudioRecorder:
             True if audio is silent, False if speech detected
         """
         audio = self.get_audio_as_numpy(audio_data)
-        rms = np.sqrt(np.mean(audio ** 2))
+        rms = np.sqrt(np.mean(audio**2))
         logger.debug(f"Audio RMS energy: {rms:.4f} (threshold: {threshold})")
         return rms < threshold
 

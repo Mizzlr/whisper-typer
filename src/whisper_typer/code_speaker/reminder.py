@@ -51,9 +51,7 @@ class ReminderManager:
                 if self._speak_fn:
                     await self._speak_fn(text)
         except asyncio.CancelledError:
-            logger.info(
-                f"Reminder cancelled after {self._reminder_count} reminders"
-            )
+            logger.info(f"Reminder cancelled after {self._reminder_count} reminders")
 
     def cancel(self):
         """Cancel all pending reminders."""

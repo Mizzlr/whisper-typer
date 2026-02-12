@@ -25,6 +25,7 @@ def setup_logging(verbose: bool = False):
 
     # Suppress deprecation warnings from transformers
     import warnings
+
     warnings.filterwarnings("ignore", message=".*return_token_timestamps.*")
     warnings.filterwarnings("ignore", message=".*torch_dtype.*is deprecated.*")
 
@@ -35,12 +36,14 @@ def parse_args():
         description="Speech-to-text dictation service with hotkey activation"
     )
     parser.add_argument(
-        "-c", "--config",
+        "-c",
+        "--config",
         type=Path,
         help="Path to config file (default: ./config.yaml)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Enable debug logging",
     )
@@ -119,7 +122,9 @@ def list_audio_devices():
     print("-" * 50)
     for device in devices:
         print(f"  Index {device['index']}: {device['name']}")
-        print(f"           Channels: {device['channels']}, Rate: {device['sample_rate']}Hz")
+        print(
+            f"           Channels: {device['channels']}, Rate: {device['sample_rate']}Hz"
+        )
     print()
 
 
@@ -164,6 +169,7 @@ def main():
 
     if args.report:
         from .history import generate_report, list_available_dates
+
         if args.report == "list":
             dates = list_available_dates()
             if not dates:
@@ -187,15 +193,19 @@ def main():
         return 0
 
     if args.test_tts:
+
         async def _test_tts():
             from .config import TTSConfig
             from .code_speaker.tts import KokoroTTS
+
             tts_config = TTSConfig(enabled=True, voice=args.tts_voice or "af_heart")
             tts = KokoroTTS(tts_config)
             await tts.load_model()
             result = await tts.speak(args.test_tts)
-            print(f"Spoke: \"{args.test_tts}\"")
-            print(f"  Generate: {result.generate_ms:.0f}ms, Playback: {result.playback_ms:.0f}ms")
+            print(f'Spoke: "{args.test_tts}"')
+            print(
+                f"  Generate: {result.generate_ms:.0f}ms, Playback: {result.playback_ms:.0f}ms"
+            )
             tts.unload_model()
 
         asyncio.run(_test_tts())
@@ -223,7 +233,9 @@ def main():
     output_mode = mode_map[args.mode]
 
     # Create and run service
-    service = DictationService(config, output_mode=output_mode, disable_ollama=args.no_ollama)
+    service = DictationService(
+        config, output_mode=output_mode, disable_ollama=args.no_ollama
+    )
 
     try:
         asyncio.run(service.run())

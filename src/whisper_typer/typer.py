@@ -53,17 +53,14 @@ def detect_display() -> tuple[str | None, str | None]:
     for display_num in range(4):
         display = f":{display_num}"
         if _test_display(display, xauthority):
-            logger.info(f"Detected working display: DISPLAY={display}, XAUTHORITY={xauthority}")
+            logger.info(
+                f"Detected working display: DISPLAY={display}, XAUTHORITY={xauthority}"
+            )
             return display, xauthority
 
     # Try to get display from 'w' command (shows logged-in users and their displays)
     try:
-        result = subprocess.run(
-            ["w", "-hs"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
+        result = subprocess.run(["w", "-hs"], capture_output=True, text=True, timeout=5)
         for line in result.stdout.splitlines():
             parts = line.split()
             if len(parts) >= 3:
@@ -88,10 +85,7 @@ def _test_display(display: str, xauthority: str | None) -> bool:
 
     try:
         result = subprocess.run(
-            ["xdotool", "getactivewindow"],
-            capture_output=True,
-            env=env,
-            timeout=2
+            ["xdotool", "getactivewindow"], capture_output=True, env=env, timeout=2
         )
         return result.returncode == 0
     except Exception:
@@ -105,6 +99,11 @@ class TextTyper:
         self.config = config
         self.backend = self._detect_backend()
         self._display_env: dict[str, str] | None = None
+        self._type_dispatch = {
+            "ydotool": self._type_ydotool,
+            "dotool": self._type_dotool,
+            "xdotool": self._type_xdotool,
+        }
         logger.info(f"Using typing backend: {self.backend}")
 
         # Pre-detect display for X11-based backends
@@ -153,14 +152,7 @@ class TextTyper:
         logger.debug(f"Typing {len(text)} characters")
 
         try:
-            if self.backend == "ydotool":
-                self._type_ydotool(text)
-            elif self.backend == "dotool":
-                self._type_dotool(text)
-            elif self.backend == "xdotool":
-                self._type_xdotool(text)
-            else:
-                raise RuntimeError(f"Unknown backend: {self.backend}")
+            self._type_dispatch[self.backend](text)
         except subprocess.CalledProcessError as e:
             logger.error(f"Typing failed: {e}")
             raise RuntimeError(f"Failed to type text: {e}")
@@ -175,7 +167,9 @@ class TextTyper:
                 capture_output=True,
                 text=True,
             )
-            logger.debug(f"ydotool (new) stdout: {result.stdout}, stderr: {result.stderr}")
+            logger.debug(
+                f"ydotool (new) stdout: {result.stdout}, stderr: {result.stderr}"
+            )
         except subprocess.CalledProcessError as e:
             logger.debug(f"ydotool new syntax failed: {e.stderr}, trying old syntax")
             # Older ydotool (0.1.x) has simpler syntax
@@ -184,7 +178,9 @@ class TextTyper:
                 capture_output=True,
                 text=True,
             )
-            logger.debug(f"ydotool (old) returncode: {result.returncode}, stdout: {result.stdout}, stderr: {result.stderr}")
+            logger.debug(
+                f"ydotool (old) returncode: {result.returncode}, stdout: {result.stdout}, stderr: {result.stderr}"
+            )
             if result.returncode != 0:
                 raise RuntimeError(f"ydotool failed: {result.stderr}")
 

@@ -12,9 +12,6 @@ from typing import Optional
 
 from .config import Config
 from .history import TranscriptionRecord, save_record
-
-# Shared state file for MCP control
-STATE_FILE = Path.home() / ".cache" / "whisper-typer" / "state.json"
 from .hotkey import HotkeyMonitor
 from .notifier import Notifier
 from .processor import OllamaProcessor
@@ -24,28 +21,57 @@ from .transcriber import WhisperTranscriber
 from .typer import TextTyper
 from .wakeword import WakeWordDetector
 
+# Shared state file for MCP control
+STATE_FILE = Path.home() / ".cache" / "whisper-typer" / "state.json"
+
 logger = logging.getLogger(__name__)
+
+# Common Whisper hallucinations to filter out (produced from silence or background noise)
+_HALLUCINATIONS = frozenset(
+    {
+        "thank you",
+        "thank you.",
+        "thanks.",
+        "thanks",
+        "thanks for watching",
+        "thanks for watching.",
+        "subscribe",
+        "like and subscribe",
+        "you",
+        "bye",
+        "bye.",
+        "goodbye",
+        "goodbye.",
+    }
+)
 
 
 class ServiceState(Enum):
     """Service state machine states."""
+
     IDLE = "idle"
-    RECORDING = "recording"        # Hotkey-triggered recording
+    RECORDING = "recording"  # Hotkey-triggered recording
     WAKE_RECORDING = "wake_recording"  # Wake-word triggered recording
     PROCESSING = "processing"
 
 
 class OutputMode(Enum):
     """Output mode for transcription."""
-    BOTH = "both"           # Ollama output + [Whisper raw] in brackets
+
+    BOTH = "both"  # Ollama output + [Whisper raw] in brackets
     WHISPER_ONLY = "whisper_only"  # Only raw Whisper output
-    OLLAMA_ONLY = "ollama_only"    # Only Ollama output (no brackets)
+    OLLAMA_ONLY = "ollama_only"  # Only Ollama output (no brackets)
 
 
 class DictationService:
     """Main service that orchestrates all components."""
 
-    def __init__(self, config: Config, output_mode: OutputMode = OutputMode.OLLAMA_ONLY, disable_ollama: bool = False):
+    def __init__(
+        self,
+        config: Config,
+        output_mode: OutputMode = OutputMode.OLLAMA_ONLY,
+        disable_ollama: bool = False,
+    ):
         self.config = config
         self.state = ServiceState.IDLE
         self.running = False
@@ -112,7 +138,9 @@ class DictationService:
             if new_mode != self.output_mode or new_ollama != self.ollama_enabled:
                 self.output_mode = new_mode
                 self.ollama_enabled = new_ollama
-                logger.info(f"═══ MCP state change: mode={new_mode.value}, ollama={new_ollama} ═══")
+                logger.info(
+                    f"═══ MCP state change: mode={new_mode.value}, ollama={new_ollama} ═══"
+                )
         except Exception as e:
             logger.debug(f"Error reading MCP state: {e}")
 
@@ -123,7 +151,6 @@ class DictationService:
         self._recent_transcriptions.append(text)
         self._recent_transcriptions = self._recent_transcriptions[-20:]  # Keep last 20
         self._write_mcp_state()
-
 
     def _on_hotkey_press(self):
         """Called when hotkey combination is pressed."""
@@ -160,9 +187,7 @@ class DictationService:
 
         # Schedule async processing
         if self._loop:
-            self._process_task = self._loop.create_task(
-                self._process_audio(audio_data)
-            )
+            self._process_task = self._loop.create_task(self._process_audio(audio_data))
 
     def _on_wakeword_detected(self):
         """Called when wake-word is detected."""
@@ -194,13 +219,10 @@ class DictationService:
         audio_data = self.recorder.stop()
 
         if self._loop:
-            self._process_task = self._loop.create_task(
-                self._process_audio(audio_data)
-            )
+            self._process_task = self._loop.create_task(self._process_audio(audio_data))
 
     def _audio_subscriber(self, audio_chunk):
         """Process audio from recorder stream for wake-word and silence detection."""
-        import numpy as np
 
         # Wake-word detection when idle
         if self.state == ServiceState.IDLE:
@@ -216,53 +238,85 @@ class DictationService:
                 if self._loop:
                     self._loop.call_soon_threadsafe(self._on_silence_detected)
 
+    def _format_output(self, text: str, processed_text: str) -> str:
+        """Build final output text based on output mode."""
+        if self.output_mode == OutputMode.BOTH and processed_text != text:
+            return f"{processed_text} [{text}] "
+        if self.output_mode == OutputMode.WHISPER_ONLY:
+            return f"{text} "
+        return f"{processed_text} "
+
+    def _save_transcription_record(
+        self,
+        text: str,
+        processed_text: str,
+        final_text: str,
+        audio_duration: float,
+        t_whisper: float,
+        t_ollama: float,
+        t_type: float,
+        t_total: float,
+    ) -> None:
+        """Save transcription to history for productivity tracking."""
+        from datetime import datetime
+
+        record = TranscriptionRecord(
+            timestamp=datetime.now().isoformat(),
+            whisper_text=text,
+            ollama_text=processed_text
+            if self.ollama_enabled and t_ollama > 0
+            else None,
+            final_text=final_text,
+            output_mode=self.output_mode.value,
+            whisper_latency_ms=int(t_whisper),
+            ollama_latency_ms=int(t_ollama) if t_ollama > 0 else None,
+            typing_latency_ms=int(t_type),
+            total_latency_ms=int(t_total),
+            audio_duration_s=round(audio_duration, 2),
+            char_count=len(final_text),
+            word_count=len(final_text.split()),
+            speed_ratio=round((audio_duration * 1000) / t_total, 1)
+            if t_total > 0
+            else 0,
+        )
+        save_record(record)
+
     async def _process_audio(self, audio_data: bytes):
         """Process recorded audio: transcribe, fix grammar, type."""
         t_start = time.perf_counter()
-
-        # Check for MCP state changes
         self._read_mcp_state()
 
         try:
-            audio_duration = len(audio_data) / (self.config.audio.sample_rate * 2)  # 2 bytes per sample
-            logger.info(f"{'─'*50}")
-            logger.info(f"Processing {len(audio_data):,} bytes ({audio_duration:.1f}s audio)")
+            audio_duration = len(audio_data) / (self.config.audio.sample_rate * 2)
+            logger.info(f"{'─' * 50}")
+            logger.info(
+                f"Processing {len(audio_data):,} bytes ({audio_duration:.1f}s audio)"
+            )
 
             if len(audio_data) < 1000:
-                logger.warning("⚠️  Recording too short, ignoring")
+                logger.warning("Recording too short, ignoring")
                 self.notifier.error("Recording too short")
                 return
 
-            # Check for silence (prevents Whisper hallucinations like "Thank you")
             if self.recorder.is_silent(audio_data):
-                logger.warning("⚠️  Audio is silent, ignoring (prevents hallucination)")
+                logger.warning("Audio is silent, ignoring (prevents hallucination)")
                 self.notifier.error("No speech detected")
                 return
 
-            # Convert to numpy array
-            audio = self.recorder.get_audio_as_numpy(audio_data)
-
             # Transcribe with Whisper
+            audio = self.recorder.get_audio_as_numpy(audio_data)
             t_whisper_start = time.perf_counter()
             text = self.transcriber.transcribe(
-                audio,
-                sample_rate=self.config.audio.sample_rate,
+                audio, sample_rate=self.config.audio.sample_rate
             )
             t_whisper = (time.perf_counter() - t_whisper_start) * 1000
 
             if not text.strip():
-                logger.warning("⚠️  No speech detected")
+                logger.warning("No speech detected")
                 self.notifier.error("No speech detected")
                 return
 
-            # Filter common Whisper hallucinations
-            hallucinations = {
-                "thank you", "thank you.", "thanks.", "thanks",
-                "thanks for watching", "thanks for watching.",
-                "subscribe", "like and subscribe",
-                "you", "bye", "bye.", "goodbye", "goodbye.",
-            }
-            if text.strip().lower() in hallucinations:
+            if text.strip().lower() in _HALLUCINATIONS:
                 logger.warning(f"Filtered hallucination: '{text}'")
                 self.notifier.error("No speech detected")
                 return
@@ -276,52 +330,36 @@ class DictationService:
                 processed_text = text
                 t_ollama = 0
 
-            # Build final output based on mode
-            if self.output_mode == OutputMode.BOTH and processed_text != text:
-                final_text = f"{processed_text} [{text}]"
-            elif self.output_mode == OutputMode.WHISPER_ONLY:
-                final_text = text
-            else:
-                final_text = processed_text
-
-            final_text += " "
+            final_text = self._format_output(text, processed_text)
 
             # Type the result
             t_type_start = time.perf_counter()
             self.typer.type_text(final_text)
             t_type = (time.perf_counter() - t_type_start) * 1000
-
             t_total = (time.perf_counter() - t_start) * 1000
 
-            # Log with latencies
-            logger.info(f"─── Dictation Complete ───")
-            logger.info(f"  Whisper [{t_whisper:.0f}ms]: \"{text}\"")
+            # Log results
+            logger.info("─── Dictation Complete ───")
+            logger.info(f'  Whisper [{t_whisper:.0f}ms]: "{text}"')
             if self.ollama_enabled and t_ollama > 0:
-                logger.info(f"  Ollama  [{t_ollama:.0f}ms]: \"{processed_text}\"")
+                logger.info(f'  Ollama  [{t_ollama:.0f}ms]: "{processed_text}"')
             logger.info(f"  Typed   [{t_type:.0f}ms]: {len(final_text)} chars")
-            logger.info(f"  Total: {t_total:.0f}ms | Audio: {audio_duration:.1f}s | Speed: {(audio_duration*1000)/t_total:.1f}x")
+            logger.info(
+                f"  Total: {t_total:.0f}ms | Audio: {audio_duration:.1f}s | Speed: {(audio_duration * 1000) / t_total:.1f}x"
+            )
 
             self.notifier.transcription_complete(final_text)
             self._add_transcription(final_text)
-
-            # Save to history for productivity tracking
-            from datetime import datetime
-            record = TranscriptionRecord(
-                timestamp=datetime.now().isoformat(),
-                whisper_text=text,
-                ollama_text=processed_text if self.ollama_enabled and t_ollama > 0 else None,
-                final_text=final_text,
-                output_mode=self.output_mode.value,
-                whisper_latency_ms=int(t_whisper),
-                ollama_latency_ms=int(t_ollama) if t_ollama > 0 else None,
-                typing_latency_ms=int(t_type),
-                total_latency_ms=int(t_total),
-                audio_duration_s=round(audio_duration, 2),
-                char_count=len(final_text),
-                word_count=len(final_text.split()),
-                speed_ratio=round((audio_duration * 1000) / t_total, 1) if t_total > 0 else 0,
+            self._save_transcription_record(
+                text,
+                processed_text,
+                final_text,
+                audio_duration,
+                t_whisper,
+                t_ollama,
+                t_type,
+                t_total,
             )
-            save_record(record)
 
         except Exception as e:
             logger.exception(f"Processing failed: {e}")
@@ -411,11 +449,14 @@ class DictationService:
                     model=self.config.ollama.model,
                     host=self.config.ollama.host,
                 )
-                self._tts_reminder = ReminderManager(interval=self.tts_config.reminder_interval)
+                self._tts_reminder = ReminderManager(
+                    interval=self.tts_config.reminder_interval
+                )
 
                 def on_tts_complete(**kwargs):
                     """Save TTS event to history."""
                     from datetime import datetime
+
                     record = TTSRecord(
                         timestamp=datetime.now().isoformat(),
                         event_type=kwargs.get("event_type", "unknown"),
@@ -428,7 +469,9 @@ class DictationService:
                         total_latency_ms=int(kwargs.get("total_ms", 0)),
                         voice=self.tts_config.voice,
                         cancelled=kwargs.get("cancelled", False),
-                        reminder_count=self._tts_reminder.reminder_count if self._tts_reminder else 0,
+                        reminder_count=self._tts_reminder.reminder_count
+                        if self._tts_reminder
+                        else 0,
                     )
                     save_tts_record(record)
 
@@ -450,16 +493,20 @@ class DictationService:
         # Service is ready
         self.notifier.service_ready()
         mode_str = self.output_mode.value.replace("_", " ").title()
-        wakeword_str = f"{self.config.wakeword.model}" if self.wakeword.enabled else "Disabled"
-        logger.info(f"════════════════════════════════════════")
-        logger.info(f"  WHISPER INPUT READY")
+        wakeword_str = (
+            f"{self.config.wakeword.model}" if self.wakeword.enabled else "Disabled"
+        )
+        logger.info("════════════════════════════════════════")
+        logger.info("  WHISPER INPUT READY")
         logger.info(f"  Whisper:  {self.config.whisper.model.split('/')[-1]}")
-        logger.info(f"  Ollama:   {self.config.ollama.model if self.ollama_enabled else 'Disabled'}")
+        logger.info(
+            f"  Ollama:   {self.config.ollama.model if self.ollama_enabled else 'Disabled'}"
+        )
         logger.info(f"  Mode:     {mode_str}")
         logger.info(f"  WakeWord: {wakeword_str}")
         logger.info(f"  TTS:      {tts_str}")
-        logger.info(f"  Hotkeys:  Win+Alt, Ctrl+Alt, PgDn+Right, PgDn+Down")
-        logger.info(f"════════════════════════════════════════")
+        logger.info("  Hotkeys:  Win+Alt, Ctrl+Alt, PgDn+Right, PgDn+Down")
+        logger.info("════════════════════════════════════════")
 
         # Start hotkey monitoring
         try:
