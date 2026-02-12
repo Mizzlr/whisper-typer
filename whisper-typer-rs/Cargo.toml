@@ -8,6 +8,10 @@ description = "Speech-to-text dictation service for Linux using Whisper and Olla
 name = "whisper-typer-rs"
 path = "src/main.rs"
 
+[[bin]]
+name = "tts-hook"
+path = "src/bin/tts_hook.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
