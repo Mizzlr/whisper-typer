@@ -1,15 +1,21 @@
 //! Main service orchestration with state machine.
 //!
 //! IDLE → RECORDING → PROCESSING → IDLE
+//!
+//! Voice gate: TTS is suppressed during recording/processing.
+//! When the user presses the hotkey, any active TTS is cancelled immediately.
+//! TTS waits for `voice_idle` before playing so it never talks over the user.
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Local;
 use serde_json::json;
-use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio::sync::{mpsc, Notify};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::history::{self, TranscriptionRecord};
@@ -73,6 +79,58 @@ impl std::fmt::Display for ServiceState {
     }
 }
 
+/// Shared voice gate for TTS coordination.
+///
+/// - `is_idle` is true when the user is NOT recording/processing (TTS may play).
+/// - `idle_notify` is signalled when transitioning back to idle (TTS waiters wake up).
+/// - `cancel_tts` is signalled when recording starts (active TTS should stop immediately).
+#[derive(Clone)]
+pub struct VoiceGate {
+    /// True when voice input is idle (safe for TTS to play).
+    pub is_idle: Arc<AtomicBool>,
+    /// Notified when voice input returns to idle.
+    pub idle_notify: Arc<Notify>,
+    /// Notified when TTS should be cancelled (user started speaking).
+    pub cancel_notify: Arc<Notify>,
+}
+
+impl VoiceGate {
+    pub fn new() -> Self {
+        Self {
+            is_idle: Arc::new(AtomicBool::new(true)),
+            idle_notify: Arc::new(Notify::new()),
+            cancel_notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Check if voice input is idle (TTS may play).
+    pub fn is_voice_idle(&self) -> bool {
+        self.is_idle.load(Ordering::Relaxed)
+    }
+
+    /// Wait until voice input is idle. Returns immediately if already idle.
+    /// Use with tokio::time::timeout for a deadline.
+    pub async fn wait_for_idle(&self) {
+        while !self.is_voice_idle() {
+            self.idle_notify.notified().await;
+        }
+    }
+
+    /// Signal that voice input has started (suppress + cancel TTS).
+    fn begin_voice_input(&self) {
+        self.is_idle.store(false, Ordering::Relaxed);
+        self.cancel_notify.notify_waiters();
+        debug!("Voice gate: closed (TTS suppressed)");
+    }
+
+    /// Signal that voice input has ended (TTS may resume).
+    fn end_voice_input(&self) {
+        self.is_idle.store(true, Ordering::Relaxed);
+        self.idle_notify.notify_waiters();
+        debug!("Voice gate: opened (TTS may play)");
+    }
+}
+
 pub struct DictationService {
     config: Config,
     state: ServiceState,
@@ -83,6 +141,8 @@ pub struct DictationService {
     notifier: Notifier,
     output_mode: OutputMode,
     recent_transcriptions: Vec<String>,
+    voice_gate: VoiceGate,
+    tts_cancel_client: reqwest::Client,
 }
 
 impl DictationService {
@@ -99,6 +159,13 @@ impl DictationService {
         let processor = OllamaProcessor::new(config.ollama.clone());
         let typer = TextTyper::new(&config.typer);
         let notifier = Notifier::new(config.feedback.notifications);
+        let voice_gate = VoiceGate::new();
+
+        // Short-timeout client for fire-and-forget TTS cancel calls
+        let tts_cancel_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .expect("Failed to create TTS cancel client");
 
         let svc = Self {
             config,
@@ -110,9 +177,16 @@ impl DictationService {
             notifier,
             output_mode,
             recent_transcriptions: Vec::new(),
+            voice_gate,
+            tts_cancel_client,
         };
         svc.write_mcp_state();
         svc
+    }
+
+    /// Get a clone of the voice gate for sharing with TTS components.
+    pub fn voice_gate(&self) -> VoiceGate {
+        self.voice_gate.clone()
     }
 
     /// Write current state to MCP state file for external control.
@@ -143,6 +217,20 @@ impl DictationService {
         self.write_mcp_state();
     }
 
+    /// Cancel any active TTS playback via HTTP (fire-and-forget).
+    /// Works whether TTS is running in-process (Phase 6) or externally.
+    fn cancel_tts(&self) {
+        let tts_port = self.config.tts.api_port;
+        let client = self.tts_cancel_client.clone();
+        tokio::spawn(async move {
+            let url = format!("http://127.0.0.1:{tts_port}/cancel");
+            match client.post(&url).send().await {
+                Ok(_) => debug!("TTS cancel sent"),
+                Err(_) => {} // TTS not running — that's fine
+            }
+        });
+    }
+
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Open audio stream (always-on for low latency)
         self.recorder.open_stream()?;
@@ -165,7 +253,7 @@ impl DictationService {
             tokio::select! {
                 event = hotkey_rx.recv() => {
                     match event {
-                        Some(HotkeyEvent::Pressed) => self.on_hotkey_press(),
+                        Some(HotkeyEvent::Pressed) => self.on_hotkey_press().await,
                         Some(HotkeyEvent::Released) => self.on_hotkey_release().await,
                         None => {
                             warn!("Hotkey channel closed");
@@ -186,10 +274,16 @@ impl DictationService {
         Ok(())
     }
 
-    fn on_hotkey_press(&mut self) {
+    async fn on_hotkey_press(&mut self) {
         if self.state != ServiceState::Idle {
             return;
         }
+
+        // Cancel any active TTS — user starts speaking, Claude stops talking
+        self.cancel_tts();
+
+        // Close voice gate — suppress new TTS until voice input completes
+        self.voice_gate.begin_voice_input();
 
         self.state = ServiceState::Recording;
         self.recorder.start();
@@ -209,14 +303,14 @@ impl DictationService {
 
         if samples.is_empty() {
             info!("No audio captured, returning to IDLE");
-            self.state = ServiceState::Idle;
+            self.transition_to_idle();
             return;
         }
 
         // Check if audio is too quiet (silence)
         if AudioRecorder::is_silent(&samples, self.config.silence.threshold) {
             info!("Audio is silent, skipping transcription");
-            self.state = ServiceState::Idle;
+            self.transition_to_idle();
             return;
         }
 
@@ -236,14 +330,12 @@ impl DictationService {
             }
             Ok(Err(e)) => {
                 warn!("Transcription failed: {e}");
-                self.state = ServiceState::Idle;
-                info!("State: PROCESSING → IDLE");
+                self.transition_to_idle();
                 return;
             }
             Err(e) => {
                 warn!("Transcription task panicked: {e}");
-                self.state = ServiceState::Idle;
-                info!("State: PROCESSING → IDLE");
+                self.transition_to_idle();
                 return;
             }
         };
@@ -251,8 +343,7 @@ impl DictationService {
 
         if raw_text.is_empty() {
             info!("Empty transcription, returning to IDLE");
-            self.state = ServiceState::Idle;
-            info!("State: PROCESSING → IDLE");
+            self.transition_to_idle();
             return;
         }
 
@@ -317,7 +408,14 @@ impl DictationService {
         };
         history::save_record(&record);
 
+        self.transition_to_idle();
+    }
+
+    /// Transition to IDLE and open the voice gate (allow TTS to play again).
+    /// All paths back to IDLE must go through this method.
+    fn transition_to_idle(&mut self) {
         self.state = ServiceState::Idle;
-        info!("State: PROCESSING → IDLE");
+        self.voice_gate.end_voice_input();
+        info!("State: → IDLE");
     }
 }
