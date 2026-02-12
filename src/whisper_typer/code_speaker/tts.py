@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,9 @@ class KokoroTTS:
         self._kokoro = None
         self._cancel_event = asyncio.Event()
         self._speaking = False
+        self._speak_lock = asyncio.Lock()
+        self._playback_done = threading.Event()
+        self._playback_done.set()  # Not playing initially
 
     @property
     def is_loaded(self) -> bool:
@@ -79,12 +83,18 @@ class KokoroTTS:
     async def speak(self, text: str) -> SpeakResult:
         """Speak text aloud with sentence-level streaming.
 
+        Acquires a lock so only one speak() runs at a time.
         Generates audio for each sentence and plays them sequentially.
         Checks cancel event between sentences for quick interruption.
         """
         if not self._kokoro:
             await self.load_model()
 
+        async with self._speak_lock:
+            return await self._speak_inner(text)
+
+    async def _speak_inner(self, text: str) -> SpeakResult:
+        """Inner speak implementation (caller must hold _speak_lock)."""
         self._cancel_event.clear()
         self._speaking = True
         total_gen_ms = 0.0
@@ -101,6 +111,7 @@ class KokoroTTS:
             for i, sentence in enumerate(sentences):
                 if self._cancel_event.is_set():
                     cancelled = True
+                    logger.info(f"Cancelled before sentence {i+1}/{len(sentences)}")
                     break
 
                 # Generate audio
@@ -116,6 +127,7 @@ class KokoroTTS:
 
                 if self._cancel_event.is_set():
                     cancelled = True
+                    logger.info(f"Cancelled after generating sentence {i+1}/{len(sentences)}")
                     break
 
                 # Play audio
@@ -123,6 +135,12 @@ class KokoroTTS:
                 await self._play_audio(samples, sample_rate)
                 play_ms = (time.perf_counter() - t_play_start) * 1000
                 total_play_ms += play_ms
+
+                # Check if playback was cancelled (sd.stop() called)
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    logger.info(f"Cancelled during playback of sentence {i+1}/{len(sentences)}")
+                    break
 
                 duration = len(samples) / sample_rate
                 logger.debug(
@@ -145,12 +163,19 @@ class KokoroTTS:
         )
 
     async def _play_audio(self, samples, sample_rate: int):
-        """Play audio samples through speakers."""
+        """Play audio samples through speakers with proper cancellation."""
         import sounddevice as sd
 
+        self._playback_done.clear()
+
         def _play():
-            sd.play(samples, sample_rate)
-            sd.wait()
+            try:
+                sd.play(samples, sample_rate)
+                sd.wait()
+            except Exception:
+                pass
+            finally:
+                self._playback_done.set()
 
         await asyncio.to_thread(_play)
 
@@ -162,7 +187,18 @@ class KokoroTTS:
             sd.stop()
         except Exception:
             pass
+        # Wait for playback thread to finish (max 100ms)
+        self._playback_done.wait(timeout=0.1)
         self._speaking = False
+        logger.info("TTS cancelled")
+
+    async def cancel_and_wait(self):
+        """Cancel current speech and wait for the speak lock to be released."""
+        self.cancel()
+        # If speak() is holding the lock, wait for it to finish
+        # (it will see the cancel event and exit quickly)
+        async with self._speak_lock:
+            pass
 
     def list_voices(self) -> list[str]:
         """Return available Kokoro voices."""

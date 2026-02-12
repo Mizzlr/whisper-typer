@@ -76,6 +76,16 @@ class TTSRequestHandler(BaseHTTPRequestHandler):
             logger.info(f"HTTP /speak: coroutine scheduled, future={future}")
             self._send_json({"status": "speaking"})
 
+        elif self.path == "/set-voice":
+            voice = data.get("voice", "")
+            if not voice:
+                self._send_json({"error": "missing voice"}, 400)
+                return
+            old_voice = self.server.tts.config.voice
+            self.server.tts.config.voice = voice
+            logger.info(f"Voice changed: {old_voice} → {voice}")
+            self._send_json({"status": "ok", "voice": voice})
+
         elif self.path == "/cancel":
             self.server.tts.cancel()
             self._send_json({"status": "cancelled"})
@@ -107,6 +117,7 @@ class TTSHTTPServer(HTTPServer):
         self.reminder = reminder
         self.loop = loop
         self.on_tts_complete = on_tts_complete
+        self._current_speak_task: Optional[asyncio.Task] = None
 
     async def handle_speak(
         self,
@@ -115,20 +126,43 @@ class TTSHTTPServer(HTTPServer):
         event_type: str,
         start_reminder: bool,
     ):
-        """Handle a speak request: summarize → speak → start reminder."""
+        """Handle a speak request: cancel previous, then speak.
+
+        Cancels any in-flight speak task before starting a new one.
+        The speak lock in KokoroTTS ensures only one speak() runs at a time.
+        """
         logger.info(f"handle_speak START [{event_type}]: text={len(text)} chars, summarize={summarize}")
+
+        # Cancel any existing reminder
+        self.reminder.cancel()
+
+        # Cancel any in-flight speak task
+        if self._current_speak_task and not self._current_speak_task.done():
+            self.tts.cancel()
+            self._current_speak_task.cancel()
+            try:
+                await self._current_speak_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # Start new speak task
+        self._current_speak_task = asyncio.current_task()
+        await self._do_speak(text, summarize, event_type, start_reminder)
+
+    async def _do_speak(
+        self,
+        text: str,
+        summarize: bool,
+        event_type: str,
+        start_reminder: bool,
+    ):
+        """Execute the speak pipeline: summarize → speak → reminder."""
         t_total_start = time.perf_counter()
         ollama_ms = 0.0
         spoken_text = text
         summarized = False
 
         try:
-            # Cancel any existing reminder
-            self.reminder.cancel()
-            # Cancel any current speech
-            self.tts.cancel()
-            await asyncio.sleep(0.05)  # Brief pause for sounddevice to stop
-
             # Summarize long text
             max_chars = self.tts.config.max_direct_chars
             if summarize and len(text) > max_chars:
@@ -136,7 +170,7 @@ class TTSHTTPServer(HTTPServer):
                 summarized = True
                 logger.info(f"Summarized {len(text)} chars → {len(spoken_text)} chars ({ollama_ms:.0f}ms)")
 
-            # Speak
+            # Speak (lock is inside speak())
             result: SpeakResult = await self.tts.speak(spoken_text)
 
             total_ms = (time.perf_counter() - t_total_start) * 1000
@@ -164,6 +198,8 @@ class TTSHTTPServer(HTTPServer):
                     cancelled=result.cancelled,
                 )
 
+        except asyncio.CancelledError:
+            logger.info(f"Speak task cancelled [{event_type}]")
         except Exception as e:
             logger.exception(f"TTS speak error: {e}")
 

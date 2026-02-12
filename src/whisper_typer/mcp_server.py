@@ -184,13 +184,22 @@ def code_speaker_set_voice(voice: str) -> str:
     Args:
         voice: Voice name (e.g., 'af_heart', 'bf_emma', 'am_adam')
     """
-    if _service and hasattr(_service, "kokoro_tts"):
-        _service.kokoro_tts.config.voice = voice
-        return f"Voice set to: {voice}"
-    state = read_state()
-    state["tts_voice"] = voice
-    write_state(state)
-    return f"Voice set to: {voice}"
+    import httpx
+    try:
+        port = 8767
+        if _service and hasattr(_service, "tts_config"):
+            port = _service.tts_config.api_port
+        resp = httpx.post(
+            f"http://localhost:{port}/set-voice",
+            json={"voice": voice},
+            timeout=5.0,
+        )
+        data = resp.json()
+        if data.get("status") == "ok":
+            return f"Voice set to: {voice}"
+        return f"Error: {data.get('error', 'unknown')}"
+    except Exception as e:
+        return f"Failed to set voice: {e}"
 
 
 @mcp.tool()
