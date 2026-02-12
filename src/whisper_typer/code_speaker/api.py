@@ -113,6 +113,7 @@ class TTSHTTPServer(HTTPServer):
         reminder: ReminderManager,
         loop: asyncio.AbstractEventLoop,
         on_tts_complete=None,
+        voice_idle: Optional[asyncio.Event] = None,
     ):
         super().__init__(("127.0.0.1", port), TTSRequestHandler)
         self.tts = tts
@@ -120,6 +121,7 @@ class TTSHTTPServer(HTTPServer):
         self.reminder = reminder
         self.loop = loop
         self.on_tts_complete = on_tts_complete
+        self.voice_idle = voice_idle
         self._current_speak_task: Optional[asyncio.Task] = None
 
     async def handle_speak(
@@ -177,6 +179,12 @@ class TTSHTTPServer(HTTPServer):
                     f"Summarized {len(text)} chars → {len(spoken_text)} chars ({ollama_ms:.0f}ms)"
                 )
 
+            # Wait for voice input to finish before playing audio
+            if self.voice_idle and not self.voice_idle.is_set():
+                logger.info("TTS deferred — waiting for voice input to complete")
+                await self.voice_idle.wait()
+                logger.info("TTS resumed — voice input complete")
+
             # Speak (lock is inside speak())
             result: SpeakResult = await self.tts.speak(spoken_text)
 
@@ -222,6 +230,7 @@ class TTSApiServer:
         loop: asyncio.AbstractEventLoop,
         port: int = 8767,
         on_tts_complete=None,
+        voice_idle: Optional[asyncio.Event] = None,
     ):
         self._server = TTSHTTPServer(
             port=port,
@@ -230,6 +239,7 @@ class TTSApiServer:
             reminder=reminder,
             loop=loop,
             on_tts_complete=on_tts_complete,
+            voice_idle=voice_idle,
         )
         self._thread: Optional[threading.Thread] = None
 

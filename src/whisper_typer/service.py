@@ -114,6 +114,10 @@ class DictationService:
         self._process_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._mcp_thread: Optional[threading.Thread] = None
+        # Gate: cleared during recording/processing, set when idle.
+        # TTS waits on this before playing audio so it doesn't talk over the user.
+        self._voice_idle = asyncio.Event()
+        self._voice_idle.set()  # Start idle
 
     def _write_mcp_state(self):
         """Write current state to MCP state file."""
@@ -164,6 +168,9 @@ class DictationService:
         if self._tts_reminder:
             self._tts_reminder.cancel()
 
+        # Suppress new TTS until voice input completes
+        self._voice_idle.clear()
+
         t_start = time.perf_counter()
         logger.info("Hotkey pressed - starting recording")
         self.state = ServiceState.RECORDING
@@ -200,6 +207,9 @@ class DictationService:
             self.kokoro_tts.cancel()
         if self._tts_reminder:
             self._tts_reminder.cancel()
+
+        # Suppress new TTS until voice input completes
+        self._voice_idle.clear()
 
         logger.info("Wake-word detected - starting recording")
         self.state = ServiceState.WAKE_RECORDING
@@ -367,6 +377,7 @@ class DictationService:
 
         finally:
             self.state = ServiceState.IDLE
+            self._voice_idle.set()  # Ungate TTS — voice input complete
 
     def _start_mcp_server(self, port: int = 8766):
         """Start MCP server on a background thread."""
@@ -482,6 +493,7 @@ class DictationService:
                     loop=self._loop,
                     port=self.tts_config.api_port,
                     on_tts_complete=on_tts_complete,
+                    voice_idle=self._voice_idle,
                 )
                 self._tts_api.start()
                 tts_str = f"{self.tts_config.voice} (port {self.tts_config.api_port})"
