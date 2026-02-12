@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("Loading Kokoro TTS model...");
         let mut tts_engine = code_speaker::tts::KokoroTtsEngine::new(&config.tts);
-        match tts_engine.load_model().await {
+        match tts_engine.load_model_sync() {
             Ok(()) => {
                 let tts = Arc::new(tts_engine);
                 let summarizer = Arc::new(code_speaker::summarizer::OllamaSummarizer::new(

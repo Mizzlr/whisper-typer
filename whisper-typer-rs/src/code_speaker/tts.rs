@@ -16,7 +16,6 @@ use std::time::Instant;
 
 use ndarray::{Array2, Array3};
 use ndarray_npy::NpzReader;
-use regex::Regex;
 use ort::value::Tensor;
 use rodio::buffer::SamplesBuffer;
 use rodio::{OutputStream, OutputStreamBuilder, Sink};
@@ -33,7 +32,6 @@ pub struct SpeakResult {
     pub generate_ms: f64,
     pub playback_ms: f64,
     pub cancelled: bool,
-    pub text_spoken: String,
 }
 
 /// Loaded voice style data: shape (510, 1, 256) f32.
@@ -130,6 +128,7 @@ impl KokoroTtsEngine {
         }
     }
 
+    #[allow(dead_code)]
     pub fn list_voices(&self) -> Vec<String> {
         let mut names: Vec<String> = self.voices.keys().cloned().collect();
         names.sort();
@@ -179,13 +178,6 @@ impl KokoroTtsEngine {
         Ok(())
     }
 
-    /// Load model asynchronously.
-    pub async fn load_model(&mut self) -> Result<(), String> {
-        // load_model_sync needs &mut self which can't cross spawn_blocking boundary easily,
-        // so we call it directly (it blocks the async task briefly, which is acceptable at startup)
-        self.load_model_sync()
-    }
-
     /// Speak text aloud with sentence-level streaming and cancellation.
     pub async fn speak(&self, text: &str) -> SpeakResult {
         let _guard = self.speak_lock.lock().await;
@@ -199,8 +191,6 @@ impl KokoroTtsEngine {
     }
 
     async fn speak_inner(&self, text: &str) -> SpeakResult {
-        // Split on sentence boundaries (.!? followed by whitespace)
-        // Rust regex doesn't support lookbehind, so split manually
         let sentences = split_sentences(text.trim());
 
         if sentences.is_empty() {
@@ -208,7 +198,6 @@ impl KokoroTtsEngine {
                 generate_ms: 0.0,
                 playback_ms: 0.0,
                 cancelled: false,
-                text_spoken: String::new(),
             };
         }
 
@@ -271,7 +260,6 @@ impl KokoroTtsEngine {
             generate_ms: total_gen_ms,
             playback_ms: total_play_ms,
             cancelled,
-            text_spoken: text.to_string(),
         }
     }
 
@@ -317,7 +305,7 @@ impl KokoroTtsEngine {
 
         // 4. Build ONNX input tensors (ort 2.0: must convert to Tensor values)
         let tokens_array =
-            ndarray::Array2::from_shape_vec((1, n_tokens), token_ids.clone())
+            ndarray::Array2::from_shape_vec((1, n_tokens), token_ids)
                 .map_err(|e| format!("Failed to create tokens tensor: {e}"))?;
         let tokens_tensor = Tensor::from_array(tokens_array)
             .map_err(|e| format!("Failed to create tokens ort tensor: {e}"))?;
@@ -431,6 +419,7 @@ impl KokoroTtsEngine {
     }
 
     /// Cancel and wait for speak lock to be released.
+    #[allow(dead_code)]
     pub async fn cancel_and_wait(&self) {
         self.cancel();
         // Wait for any in-progress speak to finish

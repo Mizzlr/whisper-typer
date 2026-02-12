@@ -71,6 +71,26 @@ struct SimpleResponse {
     reminders_fired: Option<u32>,
 }
 
+impl SimpleResponse {
+    fn ok(status: &str) -> Self {
+        Self {
+            status: status.into(),
+            voice: None,
+            error: None,
+            reminders_fired: None,
+        }
+    }
+
+    fn err(message: impl Into<String>) -> Self {
+        Self {
+            status: "error".into(),
+            error: Some(message.into()),
+            voice: None,
+            reminders_fired: None,
+        }
+    }
+}
+
 /// Build the axum router.
 pub fn router(state: TtsApiState) -> Router {
     Router::new()
@@ -119,12 +139,7 @@ async fn handle_speak(
     Json(req): Json<SpeakRequest>,
 ) -> Json<SimpleResponse> {
     if req.text.trim().is_empty() {
-        return Json(SimpleResponse {
-            status: "error".into(),
-            error: Some("empty text".into()),
-            voice: None,
-            reminders_fired: None,
-        });
+        return Json(SimpleResponse::err("empty text"));
     }
 
     let preview: String = req.text.chars().take(80).collect();
@@ -159,12 +174,7 @@ async fn handle_speak(
         .await;
     });
 
-    Json(SimpleResponse {
-        status: "speaking".into(),
-        voice: None,
-        error: None,
-        reminders_fired: None,
-    })
+    Json(SimpleResponse::ok("speaking"))
 }
 
 async fn handle_set_voice(
@@ -173,39 +183,25 @@ async fn handle_set_voice(
 ) -> Json<SimpleResponse> {
     if state.tts.set_voice(&req.voice) {
         Json(SimpleResponse {
-            status: "ok".into(),
             voice: Some(req.voice),
-            error: None,
-            reminders_fired: None,
+            ..SimpleResponse::ok("ok")
         })
     } else {
-        Json(SimpleResponse {
-            status: "error".into(),
-            error: Some(format!("Unknown voice: {}", req.voice)),
-            voice: None,
-            reminders_fired: None,
-        })
+        Json(SimpleResponse::err(format!("Unknown voice: {}", req.voice)))
     }
 }
 
 async fn handle_cancel(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
     state.tts.cancel();
-    Json(SimpleResponse {
-        status: "cancelled".into(),
-        voice: None,
-        error: None,
-        reminders_fired: None,
-    })
+    Json(SimpleResponse::ok("cancelled"))
 }
 
 async fn handle_cancel_reminder(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
     let count = state.reminder.cancel();
     state.tts.cancel();
     Json(SimpleResponse {
-        status: "cancelled".into(),
-        voice: None,
-        error: None,
         reminders_fired: Some(count),
+        ..SimpleResponse::ok("cancelled")
     })
 }
 
@@ -230,16 +226,13 @@ async fn do_speak(
     tts.cancel();
 
     // Optionally summarize long text
-    let mut spoken_text = text.clone();
-    let mut ollama_ms = 0.0;
-    let mut summarized = false;
-
-    if summarize && text.len() > max_direct_chars {
-        let (summary, ms) = summarizer.summarize(&text).await;
-        spoken_text = summary;
-        ollama_ms = ms;
-        summarized = true;
-    }
+    let (spoken_text, ollama_ms, summarized) =
+        if summarize && text.len() > max_direct_chars {
+            let (summary, ms) = summarizer.summarize(&text).await;
+            (summary, ms, true)
+        } else {
+            (text.clone(), 0.0, false)
+        };
 
     // Wait for voice input to finish before playing
     if !voice_gate.is_voice_idle() {

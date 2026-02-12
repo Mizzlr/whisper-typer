@@ -109,17 +109,10 @@ pub fn generate_tts_report(date: &str) -> String {
     let cancelled = records.iter().filter(|r| r.cancelled).count();
     let summarized = records.iter().filter(|r| r.summarized).count();
 
-    let avg_kokoro: f64 = if total > 0 {
-        records.iter().map(|r| r.kokoro_latency_ms as f64).sum::<f64>() / total as f64
-    } else {
-        0.0
-    };
-
-    let avg_total: f64 = if total > 0 {
-        records.iter().map(|r| r.total_latency_ms as f64).sum::<f64>() / total as f64
-    } else {
-        0.0
-    };
+    let avg_kokoro: f64 =
+        records.iter().map(|r| r.kokoro_latency_ms as f64).sum::<f64>() / total as f64;
+    let avg_total: f64 =
+        records.iter().map(|r| r.total_latency_ms as f64).sum::<f64>() / total as f64;
 
     // Event type breakdown
     let mut event_counts = std::collections::HashMap::new();

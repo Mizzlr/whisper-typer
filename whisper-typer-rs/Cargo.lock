@@ -4321,7 +4321,6 @@ dependencies = [
  "ndarray-npy",
  "notify-rust",
  "ort",
- "regex",
  "reqwest",
  "rmcp",
  "rodio",

@@ -64,7 +64,6 @@ misaki-rs = "0.3"
 ndarray = "0.17"
 ndarray-npy = "0.10"
 rodio = "0.21"
-regex = "1"
 
 [features]
 default = []

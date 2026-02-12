@@ -9,8 +9,10 @@
 //! - `history`: TTS event history and reporting
 
 pub mod api;
+#[allow(dead_code)]
 pub mod history;
 pub mod reminder;
 pub mod summarizer;
+#[allow(dead_code)]
 pub mod transcript;
 pub mod tts;
