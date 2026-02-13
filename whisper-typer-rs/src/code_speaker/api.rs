@@ -46,6 +46,8 @@ pub struct SpeakJob {
     pub start_reminder: bool,
     pub generation: u64,
     pub session_id: String,
+    /// How many times this job has been deferred+re-queued. Max 1 retry.
+    pub retries: u32,
 }
 
 // --- Request/Response types ---
@@ -183,17 +185,26 @@ fn spawn_queue_consumer(
         while let Some(job) = rx.recv().await {
             let current_gen = generation.load(Ordering::Relaxed);
             if job.generation != current_gen {
-                // Save for re-queue after user finishes speaking
-                info!(
-                    "Queue: deferring stale job [{}] sid={} (gen {} != {})",
-                    job.event_type,
-                    &job.session_id[..job.session_id.len().min(8)],
-                    job.generation,
-                    current_gen,
-                );
-                let mut def = deferred.lock().unwrap();
-                if def.len() < MAX_DEFERRED {
-                    def.push(job);
+                // Only defer first-time items (retries == 0). Already-retried items are dropped.
+                if job.retries == 0 {
+                    info!(
+                        "Queue: deferring stale job [{}] sid={} (gen {} != {})",
+                        job.event_type,
+                        &job.session_id[..job.session_id.len().min(8)],
+                        job.generation,
+                        current_gen,
+                    );
+                    let mut def = deferred.lock().unwrap();
+                    if def.len() < MAX_DEFERRED {
+                        def.push(job);
+                    }
+                } else {
+                    info!(
+                        "Queue: dropping re-queued stale job [{}] sid={} (retries={})",
+                        job.event_type,
+                        &job.session_id[..job.session_id.len().min(8)],
+                        job.retries,
+                    );
                 }
                 continue;
             }
@@ -213,7 +224,8 @@ fn spawn_queue_consumer(
             )
             .await;
 
-            if cancelled {
+            // Only defer first-time cancelled items. Already-retried items are dropped.
+            if cancelled && backup.retries == 0 {
                 info!(
                     "Queue: deferring cancelled job [{}] sid={}",
                     backup.event_type,
@@ -223,6 +235,13 @@ fn spawn_queue_consumer(
                 if def.len() < MAX_DEFERRED {
                     def.push(backup);
                 }
+            } else if cancelled {
+                info!(
+                    "Queue: dropping re-queued cancelled job [{}] sid={} (retries={})",
+                    backup.event_type,
+                    &backup.session_id[..backup.session_id.len().min(8)],
+                    backup.retries,
+                );
             }
         }
     });
@@ -273,6 +292,7 @@ async fn handle_speak(
         start_reminder: req.start_reminder,
         generation: state.generation.load(Ordering::Relaxed),
         session_id: req.session_id,
+        retries: 0,
     };
 
     match state.queue_tx.try_send(job) {
@@ -338,8 +358,9 @@ async fn handle_user_input(
             discarded += 1;
             continue;
         }
-        // Re-queue with current generation
+        // Re-queue with current generation and incremented retry count
         job.generation = current_gen;
+        job.retries += 1;
         if state.queue_tx.try_send(job).is_ok() {
             requeued += 1;
         }
