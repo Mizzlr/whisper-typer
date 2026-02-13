@@ -25,6 +25,15 @@ use super::tts::KokoroTtsEngine;
 
 const MAX_DEFERRED: usize = 20;
 
+/// Short session ID for logging (first 8 chars or "manual" if empty).
+fn short_sid(sid: &str) -> &str {
+    if sid.is_empty() {
+        "manual"
+    } else {
+        &sid[..sid.len().min(8)]
+    }
+}
+
 #[derive(Clone)]
 pub struct TtsApiState {
     pub tts: Arc<KokoroTtsEngine>,
@@ -183,34 +192,43 @@ fn spawn_queue_consumer(
 ) {
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
+            let sid = short_sid(&job.session_id).to_string();
+            let deferred_count = deferred.lock().unwrap().len();
             let current_gen = generation.load(Ordering::Relaxed);
+
             if job.generation != current_gen {
+                let job_gen = job.generation;
+                let retries = job.retries;
                 // Only defer first-time items (retries == 0). Already-retried items are dropped.
-                if job.retries == 0 {
-                    info!(
-                        "Queue: deferring stale job [{}] sid={} (gen {} != {})",
-                        job.event_type,
-                        &job.session_id[..job.session_id.len().min(8)],
-                        job.generation,
-                        current_gen,
-                    );
+                if retries == 0 {
+                    let evt = job.event_type.clone();
                     let mut def = deferred.lock().unwrap();
                     if def.len() < MAX_DEFERRED {
                         def.push(job);
                     }
+                    info!(
+                        "Queue: DEFERRED stale [{evt}] sid={sid} (gen {job_gen} != {current_gen}) [deferred={}]",
+                        def.len(),
+                    );
                 } else {
                     info!(
-                        "Queue: dropping re-queued stale job [{}] sid={} (retries={})",
+                        "Queue: DROPPED re-queued stale [{}] sid={sid} (retries={retries}) [deferred={deferred_count}]",
                         job.event_type,
-                        &job.session_id[..job.session_id.len().min(8)],
-                        job.retries,
                     );
                 }
                 continue;
             }
 
+            let text_preview: String = job.text.chars().take(60).collect();
+            let text_ellipsis = if job.text.len() > 60 { "..." } else { "" };
+            info!(
+                "Queue: PLAYING [{}] sid={} retries={} \"{text_preview}{text_ellipsis}\" [deferred={}]",
+                job.event_type, sid, job.retries, deferred_count,
+            );
+
             // Clone before speaking in case we get cancelled mid-speech
             let backup = job.clone();
+            let event_type = job.event_type.clone();
 
             let cancelled = do_speak(
                 &tts,
@@ -224,23 +242,28 @@ fn spawn_queue_consumer(
             )
             .await;
 
-            // Only defer first-time cancelled items. Already-retried items are dropped.
-            if cancelled && backup.retries == 0 {
-                info!(
-                    "Queue: deferring cancelled job [{}] sid={}",
-                    backup.event_type,
-                    &backup.session_id[..backup.session_id.len().min(8)],
-                );
-                let mut def = deferred.lock().unwrap();
-                if def.len() < MAX_DEFERRED {
-                    def.push(backup);
+            if cancelled {
+                // Only defer first-time cancelled items. Already-retried items are dropped.
+                if backup.retries == 0 {
+                    let mut def = deferred.lock().unwrap();
+                    if def.len() < MAX_DEFERRED {
+                        def.push(backup);
+                    }
+                    info!(
+                        "Queue: DEFERRED cancelled [{}] sid={} [deferred={}]",
+                        event_type, sid, def.len(),
+                    );
+                } else {
+                    info!(
+                        "Queue: DROPPED re-queued cancelled [{}] sid={} (retries={}) [deferred={}]",
+                        event_type, sid, backup.retries, deferred_count,
+                    );
                 }
-            } else if cancelled {
+            } else {
+                let new_deferred = deferred.lock().unwrap().len();
                 info!(
-                    "Queue: dropping re-queued cancelled job [{}] sid={} (retries={})",
-                    backup.event_type,
-                    &backup.session_id[..backup.session_id.len().min(8)],
-                    backup.retries,
+                    "Queue: DONE [{}] sid={} [deferred={}]",
+                    event_type, sid, new_deferred,
                 );
             }
         }
@@ -275,14 +298,20 @@ async fn handle_speak(
     }
 
     let preview: String = req.text.chars().take(80).collect();
+    let sid = short_sid(&req.session_id);
+    let deferred_count = state.deferred.lock().unwrap().len();
+    let queue_depth = state.queue_tx.max_capacity() - state.queue_tx.capacity();
+
     info!(
-        "HTTP /speak [{}]: \"{}{}\" ({} chars, summarize={}, sid={})",
+        "HTTP /speak [{}] sid={}: \"{}{}\" ({} chars, summarize={}) [queue={}, deferred={}]",
         req.event_type,
+        sid,
         preview.replace('\n', " "),
         if req.text.len() > 80 { "..." } else { "" },
         req.text.len(),
         req.summarize,
-        &req.session_id[..req.session_id.len().min(8)],
+        queue_depth,
+        deferred_count,
     );
 
     let job = SpeakJob {
@@ -297,7 +326,10 @@ async fn handle_speak(
 
     match state.queue_tx.try_send(job) {
         Ok(()) => Json(SimpleResponse::ok("queued")),
-        Err(_) => Json(SimpleResponse::err("queue full")),
+        Err(_) => {
+            warn!("Speak queue full (capacity=20), dropping job");
+            Json(SimpleResponse::err("queue full"))
+        }
     }
 }
 
@@ -318,9 +350,16 @@ async fn handle_set_voice(
 /// Hard cancel: stop speech, skip queue, save interrupted items for re-queue.
 /// Called by hotkey press (user starts recording).
 async fn handle_cancel(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
-    state.generation.fetch_add(1, Ordering::Relaxed);
-    state.reminder.cancel();
+    let new_gen = state.generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let reminder_count = state.reminder.cancel();
+    let was_speaking = state.tts.is_speaking();
     state.tts.cancel();
+    let queue_depth = state.queue_tx.max_capacity() - state.queue_tx.capacity();
+    let deferred_count = state.deferred.lock().unwrap().len();
+    info!(
+        "CANCEL: gen→{} was_speaking={} reminders_cancelled={} [queue={}, deferred={}]",
+        new_gen, was_speaking, reminder_count, queue_depth, deferred_count,
+    );
     Json(SimpleResponse::ok("cancelled"))
 }
 
@@ -366,14 +405,14 @@ async fn handle_user_input(
         }
     }
 
-    if requeued > 0 || discarded > 0 {
-        info!(
-            "User input (sid={}): requeued {} deferred items, discarded {} focus items",
-            &req.session_id[..req.session_id.len().min(8)],
-            requeued,
-            discarded,
-        );
-    }
+    let queue_depth = state.queue_tx.max_capacity() - state.queue_tx.capacity();
+    info!(
+        "USER-INPUT sid={}: requeued={} discarded={} [queue={}, deferred=0]",
+        short_sid(&req.session_id),
+        requeued,
+        discarded,
+        queue_depth,
+    );
 
     Json(SimpleResponse {
         requeued: Some(requeued as usize),
