@@ -547,8 +547,7 @@ pub async fn start_mcp_server(port: u16, tts_port: u16) {
     match SseServer::serve_with_config(config).await {
         Ok(sse_server) => {
             info!("MCP SSE server listening on http://{addr}/sse");
-            let tts_port_clone = tts_port;
-            sse_server.with_service(move || WhisperTyperMcp::new(tts_port_clone));
+            sse_server.with_service(move || WhisperTyperMcp::new(tts_port));
         }
         Err(e) => {
             warn!("Failed to start MCP server on {addr}: {e}");

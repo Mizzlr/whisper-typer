@@ -21,7 +21,6 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::history::{self, TranscriptionRecord};
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
-use crate::notifier::Notifier;
 use crate::processor::OllamaProcessor;
 use crate::recorder::AudioRecorder;
 use crate::transcriber::WhisperTranscriber;
@@ -104,18 +103,7 @@ impl VoiceGate {
         }
     }
 
-    /// Check if voice input is idle (TTS may play).
-    pub fn is_voice_idle(&self) -> bool {
-        self.is_idle.load(Ordering::Relaxed)
-    }
 
-    /// Wait until voice input is idle. Returns immediately if already idle.
-    /// Use with tokio::time::timeout for a deadline.
-    pub async fn wait_for_idle(&self) {
-        while !self.is_voice_idle() {
-            self.idle_notify.notified().await;
-        }
-    }
 
     /// Signal that voice input has started (suppress + cancel TTS).
     fn begin_voice_input(&self) {
@@ -181,7 +169,6 @@ pub struct DictationService {
     transcriber: WhisperTranscriber,
     processor: OllamaProcessor,
     typer: TextTyper,
-    notifier: Notifier,
     output_mode: OutputMode,
     recent_transcriptions: Vec<String>,
     voice_gate: VoiceGate,
@@ -205,7 +192,6 @@ impl DictationService {
         );
         let processor = OllamaProcessor::new(config.ollama.clone());
         let typer = TextTyper::new(&config.typer);
-        let notifier = Notifier::new(config.feedback.notifications);
         let voice_gate = VoiceGate::new();
 
         // Short-timeout client for fire-and-forget TTS cancel calls
@@ -224,7 +210,6 @@ impl DictationService {
             transcriber,
             processor,
             typer,
-            notifier,
             output_mode,
             recent_transcriptions: Vec::new(),
             voice_gate,

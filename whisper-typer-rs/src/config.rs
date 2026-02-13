@@ -150,7 +150,6 @@ pub struct TTSConfig {
     pub voice: String,
     pub speed: f32,
     pub api_port: u16,
-    pub max_direct_chars: usize,
     pub reminder_interval: u64,
     pub model_path: String,
 }
@@ -162,7 +161,6 @@ impl Default for TTSConfig {
             voice: "af_heart".into(),
             speed: 1.0,
             api_port: 8767,
-            max_direct_chars: 150,
             reminder_interval: 300,
             model_path: String::new(),
         }

@@ -132,9 +132,7 @@ impl HotkeyMonitor {
     pub fn find_keyboards() -> Vec<Device> {
         let mut keyboards = Vec::new();
 
-        let devices = match evdev::enumerate() {
-            devices => devices,
-        };
+        let devices = evdev::enumerate();
 
         for (_path, device) in devices {
             let supported = device.supported_keys();

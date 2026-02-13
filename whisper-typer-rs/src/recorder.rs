@@ -14,9 +14,6 @@ use crate::config::{AudioConfig, RecordingConfig, SilenceConfig};
 /// Audio recorder with always-open stream for low-latency start.
 pub struct AudioRecorder {
     config: AudioConfig,
-    #[allow(dead_code)]
-    recording_config: RecordingConfig,
-    #[allow(dead_code)]
     silence_config: SilenceConfig,
     /// Shared state between the audio callback thread and the main thread.
     shared: Arc<SharedState>,
@@ -60,7 +57,6 @@ impl AudioRecorder {
 
         Self {
             config: audio_config,
-            recording_config,
             silence_config,
             shared,
             _stream: None,

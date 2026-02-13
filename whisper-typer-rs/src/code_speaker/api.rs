@@ -411,7 +411,7 @@ async fn handle_user_input(
     );
 
     Json(SimpleResponse {
-        requeued: Some(requeued as usize),
+        requeued: Some(requeued),
         ..SimpleResponse::ok("ok")
     })
 }

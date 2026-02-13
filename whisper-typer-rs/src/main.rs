@@ -5,7 +5,6 @@ mod config;
 mod history;
 mod hotkey;
 mod mcp_server;
-mod notifier;
 mod processor;
 mod recorder;
 mod service;
