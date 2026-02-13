@@ -79,6 +79,7 @@ pub struct OllamaConfig {
     pub enabled: bool,
     pub model: String,
     pub host: String,
+    pub skip_threshold: usize,
 }
 
 impl Default for OllamaConfig {
@@ -87,6 +88,7 @@ impl Default for OllamaConfig {
             enabled: true,
             model: "llama3.2:3b".into(),
             host: "http://localhost:11434".into(),
+            skip_threshold: 0,
         }
     }
 }

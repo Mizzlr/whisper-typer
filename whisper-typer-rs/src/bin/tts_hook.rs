@@ -406,12 +406,17 @@ async fn handle_stop(
         _ => return ("skipped".into(), Some("no transcript path".into()), None),
     };
 
-    let Some(text) = extract_last_assistant_text(transcript_path) else {
-        return (
-            "skipped".into(),
-            Some("no assistant text found".into()),
-            None,
-        );
+    // Try action-oriented summary first (parses tool_use/tool_result)
+    let action_summary = extract_action_summary(transcript_path);
+
+    let text = if action_summary.is_some() {
+        // We still need fallback text for dedup
+        action_summary.clone().unwrap()
+    } else {
+        match extract_last_assistant_text(transcript_path) {
+            Some(t) => t,
+            None => return ("skipped".into(), Some("no assistant text found".into()), None),
+        }
     };
 
     // Per-session dedup — Claude Code can fire multiple Stop events for one turn
@@ -424,20 +429,37 @@ async fn handle_stop(
     }
 
     if is_focus {
-        // Focus session: full TTS with summarization and reminder
-        let _ = client
-            .post(format!("{TTS_API}/speak"))
-            .json(&SpeakRequest {
-                text: text.clone(),
-                summarize: true,
-                event_type: "stop".into(),
-                start_reminder: true,
-                session_id: session_id.into(),
-            })
-            .send()
-            .await;
+        if let Some(ref summary) = action_summary {
+            // Action summary: already concise, no summarization needed
+            let _ = client
+                .post(format!("{TTS_API}/speak"))
+                .json(&SpeakRequest {
+                    text: summary.clone(),
+                    summarize: false,
+                    event_type: "stop".into(),
+                    start_reminder: true,
+                    session_id: session_id.into(),
+                })
+                .send()
+                .await;
 
-        ("spoke".into(), Some(format!("focus ({project})")), Some(text))
+            ("spoke".into(), Some(format!("action_summary ({project})")), Some(summary.clone()))
+        } else {
+            // Fallback: full TTS with summarization and reminder
+            let _ = client
+                .post(format!("{TTS_API}/speak"))
+                .json(&SpeakRequest {
+                    text: text.clone(),
+                    summarize: true,
+                    event_type: "stop".into(),
+                    start_reminder: true,
+                    session_id: session_id.into(),
+                })
+                .send()
+                .await;
+
+            ("spoke".into(), Some(format!("focus ({project})")), Some(text))
+        }
     } else {
         // Non-focus session: short announcement (queued, plays after current speech)
         let short_text = format!("{project} finished.");
@@ -559,6 +581,168 @@ async fn handle_user_prompt_submit(
         .await;
 
     ("user_input".into(), Some(format!("focus={project}")), None)
+}
+
+/// Scan the last ~20 JSONL lines for Bash tool_use + tool_result pairs.
+/// Returns a concise action-oriented summary if a recognizable action is found.
+fn extract_action_summary(path: &str) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(20);
+
+    // Collect tool_use commands and their results
+    let mut last_bash_command: Option<String> = None;
+    let mut last_bash_result: Option<String> = None;
+
+    for line in &lines[start..] {
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let blocks = val
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array());
+
+        let Some(blocks) = blocks else { continue };
+
+        for block in blocks {
+            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            if entry_type == "assistant" && block_type == "tool_use" {
+                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if name == "Bash" {
+                    let cmd = block
+                        .get("input")
+                        .and_then(|i| i.get("command"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    if !cmd.is_empty() {
+                        last_bash_command = Some(cmd.to_string());
+                        last_bash_result = None; // reset result for new command
+                    }
+                }
+            }
+
+            if entry_type == "human" && block_type == "tool_result" {
+                if let Some(content) = block.get("content").and_then(|c| c.as_str()) {
+                    if last_bash_command.is_some() {
+                        last_bash_result = Some(content.chars().take(2000).collect());
+                    }
+                }
+            }
+        }
+    }
+
+    // Try to classify the last Bash action
+    if let Some(cmd) = &last_bash_command {
+        let result = last_bash_result.as_deref().unwrap_or("");
+        return classify_action(cmd, result);
+    }
+
+    None
+}
+
+/// Pattern-match a Bash command + result into a concise spoken summary.
+fn classify_action(command: &str, result: &str) -> Option<String> {
+    // cargo build
+    if command.contains("cargo build") {
+        if result.contains("error[") || result.contains("error:") {
+            let error_count = result.matches("error[").count()
+                + result.matches("error:").count();
+            return Some(format!("Build failed with {error_count} errors."));
+        }
+        let profile = if command.contains("--release") { "release" } else { "debug" };
+        return Some(format!("Build finished, {profile} profile."));
+    }
+
+    // cargo test / pytest / npm test
+    if command.contains("cargo test") || command.contains("pytest") || command.contains("npm test") {
+        if result.contains("FAILED") || result.contains("failures") || result.contains("failed") {
+            // Try to extract failure count
+            for word in result.split_whitespace() {
+                if let Ok(n) = word.parse::<u32>() {
+                    if result.contains(&format!("{n} failed")) {
+                        return Some(format!("Tests failed, {n} failures."));
+                    }
+                }
+            }
+            return Some("Tests failed.".into());
+        }
+        if result.contains("passed") || result.contains("ok") {
+            return Some("All tests passed.".into());
+        }
+        return Some("Tests finished.".into());
+    }
+
+    // git commit
+    if command.contains("git commit") {
+        // Extract commit message from the -m flag or from result
+        if let Some(msg) = extract_commit_message(command, result) {
+            let short_msg: String = msg.chars().take(80).collect();
+            return Some(format!("Committed: {short_msg}"));
+        }
+        return Some("Commit created.".into());
+    }
+
+    // git push
+    if command.contains("git push") {
+        if result.contains("rejected") || result.contains("error") || result.contains("fatal") {
+            return Some("Push failed.".into());
+        }
+        return Some("Push succeeded.".into());
+    }
+
+    // systemctl restart
+    if command.contains("systemctl") && command.contains("restart") {
+        return Some("Service restarted.".into());
+    }
+
+    None
+}
+
+/// Extract commit message from git commit -m "..." or from result output.
+fn extract_commit_message(command: &str, result: &str) -> Option<String> {
+    // Try from -m flag in command
+    for delim in ['"', '\''] {
+        if let Some(start) = command.find(&format!("-m {delim}")) {
+            let msg_start = start + 4; // skip "-m '"
+            if let Some(end) = command[msg_start..].find(delim) {
+                let msg = &command[msg_start..msg_start + end];
+                if !msg.is_empty() {
+                    return Some(msg.to_string());
+                }
+            }
+        }
+        // Also handle -m"..." (no space)
+        if let Some(start) = command.find(&format!("-m{delim}")) {
+            let msg_start = start + 3;
+            if let Some(end) = command[msg_start..].find(delim) {
+                let msg = &command[msg_start..msg_start + end];
+                if !msg.is_empty() {
+                    return Some(msg.to_string());
+                }
+            }
+        }
+    }
+
+    // Try from HEREDOC result (git commit output contains the subject line)
+    for line in result.lines() {
+        let trimmed = line.trim();
+        // git commit output: " master abc1234] Commit message here"
+        if trimmed.contains(']') {
+            if let Some(after) = trimmed.split(']').nth(1) {
+                let msg = after.trim();
+                if !msg.is_empty() {
+                    return Some(msg.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Read a JSONL transcript file and extract the last assistant text block.

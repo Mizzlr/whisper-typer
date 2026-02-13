@@ -27,6 +27,7 @@ ollama:
   enabled: true
   model: "qwen2.5:1.5b"
   host: "http://127.0.0.1:11434"
+  skip_threshold: 5              # Skip Ollama for utterances ≤ N words (0 = disabled)
 
 typer:
   backend: "xdotool"      # xdotool for X11 (respects keyboard layout)

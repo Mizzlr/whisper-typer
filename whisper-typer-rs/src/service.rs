@@ -434,8 +434,14 @@ impl DictationService {
         let t_ollama_start = Instant::now();
         let corrections = self.corrections.read().unwrap().clone();
         let corrections_ref = if corrections.is_empty() { None } else { Some(&corrections) };
+        let word_count = raw_text.split_whitespace().count();
+        let skip_threshold = self.config.ollama.skip_threshold;
         let (processed_text, ollama_text) = match self.output_mode {
             OutputMode::Whisper => (None, None),
+            _ if skip_threshold > 0 && word_count <= skip_threshold => {
+                info!("Skipped Ollama ({word_count} words <= {skip_threshold} threshold)");
+                (Some(raw_text.clone()), None)
+            }
             OutputMode::Ollama | OutputMode::Both => {
                 let corrected = self.processor.process(&raw_text, corrections_ref).await;
                 info!("Ollama corrected: \"{}\"", corrected);
