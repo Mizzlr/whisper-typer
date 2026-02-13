@@ -38,6 +38,12 @@ struct SpeakRequest {
     summarize: bool,
     event_type: String,
     start_reminder: bool,
+    session_id: String,
+}
+
+#[derive(Serialize)]
+struct UserInputRequest {
+    session_id: String,
 }
 
 // --- TTS API status response ---
@@ -45,10 +51,6 @@ struct SpeakRequest {
 #[derive(Deserialize)]
 struct StatusResponse {
     model_loaded: Option<bool>,
-    #[serde(default)]
-    speaking: bool,
-    #[serde(default)]
-    reminder_active: bool,
 }
 
 // --- Transcript JSONL parsing ---
@@ -240,17 +242,6 @@ fn now_timestamp() -> String {
         .to_string()
 }
 
-/// Check if the TTS speaker is currently idle (not speaking, no active reminder).
-async fn is_tts_idle(client: &Client) -> bool {
-    let Ok(resp) = client.get(format!("{TTS_API}/status")).send().await else {
-        return false;
-    };
-    let Ok(status) = resp.json::<StatusResponse>().await else {
-        return false;
-    };
-    !status.speaking && !status.reminder_active
-}
-
 // --- Main ---
 
 #[tokio::main(flavor = "current_thread")]
@@ -315,10 +306,10 @@ async fn main() {
     }
 
     let (action, detail, text) = match event_name.as_str() {
-        "SessionStart" => handle_session_start(&client, &event, &project, is_focus).await,
+        "SessionStart" => handle_session_start(&client, &event, &session_id, &project, is_focus).await,
         "Stop" => handle_stop(&client, &event, &session_id, &project, is_focus).await,
-        "PermissionRequest" => handle_permission(&client, &event, &project).await,
-        "Notification" => handle_notification(&client, &event, &project, is_focus).await,
+        "PermissionRequest" => handle_permission(&client, &event, &session_id, &project).await,
+        "Notification" => handle_notification(&client, &event, &session_id, &project, is_focus).await,
         "UserPromptSubmit" => {
             handle_user_prompt_submit(&client, &session_id, &project).await
         }
@@ -347,6 +338,7 @@ async fn main() {
 async fn handle_session_start(
     client: &Client,
     event: &HookEvent,
+    session_id: &str,
     project: &str,
     is_focus: bool,
 ) -> (String, Option<String>, Option<String>) {
@@ -394,6 +386,7 @@ async fn handle_session_start(
             summarize: false,
             event_type: "session_start".into(),
             start_reminder: false,
+            session_id: session_id.into(),
         })
         .send()
         .await;
@@ -439,44 +432,39 @@ async fn handle_stop(
                 summarize: true,
                 event_type: "stop".into(),
                 start_reminder: true,
+                session_id: session_id.into(),
             })
             .send()
             .await;
 
         ("spoke".into(), Some(format!("focus ({project})")), Some(text))
     } else {
-        // Non-focus session: short announcement only if speaker is idle
-        if is_tts_idle(client).await {
-            let short_text = format!("{project} finished.");
-            let _ = client
-                .post(format!("{TTS_API}/speak"))
-                .json(&SpeakRequest {
-                    text: short_text.clone(),
-                    summarize: false,
-                    event_type: "background_stop".into(),
-                    start_reminder: false,
-                })
-                .send()
-                .await;
+        // Non-focus session: short announcement (queued, plays after current speech)
+        let short_text = format!("{project} finished.");
+        let _ = client
+            .post(format!("{TTS_API}/speak"))
+            .json(&SpeakRequest {
+                text: short_text.clone(),
+                summarize: false,
+                event_type: "background_stop".into(),
+                start_reminder: false,
+                session_id: session_id.into(),
+            })
+            .send()
+            .await;
 
-            (
-                "spoke_background".into(),
-                Some(format!("non-focus idle ({project})")),
-                Some(short_text),
-            )
-        } else {
-            (
-                "skipped".into(),
-                Some(format!("non-focus busy ({project})")),
-                None,
-            )
-        }
+        (
+            "queued_background".into(),
+            Some(format!("non-focus ({project})")),
+            Some(short_text),
+        )
     }
 }
 
 async fn handle_permission(
     client: &Client,
     event: &HookEvent,
+    session_id: &str,
     project: &str,
 ) -> (String, Option<String>, Option<String>) {
     let tool = event.tool_name.as_deref().unwrap_or("unknown tool");
@@ -491,6 +479,7 @@ async fn handle_permission(
             summarize: false,
             event_type: "permission".into(),
             start_reminder: true,
+            session_id: session_id.into(),
         })
         .send()
         .await;
@@ -501,6 +490,7 @@ async fn handle_permission(
 async fn handle_notification(
     client: &Client,
     event: &HookEvent,
+    session_id: &str,
     project: &str,
     is_focus: bool,
 ) -> (String, Option<String>, Option<String>) {
@@ -537,6 +527,7 @@ async fn handle_notification(
             summarize: false,
             event_type: event_type.into(),
             start_reminder: true,
+            session_id: session_id.into(),
         })
         .send()
         .await;
@@ -558,12 +549,16 @@ async fn handle_user_prompt_submit(
         write_focus(session_id, project);
     }
 
+    // Notify TTS API: cancel reminders + re-queue deferred non-focus items
     let _ = client
-        .post(format!("{TTS_API}/cancel-reminder"))
+        .post(format!("{TTS_API}/user-input"))
+        .json(&UserInputRequest {
+            session_id: session_id.into(),
+        })
         .send()
         .await;
 
-    ("cancel_reminder".into(), Some(format!("focus={project}")), None)
+    ("user_input".into(), Some(format!("focus={project}")), None)
 }
 
 /// Read a JSONL transcript file and extract the last assistant text block.

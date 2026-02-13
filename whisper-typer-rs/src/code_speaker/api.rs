@@ -1,22 +1,29 @@
 //! HTTP API server for Code Speaker TTS.
 //!
-//! Provides the same endpoint contract as the Python code-speaker service
-//! for backward compatibility with tts-hook.sh and MCP tools.
-//! Runs on port 8767 (configurable) using axum.
+//! Speak requests are queued and processed sequentially — each one plays
+//! to completion before the next starts. Cancel operations increment a
+//! generation counter to skip stale queued jobs.
+//!
+//! Interrupted items are saved to a deferred list. When the user finishes
+//! speaking (POST /user-input), non-focus deferred items are re-queued
+//! so they're not silently lost.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::history::{save_tts_record, TTSRecord};
 use super::reminder::ReminderManager;
 use super::summarizer::OllamaSummarizer;
 use super::tts::KokoroTtsEngine;
+
+const MAX_DEFERRED: usize = 20;
 
 #[derive(Clone)]
 pub struct TtsApiState {
@@ -25,6 +32,20 @@ pub struct TtsApiState {
     pub reminder: Arc<ReminderManager>,
     pub max_direct_chars: usize,
     pub enabled: Arc<AtomicBool>,
+    pub queue_tx: mpsc::Sender<SpeakJob>,
+    pub generation: Arc<AtomicU64>,
+    pub deferred: Arc<Mutex<Vec<SpeakJob>>>,
+}
+
+/// A queued speak request with generation stamp for cancellation.
+#[derive(Clone)]
+pub struct SpeakJob {
+    pub text: String,
+    pub summarize: bool,
+    pub event_type: String,
+    pub start_reminder: bool,
+    pub generation: u64,
+    pub session_id: String,
 }
 
 // --- Request/Response types ---
@@ -38,6 +59,8 @@ struct SpeakRequest {
     event_type: String,
     #[serde(default)]
     start_reminder: bool,
+    #[serde(default)]
+    session_id: String,
 }
 
 fn default_event_type() -> String {
@@ -49,6 +72,12 @@ struct SetVoiceRequest {
     voice: String,
 }
 
+#[derive(Deserialize)]
+struct UserInputRequest {
+    #[serde(default)]
+    session_id: String,
+}
+
 #[derive(Serialize)]
 struct StatusResponse {
     enabled: bool,
@@ -57,6 +86,8 @@ struct StatusResponse {
     model_loaded: bool,
     reminder_active: bool,
     reminder_count: u32,
+    queue_depth: usize,
+    deferred_count: usize,
 }
 
 #[derive(Serialize)]
@@ -68,6 +99,8 @@ struct SimpleResponse {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reminders_fired: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requeued: Option<usize>,
 }
 
 impl SimpleResponse {
@@ -77,6 +110,7 @@ impl SimpleResponse {
             voice: None,
             error: None,
             reminders_fired: None,
+            requeued: None,
         }
     }
 
@@ -86,6 +120,7 @@ impl SimpleResponse {
             error: Some(message.into()),
             voice: None,
             reminders_fired: None,
+            requeued: None,
         }
     }
 }
@@ -98,13 +133,24 @@ pub fn router(state: TtsApiState) -> Router {
         .route("/set-voice", post(handle_set_voice))
         .route("/cancel", post(handle_cancel))
         .route("/cancel-reminder", post(handle_cancel_reminder))
+        .route("/user-input", post(handle_user_input))
         .route("/enable", post(handle_enable))
         .route("/disable", post(handle_disable))
         .with_state(state)
 }
 
-/// Start the TTS API server as a background tokio task.
-pub async fn start_tts_api(state: TtsApiState, port: u16) {
+/// Start the TTS API server and queue consumer as background tokio tasks.
+pub async fn start_tts_api(state: TtsApiState, port: u16, queue_rx: mpsc::Receiver<SpeakJob>) {
+    spawn_queue_consumer(
+        queue_rx,
+        state.tts.clone(),
+        state.summarizer.clone(),
+        state.reminder.clone(),
+        state.max_direct_chars,
+        state.generation.clone(),
+        state.deferred.clone(),
+    );
+
     let app = router(state);
     let addr = format!("127.0.0.1:{port}");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -123,6 +169,65 @@ pub async fn start_tts_api(state: TtsApiState, port: u16) {
     });
 }
 
+/// Spawn a background task that processes speak jobs sequentially from the queue.
+fn spawn_queue_consumer(
+    mut rx: mpsc::Receiver<SpeakJob>,
+    tts: Arc<KokoroTtsEngine>,
+    summarizer: Arc<OllamaSummarizer>,
+    reminder: Arc<ReminderManager>,
+    max_direct_chars: usize,
+    generation: Arc<AtomicU64>,
+    deferred: Arc<Mutex<Vec<SpeakJob>>>,
+) {
+    tokio::spawn(async move {
+        while let Some(job) = rx.recv().await {
+            let current_gen = generation.load(Ordering::Relaxed);
+            if job.generation != current_gen {
+                // Save for re-queue after user finishes speaking
+                info!(
+                    "Queue: deferring stale job [{}] sid={} (gen {} != {})",
+                    job.event_type,
+                    &job.session_id[..job.session_id.len().min(8)],
+                    job.generation,
+                    current_gen,
+                );
+                let mut def = deferred.lock().unwrap();
+                if def.len() < MAX_DEFERRED {
+                    def.push(job);
+                }
+                continue;
+            }
+
+            // Clone before speaking in case we get cancelled mid-speech
+            let backup = job.clone();
+
+            let cancelled = do_speak(
+                &tts,
+                &summarizer,
+                &reminder,
+                max_direct_chars,
+                job.text,
+                job.summarize,
+                job.event_type,
+                job.start_reminder,
+            )
+            .await;
+
+            if cancelled {
+                info!(
+                    "Queue: deferring cancelled job [{}] sid={}",
+                    backup.event_type,
+                    &backup.session_id[..backup.session_id.len().min(8)],
+                );
+                let mut def = deferred.lock().unwrap();
+                if def.len() < MAX_DEFERRED {
+                    def.push(backup);
+                }
+            }
+        }
+    });
+}
+
 // --- Handlers ---
 
 async fn handle_status(State(state): State<TtsApiState>) -> Json<StatusResponse> {
@@ -133,6 +238,8 @@ async fn handle_status(State(state): State<TtsApiState>) -> Json<StatusResponse>
         model_loaded: state.tts.is_loaded(),
         reminder_active: state.reminder.is_active(),
         reminder_count: state.reminder.reminder_count(),
+        queue_depth: state.queue_tx.max_capacity() - state.queue_tx.capacity(),
+        deferred_count: state.deferred.lock().unwrap().len(),
     })
 }
 
@@ -150,35 +257,28 @@ async fn handle_speak(
 
     let preview: String = req.text.chars().take(80).collect();
     info!(
-        "HTTP /speak [{}]: \"{}{}\" ({} chars, summarize={})",
+        "HTTP /speak [{}]: \"{}{}\" ({} chars, summarize={}, sid={})",
         req.event_type,
         preview.replace('\n', " "),
         if req.text.len() > 80 { "..." } else { "" },
         req.text.len(),
         req.summarize,
+        &req.session_id[..req.session_id.len().min(8)],
     );
 
-    // Fire-and-forget: spawn the speak pipeline
-    let tts = state.tts.clone();
-    let summarizer = state.summarizer.clone();
-    let reminder = state.reminder.clone();
-    let max_direct_chars = state.max_direct_chars;
+    let job = SpeakJob {
+        text: req.text,
+        summarize: req.summarize,
+        event_type: req.event_type,
+        start_reminder: req.start_reminder,
+        generation: state.generation.load(Ordering::Relaxed),
+        session_id: req.session_id,
+    };
 
-    tokio::spawn(async move {
-        do_speak(
-            tts,
-            summarizer,
-            reminder,
-            max_direct_chars,
-            req.text,
-            req.summarize,
-            req.event_type,
-            req.start_reminder,
-        )
-        .await;
-    });
-
-    Json(SimpleResponse::ok("speaking"))
+    match state.queue_tx.try_send(job) {
+        Ok(()) => Json(SimpleResponse::ok("queued")),
+        Err(_) => Json(SimpleResponse::err("queue full")),
+    }
 }
 
 async fn handle_set_voice(
@@ -195,17 +295,68 @@ async fn handle_set_voice(
     }
 }
 
+/// Hard cancel: stop speech, skip queue, save interrupted items for re-queue.
+/// Called by hotkey press (user starts recording).
 async fn handle_cancel(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
-    state.tts.interrupt();
+    state.generation.fetch_add(1, Ordering::Relaxed);
+    state.reminder.cancel();
+    state.tts.cancel();
     Json(SimpleResponse::ok("cancelled"))
 }
 
+/// Cancel reminders only. Does not affect the queue or current speech.
 async fn handle_cancel_reminder(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
     let count = state.reminder.cancel();
-    state.tts.interrupt();
     Json(SimpleResponse {
         reminders_fired: Some(count),
         ..SimpleResponse::ok("cancelled")
+    })
+}
+
+/// User finished speaking/typing. Re-queue deferred non-focus items.
+/// Called by UserPromptSubmit hook event.
+async fn handle_user_input(
+    State(state): State<TtsApiState>,
+    Json(req): Json<UserInputRequest>,
+) -> Json<SimpleResponse> {
+    // Cancel reminders (user is actively engaging)
+    state.reminder.cancel();
+
+    // Re-queue deferred items that aren't from the user's current session
+    let items: Vec<SpeakJob> = {
+        let mut def = state.deferred.lock().unwrap();
+        def.drain(..).collect()
+    };
+
+    let current_gen = state.generation.load(Ordering::Relaxed);
+    let mut requeued = 0usize;
+    let mut discarded = 0usize;
+
+    for mut job in items {
+        if job.session_id == req.session_id {
+            // Focus session — user is there, they'll see the output
+            discarded += 1;
+            continue;
+        }
+        // Re-queue with current generation
+        job.generation = current_gen;
+        if state.queue_tx.try_send(job).is_ok() {
+            requeued += 1;
+        }
+    }
+
+    if requeued > 0 || discarded > 0 {
+        info!(
+            "User input (sid={}): requeued {} deferred items, discarded {} focus items",
+            &req.session_id[..req.session_id.len().min(8)],
+            requeued,
+            discarded,
+        );
+    }
+
+    Json(SimpleResponse {
+        requeued: Some(requeued as usize),
+        ..SimpleResponse::ok("ok")
     })
 }
 
@@ -217,29 +368,33 @@ async fn handle_enable(State(state): State<TtsApiState>) -> Json<SimpleResponse>
 
 async fn handle_disable(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
     state.enabled.store(false, Ordering::Relaxed);
-    state.tts.interrupt();
+    state.generation.fetch_add(1, Ordering::Relaxed);
+    state.tts.cancel();
     state.reminder.cancel();
+    // Clear deferred on disable — user wants silence
+    state.deferred.lock().unwrap().clear();
     info!("TTS disabled (do-not-disturb)");
     Json(SimpleResponse::ok("disabled"))
 }
 
-/// Execute the speak pipeline: cancel previous → summarize → speak → reminder.
+/// Execute the speak pipeline: cancel reminder → interrupt stale speech → summarize → speak → reminder.
+/// Returns true if the speech was cancelled mid-playback.
 async fn do_speak(
-    tts: Arc<KokoroTtsEngine>,
-    summarizer: Arc<OllamaSummarizer>,
-    reminder: Arc<ReminderManager>,
+    tts: &Arc<KokoroTtsEngine>,
+    summarizer: &Arc<OllamaSummarizer>,
+    reminder: &Arc<ReminderManager>,
     max_direct_chars: usize,
     text: String,
     summarize: bool,
     event_type: String,
     start_reminder: bool,
-) {
+) -> bool {
     let t_total = std::time::Instant::now();
 
     // Cancel any existing reminder
     reminder.cancel();
 
-    // Interrupt any in-flight speech (so this new one can take over)
+    // Interrupt any in-flight speech (e.g., from a reminder that fired between queue items)
     tts.interrupt();
 
     // Optionally summarize long text
@@ -251,13 +406,13 @@ async fn do_speak(
             (text.clone(), 0.0, false)
         };
 
-    // Speak (voice gate waiting is handled inside tts.speak())
+    // Speak
     let result = tts.speak(&spoken_text).await;
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
     info!(
-        "TTS complete [{}]: ollama={ollama_ms:.0}ms gen={:.0}ms play={:.0}ms total={total_ms:.0}ms",
-        event_type, result.generate_ms, result.playback_ms,
+        "TTS complete [{}]: ollama={ollama_ms:.0}ms gen={:.0}ms play={:.0}ms total={total_ms:.0}ms cancelled={}",
+        event_type, result.generate_ms, result.playback_ms, result.cancelled,
     );
 
     // Start reminder if requested and not cancelled
@@ -282,4 +437,6 @@ async fn do_speak(
         reminder_count: reminder.reminder_count(),
     };
     save_tts_record(&record);
+
+    result.cancelled
 }

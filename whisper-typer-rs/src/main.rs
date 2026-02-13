@@ -101,14 +101,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.tts.reminder_interval,
                 ));
 
+                let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(20);
                 let api_state = code_speaker::api::TtsApiState {
                     tts,
                     summarizer,
                     reminder,
                     max_direct_chars: config.tts.max_direct_chars,
                     enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    queue_tx,
+                    generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    deferred: Arc::new(std::sync::Mutex::new(Vec::new())),
                 };
-                code_speaker::api::start_tts_api(api_state, config.tts.api_port).await;
+                code_speaker::api::start_tts_api(api_state, config.tts.api_port, queue_rx).await;
                 info!(
                     "Native TTS server started on port {} (voice: {}, speed: {})",
                     config.tts.api_port, config.tts.voice, config.tts.speed
