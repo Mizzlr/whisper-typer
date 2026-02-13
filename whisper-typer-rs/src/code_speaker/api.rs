@@ -222,7 +222,7 @@ fn spawn_queue_consumer(
             let text_preview: String = job.text.chars().take(60).collect();
             let text_ellipsis = if job.text.len() > 60 { "..." } else { "" };
             info!(
-                "Queue: PLAYING [{}] sid={} retries={} \"{text_preview}{text_ellipsis}\" [deferred={}]",
+                "Queue: NEXT [{}] sid={} retries={} \"{text_preview}{text_ellipsis}\" [deferred={}]",
                 job.event_type, sid, job.retries, deferred_count,
             );
 
@@ -471,7 +471,9 @@ async fn do_speak(
             (text.clone(), 0.0, false)
         };
 
-    // Speak
+    info!("Queue: PLAYING [{event_type}] ({} chars{})", spoken_text.len(), if summarized { ", summarized" } else { "" });
+
+    // Speak (voice gate wait happens inside tts.speak())
     let result = tts.speak(&spoken_text).await;
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
