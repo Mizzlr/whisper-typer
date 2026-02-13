@@ -353,8 +353,8 @@ async fn handle_user_input(
     let mut discarded = 0usize;
 
     for mut job in items {
-        if job.session_id == req.session_id {
-            // Focus session — user is there, they'll see the output
+        if job.session_id.is_empty() || job.session_id == req.session_id {
+            // Focus session or manual (MCP) — user is there, they'll see the output
             discarded += 1;
             continue;
         }
