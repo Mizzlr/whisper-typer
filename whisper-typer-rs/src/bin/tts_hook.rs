@@ -87,6 +87,19 @@ fn history_dir() -> PathBuf {
         .join(".tts-hook-history")
 }
 
+/// Dedup file tracks the last spoken Stop text to prevent repeats.
+fn dedup_file() -> PathBuf {
+    history_dir().join(".last-stop-text")
+}
+
+/// Check if this Stop text was already spoken. Updates the dedup file.
+fn is_duplicate_stop(text: &str) -> bool {
+    let path = dedup_file();
+    let previous = fs::read_to_string(&path).unwrap_or_default();
+    let _ = fs::write(&path, text);
+    previous == text
+}
+
 fn save_record(record: &HistoryRecord) {
     let dir = history_dir();
     let _ = fs::create_dir_all(&dir);
@@ -245,6 +258,15 @@ async fn handle_stop(
             None,
         );
     };
+
+    // Deduplicate — Claude Code can fire multiple Stop events for one turn
+    if is_duplicate_stop(&text) {
+        return (
+            "skipped".into(),
+            Some("duplicate stop text".into()),
+            Some(text),
+        );
+    }
 
     let _ = client
         .post(format!("{TTS_API}/speak"))
