@@ -287,7 +287,11 @@ async fn handle_notification(
     event: &HookEvent,
 ) -> (String, Option<String>, Option<String>) {
     let (text, event_type) = match event.notification_type.as_deref() {
-        Some("idle_prompt") => ("Claude is waiting for your input.", "notification"),
+        Some("idle_prompt") => {
+            // Skip — the reminder system already handles post-stop reminders,
+            // and Claude Code's idle_prompt fires false positives.
+            return ("skipped".into(), Some("idle_prompt (redundant)".into()), None);
+        }
         Some("permission_prompt") => ("Permission needed.", "permission"),
         Some(other) => {
             return (

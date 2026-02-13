@@ -224,32 +224,9 @@ impl KokoroTtsEngine {
             };
         }
 
-        // If voice input is active, wait for it to finish (with timeout).
-        // This defers TTS until the user is done recording.
-        if !self.voice_idle.load(Ordering::Relaxed) {
-            info!("TTS deferred — waiting for voice input to complete");
-            let wait_result = tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                self.wait_for_voice_idle(),
-            )
-            .await;
-            match wait_result {
-                Ok(()) => info!("TTS resumed — voice input complete"),
-                Err(_) => {
-                    warn!("TTS voice gate timeout (60s) — speaking anyway");
-                }
-            }
-            // Re-check cancel after waiting — user may have cancelled during recording
-            if self.cancel_flag.load(Ordering::Relaxed) {
-                info!("TTS skipped — cancelled during voice wait");
-                self.cancel_flag.store(false, Ordering::Relaxed);
-                return SpeakResult {
-                    generate_ms: 0.0,
-                    playback_ms: 0.0,
-                    cancelled: true,
-                };
-            }
-        }
+        // Note: voice gate wait was removed — it caused false delays where
+        // TTS thought recording was active when it wasn't. The hotkey-based
+        // cancel (interrupt) already handles the recording case.
 
         self.cancel_flag.store(false, Ordering::Relaxed);
         self.speaking.store(true, Ordering::Relaxed);
