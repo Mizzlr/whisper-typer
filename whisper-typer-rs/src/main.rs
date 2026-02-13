@@ -106,7 +106,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tts,
                     summarizer,
                     reminder,
-                    max_direct_chars: config.tts.max_direct_chars,
                     enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     queue_tx,
                     generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),

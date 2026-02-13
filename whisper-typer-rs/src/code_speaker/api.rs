@@ -39,7 +39,6 @@ pub struct TtsApiState {
     pub tts: Arc<KokoroTtsEngine>,
     pub summarizer: Arc<OllamaSummarizer>,
     pub reminder: Arc<ReminderManager>,
-    pub max_direct_chars: usize,
     pub enabled: Arc<AtomicBool>,
     pub queue_tx: mpsc::Sender<SpeakJob>,
     pub generation: Arc<AtomicU64>,
@@ -157,7 +156,6 @@ pub async fn start_tts_api(state: TtsApiState, port: u16, queue_rx: mpsc::Receiv
         state.tts.clone(),
         state.summarizer.clone(),
         state.reminder.clone(),
-        state.max_direct_chars,
         state.generation.clone(),
         state.deferred.clone(),
     );
@@ -186,7 +184,6 @@ fn spawn_queue_consumer(
     tts: Arc<KokoroTtsEngine>,
     summarizer: Arc<OllamaSummarizer>,
     reminder: Arc<ReminderManager>,
-    max_direct_chars: usize,
     generation: Arc<AtomicU64>,
     deferred: Arc<Mutex<Vec<SpeakJob>>>,
 ) {
@@ -234,7 +231,6 @@ fn spawn_queue_consumer(
                 &tts,
                 &summarizer,
                 &reminder,
-                max_direct_chars,
                 job.text,
                 job.summarize,
                 job.event_type,
@@ -443,7 +439,6 @@ async fn do_speak(
     tts: &Arc<KokoroTtsEngine>,
     summarizer: &Arc<OllamaSummarizer>,
     reminder: &Arc<ReminderManager>,
-    max_direct_chars: usize,
     text: String,
     summarize: bool,
     event_type: String,
@@ -462,9 +457,9 @@ async fn do_speak(
     // the next speak with an immediate bail.
     tts.clear_cancel();
 
-    // Optionally summarize long text
+    // Summarize if requested — trust the caller's judgement
     let (spoken_text, ollama_ms, summarized) =
-        if summarize && text.len() > max_direct_chars {
+        if summarize {
             let (summary, ms) = summarizer.summarize(&text).await;
             (summary, ms, true)
         } else {

@@ -406,17 +406,16 @@ async fn handle_stop(
         _ => return ("skipped".into(), Some("no transcript path".into()), None),
     };
 
-    // Try action-oriented summary first (parses tool_use/tool_result)
-    let action_summary = extract_action_summary(transcript_path);
+    // Try extracting last bash command+result for action-oriented summary
+    let bash_action = extract_last_bash_action(transcript_path);
 
-    let text = if action_summary.is_some() {
-        // We still need fallback text for dedup
-        action_summary.clone().unwrap()
-    } else {
-        match extract_last_assistant_text(transcript_path) {
+    // Use bash action text if available, otherwise fall back to assistant text
+    let text = match &bash_action {
+        Some(action_text) => action_text.clone(),
+        None => match extract_last_assistant_text(transcript_path) {
             Some(t) => t,
             None => return ("skipped".into(), Some("no assistant text found".into()), None),
-        }
+        },
     };
 
     // Per-session dedup — Claude Code can fire multiple Stop events for one turn
@@ -429,37 +428,26 @@ async fn handle_stop(
     }
 
     if is_focus {
-        if let Some(ref summary) = action_summary {
-            // Action summary: already concise, no summarization needed
-            let _ = client
-                .post(format!("{TTS_API}/speak"))
-                .json(&SpeakRequest {
-                    text: summary.clone(),
-                    summarize: false,
-                    event_type: "stop".into(),
-                    start_reminder: true,
-                    session_id: session_id.into(),
-                })
-                .send()
-                .await;
-
-            ("spoke".into(), Some(format!("action_summary ({project})")), Some(summary.clone()))
+        // Both paths use summarize: true — Ollama produces concise TTS text
+        let detail = if bash_action.is_some() {
+            format!("action ({project})")
         } else {
-            // Fallback: full TTS with summarization and reminder
-            let _ = client
-                .post(format!("{TTS_API}/speak"))
-                .json(&SpeakRequest {
-                    text: text.clone(),
-                    summarize: true,
-                    event_type: "stop".into(),
-                    start_reminder: true,
-                    session_id: session_id.into(),
-                })
-                .send()
-                .await;
+            format!("focus ({project})")
+        };
 
-            ("spoke".into(), Some(format!("focus ({project})")), Some(text))
-        }
+        let _ = client
+            .post(format!("{TTS_API}/speak"))
+            .json(&SpeakRequest {
+                text: text.clone(),
+                summarize: true,
+                event_type: "stop".into(),
+                start_reminder: true,
+                session_id: session_id.into(),
+            })
+            .send()
+            .await;
+
+        ("spoke".into(), Some(detail), Some(text))
     } else {
         // Non-focus session: short announcement (queued, plays after current speech)
         let short_text = format!("{project} finished.");
@@ -583,14 +571,13 @@ async fn handle_user_prompt_submit(
     ("user_input".into(), Some(format!("focus={project}")), None)
 }
 
-/// Scan the last ~20 JSONL lines for Bash tool_use + tool_result pairs.
-/// Returns a concise action-oriented summary if a recognizable action is found.
-fn extract_action_summary(path: &str) -> Option<String> {
+/// Scan the last ~20 JSONL lines for the last Bash tool_use + tool_result pair.
+/// Returns formatted "Command: ...\nOutput: ..." text for Ollama summarization.
+fn extract_last_bash_action(path: &str) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(20);
 
-    // Collect tool_use commands and their results
     let mut last_bash_command: Option<String> = None;
     let mut last_bash_result: Option<String> = None;
 
@@ -621,7 +608,7 @@ fn extract_action_summary(path: &str) -> Option<String> {
                         .unwrap_or("");
                     if !cmd.is_empty() {
                         last_bash_command = Some(cmd.to_string());
-                        last_bash_result = None; // reset result for new command
+                        last_bash_result = None;
                     }
                 }
             }
@@ -629,120 +616,23 @@ fn extract_action_summary(path: &str) -> Option<String> {
             if entry_type == "human" && block_type == "tool_result" {
                 if let Some(content) = block.get("content").and_then(|c| c.as_str()) {
                     if last_bash_command.is_some() {
-                        last_bash_result = Some(content.chars().take(2000).collect());
+                        // Take last 500 chars of output (tail is most informative)
+                        let trimmed = content.trim();
+                        let tail: String = if trimmed.len() > 500 {
+                            trimmed[trimmed.len() - 500..].to_string()
+                        } else {
+                            trimmed.to_string()
+                        };
+                        last_bash_result = Some(tail);
                     }
                 }
             }
         }
     }
 
-    // Try to classify the last Bash action
-    if let Some(cmd) = &last_bash_command {
-        let result = last_bash_result.as_deref().unwrap_or("");
-        return classify_action(cmd, result);
-    }
-
-    None
-}
-
-/// Pattern-match a Bash command + result into a concise spoken summary.
-fn classify_action(command: &str, result: &str) -> Option<String> {
-    // cargo build
-    if command.contains("cargo build") {
-        if result.contains("error[") || result.contains("error:") {
-            let error_count = result.matches("error[").count()
-                + result.matches("error:").count();
-            return Some(format!("Build failed with {error_count} errors."));
-        }
-        let profile = if command.contains("--release") { "release" } else { "debug" };
-        return Some(format!("Build finished, {profile} profile."));
-    }
-
-    // cargo test / pytest / npm test
-    if command.contains("cargo test") || command.contains("pytest") || command.contains("npm test") {
-        if result.contains("FAILED") || result.contains("failures") || result.contains("failed") {
-            // Try to extract failure count
-            for word in result.split_whitespace() {
-                if let Ok(n) = word.parse::<u32>() {
-                    if result.contains(&format!("{n} failed")) {
-                        return Some(format!("Tests failed, {n} failures."));
-                    }
-                }
-            }
-            return Some("Tests failed.".into());
-        }
-        if result.contains("passed") || result.contains("ok") {
-            return Some("All tests passed.".into());
-        }
-        return Some("Tests finished.".into());
-    }
-
-    // git commit
-    if command.contains("git commit") {
-        // Extract commit message from the -m flag or from result
-        if let Some(msg) = extract_commit_message(command, result) {
-            let short_msg: String = msg.chars().take(80).collect();
-            return Some(format!("Committed: {short_msg}"));
-        }
-        return Some("Commit created.".into());
-    }
-
-    // git push
-    if command.contains("git push") {
-        if result.contains("rejected") || result.contains("error") || result.contains("fatal") {
-            return Some("Push failed.".into());
-        }
-        return Some("Push succeeded.".into());
-    }
-
-    // systemctl restart
-    if command.contains("systemctl") && command.contains("restart") {
-        return Some("Service restarted.".into());
-    }
-
-    None
-}
-
-/// Extract commit message from git commit -m "..." or from result output.
-fn extract_commit_message(command: &str, result: &str) -> Option<String> {
-    // Try from -m flag in command
-    for delim in ['"', '\''] {
-        if let Some(start) = command.find(&format!("-m {delim}")) {
-            let msg_start = start + 4; // skip "-m '"
-            if let Some(end) = command[msg_start..].find(delim) {
-                let msg = &command[msg_start..msg_start + end];
-                if !msg.is_empty() {
-                    return Some(msg.to_string());
-                }
-            }
-        }
-        // Also handle -m"..." (no space)
-        if let Some(start) = command.find(&format!("-m{delim}")) {
-            let msg_start = start + 3;
-            if let Some(end) = command[msg_start..].find(delim) {
-                let msg = &command[msg_start..msg_start + end];
-                if !msg.is_empty() {
-                    return Some(msg.to_string());
-                }
-            }
-        }
-    }
-
-    // Try from HEREDOC result (git commit output contains the subject line)
-    for line in result.lines() {
-        let trimmed = line.trim();
-        // git commit output: " master abc1234] Commit message here"
-        if trimmed.contains(']') {
-            if let Some(after) = trimmed.split(']').nth(1) {
-                let msg = after.trim();
-                if !msg.is_empty() {
-                    return Some(msg.to_string());
-                }
-            }
-        }
-    }
-
-    None
+    let cmd = last_bash_command?;
+    let result = last_bash_result.unwrap_or_default();
+    Some(format!("Command: {cmd}\nOutput: {result}"))
 }
 
 /// Read a JSONL transcript file and extract the last assistant text block.
