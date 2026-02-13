@@ -224,9 +224,25 @@ impl KokoroTtsEngine {
             };
         }
 
-        // Note: voice gate wait was removed — it caused false delays where
-        // TTS thought recording was active when it wasn't. The hotkey-based
-        // cancel (interrupt) already handles the recording case.
+        // Wait for voice input to be idle (user not actively recording).
+        // Check cancel_flag periodically so a hotkey press can bail us out.
+        while !self.voice_idle.load(Ordering::Relaxed) {
+            if self.cancel_flag.load(Ordering::Relaxed) {
+                info!("TTS skipped — cancelled while waiting for voice idle");
+                self.cancel_flag.store(false, Ordering::Relaxed);
+                return SpeakResult {
+                    generate_ms: 0.0,
+                    playback_ms: 0.0,
+                    cancelled: true,
+                };
+            }
+            // Wait with timeout to re-check cancel_flag regularly
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                self.voice_idle_notify.notified(),
+            )
+            .await;
+        }
 
         self.cancel_flag.store(false, Ordering::Relaxed);
         self.speaking.store(true, Ordering::Relaxed);
@@ -236,13 +252,6 @@ impl KokoroTtsEngine {
         self.speaking.store(false, Ordering::Relaxed);
         self.cancel_flag.store(false, Ordering::Relaxed);
         result
-    }
-
-    /// Wait until voice input is idle, checking cancel_flag periodically.
-    async fn wait_for_voice_idle(&self) {
-        while !self.voice_idle.load(Ordering::Relaxed) {
-            self.voice_idle_notify.notified().await;
-        }
     }
 
     async fn speak_inner(&self, text: &str) -> SpeakResult {
