@@ -418,6 +418,11 @@ async fn do_speak(
     // Interrupt any in-flight speech (e.g., from a reminder that fired between queue items)
     tts.interrupt();
 
+    // Clear stale cancel flag — generation counter handles queue-level cancellation.
+    // Without this, a previous cancel() (hotkey when nothing was playing) poisons
+    // the next speak with an immediate bail.
+    tts.clear_cancel();
+
     // Optionally summarize long text
     let (spoken_text, ollama_ms, summarized) =
         if summarize && text.len() > max_direct_chars {

@@ -487,6 +487,13 @@ impl KokoroTtsEngine {
         info!("TTS cancelled");
     }
 
+    /// Clear a stale cancel flag without stopping anything.
+    /// Called by the queue consumer before each job so that a previous
+    /// cancel() doesn't poison the next unrelated speak.
+    pub fn clear_cancel(&self) {
+        self.cancel_flag.store(false, Ordering::Relaxed);
+    }
+
     /// Cancel and wait for speak lock to be released.
     #[allow(dead_code)]
     pub async fn cancel_and_wait(&self) {
