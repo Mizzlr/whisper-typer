@@ -279,7 +279,8 @@ impl WhisperTyperMcp {
         {
             Ok(_) => {
                 let preview = if req.text.len() > 80 {
-                    format!("{}...", &req.text[..80])
+                    let end = req.text.floor_char_boundary(80);
+                    format!("{}...", &req.text[..end])
                 } else {
                     req.text
                 };
