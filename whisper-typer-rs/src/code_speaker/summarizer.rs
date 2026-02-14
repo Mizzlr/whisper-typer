@@ -41,9 +41,10 @@ impl OllamaSummarizer {
     pub async fn summarize(&self, text: &str) -> (String, f64) {
         let t_start = Instant::now();
 
-        // Truncate long input
+        // Truncate long input (must land on a char boundary)
         let input = if text.len() > MAX_INPUT_CHARS {
-            &text[..MAX_INPUT_CHARS]
+            let end = text.floor_char_boundary(MAX_INPUT_CHARS);
+            &text[..end]
         } else {
             text
         };

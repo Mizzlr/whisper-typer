@@ -227,16 +227,25 @@ fn spawn_queue_consumer(
             let backup = job.clone();
             let event_type = job.event_type.clone();
 
-            let cancelled = do_speak(
-                &tts,
-                &summarizer,
-                &reminder,
-                job.text,
-                job.summarize,
-                job.event_type,
-                job.start_reminder,
-            )
-            .await;
+            // Spawn do_speak in a separate task so a panic doesn't kill the consumer loop.
+            let tts2 = tts.clone();
+            let sum2 = summarizer.clone();
+            let rem2 = reminder.clone();
+            let job_text = job.text;
+            let job_summarize = job.summarize;
+            let job_event = job.event_type;
+            let job_reminder = job.start_reminder;
+            let speak_handle = tokio::spawn(async move {
+                do_speak(&tts2, &sum2, &rem2, job_text, job_summarize, job_event, job_reminder).await
+            });
+
+            let cancelled = match speak_handle.await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Queue: PANIC in do_speak [{}] sid={}: {e}", event_type, sid);
+                    false
+                }
+            };
 
             if cancelled {
                 // Only defer first-time cancelled items. Already-retried items are dropped.
@@ -322,9 +331,13 @@ async fn handle_speak(
 
     match state.queue_tx.try_send(job) {
         Ok(()) => Json(SimpleResponse::ok("queued")),
-        Err(_) => {
+        Err(mpsc::error::TrySendError::Full(_)) => {
             warn!("Speak queue full (capacity=20), dropping job");
             Json(SimpleResponse::err("queue full"))
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            warn!("Speak queue consumer is dead (receiver dropped), cannot enqueue");
+            Json(SimpleResponse::err("queue consumer dead"))
         }
     }
 }
