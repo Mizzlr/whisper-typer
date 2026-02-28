@@ -140,6 +140,23 @@ fn load_vocabulary() -> String {
     }
 }
 
+/// Remove trailing "Thank you[.!]?" if the preceding text has more than 10 words.
+/// Whisper commonly appends a spoken "Thank you" at the end of real dictations.
+fn strip_trailing_thankyou(text: &str) -> &str {
+    let trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
+    for suffix in &["thank you.", "thank you!", "thank you"] {
+        if lower.ends_with(suffix) {
+            let preceding = trimmed[..trimmed.len() - suffix.len()].trim();
+            if preceding.split_whitespace().count() > 10 {
+                debug!("Stripped trailing 'Thank you' from dictation");
+                return preceding;
+            }
+        }
+    }
+    trimmed
+}
+
 /// Load correction mappings from `.whisper/corrections.yaml` (wrong: right).
 fn load_corrections() -> HashMap<String, String> {
     let path = PathBuf::from(".whisper/corrections.yaml");
@@ -435,12 +452,16 @@ impl DictationService {
         };
         let t_ollama = t_ollama_start.elapsed().as_secs_f64() * 1000.0;
 
+        // Strip trailing "Thank you" — common speech artifact when user ends dictation
+        let raw_clean = strip_trailing_thankyou(&raw_text);
+        let processed_clean = processed_text.as_deref().map(|t| strip_trailing_thankyou(t));
+
         // Build final output
         let final_text = match self.output_mode {
-            OutputMode::Whisper => format!("{raw_text} "),
-            OutputMode::Ollama => format!("{} ", processed_text.as_deref().unwrap_or(&raw_text)),
+            OutputMode::Whisper => format!("{raw_clean} "),
+            OutputMode::Ollama => format!("{} ", processed_clean.unwrap_or(raw_clean)),
             OutputMode::Both => {
-                format!("{} [{raw_text}] ", processed_text.as_deref().unwrap_or(&raw_text))
+                format!("{} [{raw_clean}] ", processed_clean.unwrap_or(raw_clean))
             }
         };
 
