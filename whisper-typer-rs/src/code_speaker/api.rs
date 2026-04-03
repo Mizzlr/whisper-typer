@@ -18,10 +18,38 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use std::path::PathBuf;
+
 use super::history::{save_tts_record, TTSRecord};
 use super::reminder::ReminderManager;
 use super::summarizer::OllamaSummarizer;
 use super::tts::KokoroTtsEngine;
+
+// --- Voice persistence ---
+
+fn voice_file() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cache/whisper-typer/tts-voice")
+}
+
+fn persist_voice(voice: &str) {
+    let path = voice_file();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, voice) {
+        warn!("Failed to persist voice: {e}");
+    }
+    info!("Voice persisted: {voice}");
+}
+
+pub fn load_persisted_voice() -> Option<String> {
+    std::fs::read_to_string(voice_file())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
 
 const MAX_DEFERRED: usize = 20;
 
@@ -54,8 +82,27 @@ pub struct SpeakJob {
     pub start_reminder: bool,
     pub generation: u64,
     pub session_id: String,
-    /// How many times this job has been deferred+re-queued. Max 1 retry.
+    /// How many times this job has been deferred+re-queued.
     pub retries: u32,
+    /// When the job was first created, for time-based expiry.
+    pub created_at: std::time::Instant,
+}
+
+/// Check if a deferred job has exceeded its retry window.
+/// - Daytime: 30 minutes max
+/// - Night (00:00–06:00 IST): 15 minutes max or >3 retries
+fn is_job_expired(job: &SpeakJob) -> bool {
+    use chrono::Timelike;
+    let age = job.created_at.elapsed();
+    let ist = chrono::Utc::now().with_timezone(
+        &chrono::FixedOffset::east_opt(5 * 3600 + 30 * 60).unwrap(),
+    );
+    let is_night = ist.hour() < 6;
+    if is_night {
+        age >= std::time::Duration::from_secs(15 * 60) || job.retries > 3
+    } else {
+        age >= std::time::Duration::from_secs(30 * 60) || job.retries > 2
+    }
 }
 
 // --- Request/Response types ---
@@ -193,26 +240,28 @@ fn spawn_queue_consumer(
             let deferred_count = deferred.lock().unwrap().len();
             let current_gen = generation.load(Ordering::Relaxed);
 
+            // Drop expired jobs before processing
+            if is_job_expired(&job) {
+                let age_min = job.created_at.elapsed().as_secs() / 60;
+                info!(
+                    "Queue: EXPIRED [{}] sid={sid} (age={age_min}m, retries={}) [deferred={deferred_count}]",
+                    job.event_type, job.retries,
+                );
+                continue;
+            }
+
             if job.generation != current_gen {
                 let job_gen = job.generation;
                 let retries = job.retries;
-                // Only defer first-time items (retries == 0). Already-retried items are dropped.
-                if retries == 0 {
-                    let evt = job.event_type.clone();
-                    let mut def = deferred.lock().unwrap();
-                    if def.len() < MAX_DEFERRED {
-                        def.push(job);
-                    }
-                    info!(
-                        "Queue: DEFERRED stale [{evt}] sid={sid} (gen {job_gen} != {current_gen}) [deferred={}]",
-                        def.len(),
-                    );
-                } else {
-                    info!(
-                        "Queue: DROPPED re-queued stale [{}] sid={sid} (retries={retries}) [deferred={deferred_count}]",
-                        job.event_type,
-                    );
+                let evt = job.event_type.clone();
+                let mut def = deferred.lock().unwrap();
+                if def.len() < MAX_DEFERRED {
+                    def.push(job);
                 }
+                info!(
+                    "Queue: DEFERRED stale [{evt}] sid={sid} (gen {job_gen} != {current_gen}, retries={retries}) [deferred={}]",
+                    def.len(),
+                );
                 continue;
             }
 
@@ -248,20 +297,21 @@ fn spawn_queue_consumer(
             };
 
             if cancelled {
-                // Only defer first-time cancelled items. Already-retried items are dropped.
-                if backup.retries == 0 {
+                if is_job_expired(&backup) {
+                    let age_min = backup.created_at.elapsed().as_secs() / 60;
+                    info!(
+                        "Queue: EXPIRED cancelled [{}] sid={} (age={age_min}m, retries={}) [deferred={deferred_count}]",
+                        event_type, sid, backup.retries,
+                    );
+                } else {
+                    let retries = backup.retries;
                     let mut def = deferred.lock().unwrap();
                     if def.len() < MAX_DEFERRED {
                         def.push(backup);
                     }
                     info!(
-                        "Queue: DEFERRED cancelled [{}] sid={} [deferred={}]",
+                        "Queue: DEFERRED cancelled [{}] sid={} (retries={retries}) [deferred={}]",
                         event_type, sid, def.len(),
-                    );
-                } else {
-                    info!(
-                        "Queue: DROPPED re-queued cancelled [{}] sid={} (retries={}) [deferred={}]",
-                        event_type, sid, backup.retries, deferred_count,
                     );
                 }
             } else {
@@ -327,6 +377,7 @@ async fn handle_speak(
         generation: state.generation.load(Ordering::Relaxed),
         session_id: req.session_id,
         retries: 0,
+        created_at: std::time::Instant::now(),
     };
 
     match state.queue_tx.try_send(job) {
@@ -347,6 +398,7 @@ async fn handle_set_voice(
     Json(req): Json<SetVoiceRequest>,
 ) -> Json<SimpleResponse> {
     if state.tts.set_voice(&req.voice) {
+        persist_voice(&req.voice);
         Json(SimpleResponse {
             voice: Some(req.voice),
             ..SimpleResponse::ok("ok")
@@ -372,9 +424,11 @@ async fn handle_cancel(State(state): State<TtsApiState>) -> Json<SimpleResponse>
     Json(SimpleResponse::ok("cancelled"))
 }
 
-/// Cancel reminders only. Does not affect the queue or current speech.
+/// Cancel reminders and interrupt any in-progress reminder speech.
 async fn handle_cancel_reminder(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
     let count = state.reminder.cancel();
+    // Interrupt TTS if a reminder was mid-speech (spawn_blocking keeps playing after abort)
+    state.tts.interrupt();
     Json(SimpleResponse {
         reminders_fired: Some(count),
         ..SimpleResponse::ok("cancelled")
@@ -387,8 +441,9 @@ async fn handle_user_input(
     State(state): State<TtsApiState>,
     Json(req): Json<UserInputRequest>,
 ) -> Json<SimpleResponse> {
-    // Cancel reminders (user is actively engaging)
+    // Cancel reminders and interrupt any in-progress reminder speech
     state.reminder.cancel();
+    state.tts.interrupt();
 
     // Re-queue deferred items that aren't from the user's current session
     let items: Vec<SpeakJob> = {
@@ -399,6 +454,7 @@ async fn handle_user_input(
     let current_gen = state.generation.load(Ordering::Relaxed);
     let mut requeued = 0usize;
     let mut discarded = 0usize;
+    let mut expired = 0usize;
 
     for mut job in items {
         if job.session_id.is_empty() || job.session_id == req.session_id {
@@ -406,9 +462,14 @@ async fn handle_user_input(
             discarded += 1;
             continue;
         }
-        // Re-queue with current generation and incremented retry count
-        job.generation = current_gen;
+        // Check time-based expiry before re-queuing
         job.retries += 1;
+        if is_job_expired(&job) {
+            expired += 1;
+            continue;
+        }
+        // Re-queue with current generation
+        job.generation = current_gen;
         if state.queue_tx.try_send(job).is_ok() {
             requeued += 1;
         }
@@ -416,10 +477,11 @@ async fn handle_user_input(
 
     let queue_depth = state.queue_tx.max_capacity() - state.queue_tx.capacity();
     info!(
-        "USER-INPUT sid={}: requeued={} discarded={} [queue={}, deferred=0]",
+        "USER-INPUT sid={}: requeued={} discarded={} expired={} [queue={}, deferred=0]",
         short_sid(&req.session_id),
         requeued,
         discarded,
+        expired,
         queue_depth,
     );
 

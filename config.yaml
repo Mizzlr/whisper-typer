@@ -25,9 +25,10 @@ whisper:
 
 ollama:
   enabled: true
-  model: "qwen2.5:1.5b"
+  model: "gemma4:e2b"
   host: "http://127.0.0.1:11434"
-  skip_threshold: 5              # Skip Ollama for utterances ≤ N words (0 = disabled)
+  skip_threshold: 5
+  audio_mode: false             # e2b/e4b audio mode truncates; Whisper + e2b correction is more reliable              # Skip Ollama for utterances ≤ N words (0 = disabled)
 
 typer:
   backend: "xdotool"      # xdotool for X11 (respects keyboard layout)

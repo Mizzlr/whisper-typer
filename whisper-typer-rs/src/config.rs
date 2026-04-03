@@ -80,6 +80,8 @@ pub struct OllamaConfig {
     pub model: String,
     pub host: String,
     pub skip_threshold: usize,
+    /// When true, bypass Whisper and send audio directly to Ollama (requires audio-capable model).
+    pub audio_mode: bool,
 }
 
 impl Default for OllamaConfig {
@@ -89,6 +91,7 @@ impl Default for OllamaConfig {
             model: "llama3.2:3b".into(),
             host: "http://localhost:11434".into(),
             skip_threshold: 0,
+            audio_mode: false,
         }
     }
 }

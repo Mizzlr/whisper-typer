@@ -38,6 +38,7 @@ class OllamaConfig:
     enabled: bool = True
     model: str = "llama3.2:3b"
     host: str = "http://localhost:11434"
+    skip_threshold: int = 0
 
 
 @dataclass

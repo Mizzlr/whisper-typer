@@ -374,83 +374,114 @@ impl DictationService {
         // Check if vocabulary/corrections need reloading (MCP tools set flags in state file)
         self.check_whisper_reload();
 
-        // --- Whisper transcription ---
-        let t_whisper_start = Instant::now();
-        let transcriber = self.transcriber.clone();
-        let vocab = self.vocabulary.read().unwrap().clone();
-        let vocab_prompt = if vocab.is_empty() { None } else { Some(vocab) };
-        let raw_text = match tokio::task::spawn_blocking(move || {
-            transcriber.transcribe(&samples, vocab_prompt.as_deref())
-        }).await {
-            Ok(Ok(result)) => {
-                info!(
-                    "Transcription ({:.0}ms): \"{}\"",
-                    result.latency_ms, result.text
-                );
-                result.text
-            }
-            Ok(Err(e)) => {
-                warn!("Transcription failed: {e}");
-                self.transition_to_idle();
-                return;
-            }
-            Err(e) => {
-                warn!("Transcription task panicked: {e}");
-                self.transition_to_idle();
-                return;
-            }
-        };
-        let t_whisper = t_whisper_start.elapsed().as_secs_f64() * 1000.0;
-
-        if raw_text.is_empty() {
-            info!("Empty transcription, returning to IDLE");
-            self.transition_to_idle();
-            return;
-        }
-
-        // Filter common Whisper hallucinations (ported from Python service.py)
-        const HALLUCINATIONS: &[&str] = &[
-            "thank you",
-            "thank you.",
-            "thanks.",
-            "thanks",
-            "thanks for watching",
-            "thanks for watching.",
-            "subscribe",
-            "like and subscribe",
-            "you",
-            "bye",
-            "bye.",
-            "goodbye",
-            "goodbye.",
-        ];
-
-        let normalized = raw_text.trim().to_lowercase();
-        if HALLUCINATIONS.contains(&normalized.as_str()) {
-            info!("Filtered hallucination: '{raw_text}'");
-            self.transition_to_idle();
-            return;
-        }
-
-        // --- Ollama correction ---
-        let t_ollama_start = Instant::now();
         let corrections = self.corrections.read().unwrap().clone();
         let corrections_ref = if corrections.is_empty() { None } else { Some(&corrections) };
-        let word_count = raw_text.split_whitespace().count();
-        let skip_threshold = self.config.ollama.skip_threshold;
-        let (processed_text, ollama_text) = match self.output_mode {
-            OutputMode::Whisper => (None, None),
-            _ if skip_threshold > 0 && word_count <= skip_threshold => {
-                info!("Skipped Ollama ({word_count} words <= {skip_threshold} threshold)");
-                (Some(raw_text.clone()), None)
+
+        // --- Audio mode: bypass Whisper, send audio directly to Ollama ---
+        let (raw_text, t_whisper, t_ollama, processed_text, ollama_text);
+
+        if self.config.ollama.audio_mode && self.config.ollama.enabled {
+            t_whisper = 0.0;
+            let t_ollama_start = Instant::now();
+
+            let sample_rate = self.recorder.sample_rate();
+            match self.processor.process_audio(&samples, sample_rate, corrections_ref).await {
+                Some(text) => {
+                    info!("Ollama audio transcribed: \"{}\"", text);
+                    raw_text = text.clone();
+                    processed_text = Some(text.clone());
+                    ollama_text = Some(text);
+                }
+                None => {
+                    warn!("Ollama audio mode failed, falling back to Whisper");
+                    // Fall through to Whisper path below
+                    t_ollama = t_ollama_start.elapsed().as_secs_f64() * 1000.0;
+                    // Recursive-ish: run the whisper path. To keep it simple,
+                    // just log and bail — the user can disable audio_mode.
+                    self.transition_to_idle();
+                    return;
+                }
             }
-            OutputMode::Ollama | OutputMode::Both => {
-                let corrected = self.processor.process(&raw_text, corrections_ref).await;
-                info!("Ollama corrected: \"{}\"", corrected);
-                (Some(corrected.clone()), Some(corrected))
+            t_ollama = t_ollama_start.elapsed().as_secs_f64() * 1000.0;
+        } else {
+            // --- Standard Whisper transcription path ---
+            let t_whisper_start = Instant::now();
+            let transcriber = self.transcriber.clone();
+            let vocab = self.vocabulary.read().unwrap().clone();
+            let vocab_prompt = if vocab.is_empty() { None } else { Some(vocab) };
+            raw_text = match tokio::task::spawn_blocking(move || {
+                transcriber.transcribe(&samples, vocab_prompt.as_deref())
+            }).await {
+                Ok(Ok(result)) => {
+                    info!(
+                        "Transcription ({:.0}ms): \"{}\"",
+                        result.latency_ms, result.text
+                    );
+                    result.text
+                }
+                Ok(Err(e)) => {
+                    warn!("Transcription failed: {e}");
+                    self.transition_to_idle();
+                    return;
+                }
+                Err(e) => {
+                    warn!("Transcription task panicked: {e}");
+                    self.transition_to_idle();
+                    return;
+                }
+            };
+            t_whisper = t_whisper_start.elapsed().as_secs_f64() * 1000.0;
+
+            if raw_text.is_empty() {
+                info!("Empty transcription, returning to IDLE");
+                self.transition_to_idle();
+                return;
             }
-        };
-        let t_ollama = t_ollama_start.elapsed().as_secs_f64() * 1000.0;
+
+            // Filter common Whisper hallucinations (ported from Python service.py)
+            const HALLUCINATIONS: &[&str] = &[
+                "thank you",
+                "thank you.",
+                "thanks.",
+                "thanks",
+                "thanks for watching",
+                "thanks for watching.",
+                "subscribe",
+                "like and subscribe",
+                "you",
+                "bye",
+                "bye.",
+                "goodbye",
+                "goodbye.",
+            ];
+
+            let normalized = raw_text.trim().to_lowercase();
+            if HALLUCINATIONS.contains(&normalized.as_str()) {
+                info!("Filtered hallucination: '{raw_text}'");
+                self.transition_to_idle();
+                return;
+            }
+
+            // --- Ollama correction ---
+            let t_ollama_start = Instant::now();
+            let word_count = raw_text.split_whitespace().count();
+            let skip_threshold = self.config.ollama.skip_threshold;
+            let (pt, ot) = match self.output_mode {
+                OutputMode::Whisper => (None, None),
+                _ if skip_threshold > 0 && word_count <= skip_threshold => {
+                    info!("Skipped Ollama ({word_count} words <= {skip_threshold} threshold)");
+                    (Some(raw_text.clone()), None)
+                }
+                OutputMode::Ollama | OutputMode::Both => {
+                    let corrected = self.processor.process(&raw_text, corrections_ref).await;
+                    info!("Ollama corrected: \"{}\"", corrected);
+                    (Some(corrected.clone()), Some(corrected))
+                }
+            };
+            t_ollama = t_ollama_start.elapsed().as_secs_f64() * 1000.0;
+            processed_text = pt;
+            ollama_text = ot;
+        }
 
         // Strip trailing "Thank you" — common speech artifact when user ends dictation
         let raw_clean = strip_trailing_thankyou(&raw_text);

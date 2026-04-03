@@ -91,13 +91,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tts_engine.set_voice_gate(voice_gate.is_idle.clone(), voice_gate.idle_notify.clone());
         match tts_engine.load_model_sync() {
             Ok(()) => {
+                // Apply persisted voice override (survives restarts)
+                if let Some(voice) = code_speaker::api::load_persisted_voice() {
+                    if tts_engine.set_voice(&voice) {
+                        info!("Restored persisted voice: {voice}");
+                    }
+                }
+
                 let tts = Arc::new(tts_engine);
                 let summarizer = Arc::new(code_speaker::summarizer::OllamaSummarizer::new(
                     &config.ollama.model,
                     &config.ollama.host,
                 ));
                 let reminder = Arc::new(code_speaker::reminder::ReminderManager::new(
-                    config.tts.reminder_interval,
+                    config.tts.reminder_interval, 2,
                 ));
 
                 let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(20);

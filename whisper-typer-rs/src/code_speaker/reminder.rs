@@ -1,6 +1,6 @@
 //! Periodic TTS reminder manager.
 //!
-//! Repeats a TTS notification at intervals until cancelled.
+//! Repeats a TTS notification at intervals until cancelled or max reached.
 //! Used for "Claude is waiting" reminders after task completion.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -14,15 +14,17 @@ use super::tts::KokoroTtsEngine;
 
 pub struct ReminderManager {
     interval_secs: u64,
+    max_reminders: u32,
     task: Mutex<Option<JoinHandle<()>>>,
     active: Arc<AtomicBool>,
     count: Arc<AtomicU32>,
 }
 
 impl ReminderManager {
-    pub fn new(interval: u64) -> Self {
+    pub fn new(interval: u64, max_reminders: u32) -> Self {
         Self {
             interval_secs: interval,
+            max_reminders,
             task: Mutex::new(None),
             active: Arc::new(AtomicBool::new(false)),
             count: Arc::new(AtomicU32::new(0)),
@@ -46,6 +48,7 @@ impl ReminderManager {
         let active = self.active.clone();
         let count = self.count.clone();
         let interval = self.interval_secs;
+        let max = self.max_reminders;
 
         let handle = tokio::spawn(async move {
             loop {
@@ -54,7 +57,12 @@ impl ReminderManager {
                     break;
                 }
                 let n = count.fetch_add(1, Ordering::Relaxed) + 1;
-                info!("Reminder #{n}: speaking");
+                if n > max {
+                    info!("Reminder: reached limit of {max}, stopping");
+                    active.store(false, Ordering::Relaxed);
+                    break;
+                }
+                info!("Reminder #{n}/{max}: speaking");
                 let _ = tts.speak(&text).await;
             }
         });

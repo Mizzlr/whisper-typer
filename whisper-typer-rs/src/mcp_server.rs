@@ -8,19 +8,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rmcp::handler::server::tool::{Parameters, ToolRouter};
+use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::transport::sse_server::SseServerConfig;
-use rmcp::transport::SseServer;
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use serde::Deserialize;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::history;
@@ -533,25 +531,29 @@ impl ServerHandler for WhisperTyperMcp {
     }
 }
 
-/// Start the MCP SSE server on the given port (runs in background).
+/// Start the MCP Streamable HTTP server on the given port (runs in background).
 pub async fn start_mcp_server(port: u16, tts_port: u16) {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
 
-    let config = SseServerConfig {
-        bind: addr,
-        sse_path: "/sse".to_string(),
-        post_path: "/message".to_string(),
-        ct: CancellationToken::new(),
-        sse_keep_alive: Some(Duration::from_secs(15)),
-    };
+    let service = StreamableHttpService::new(
+        move || Ok(WhisperTyperMcp::new(tts_port)),
+        LocalSessionManager::default().into(),
+        Default::default(),
+    );
 
-    match SseServer::serve_with_config(config).await {
-        Ok(sse_server) => {
-            info!("MCP SSE server listening on http://{addr}/sse");
-            sse_server.with_service(move || WhisperTyperMcp::new(tts_port));
+    let router = axum::Router::new().nest_service("/mcp", service);
+
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            info!("MCP Streamable HTTP server listening on http://{addr}/mcp");
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, router).await {
+                    warn!("MCP server error: {e}");
+                }
+            });
         }
         Err(e) => {
-            warn!("Failed to start MCP server on {addr}: {e}");
+            warn!("Failed to bind MCP server on {addr}: {e}");
         }
     }
 }

@@ -2,12 +2,18 @@
 //!
 //! Sends transcribed text to Ollama's /api/generate endpoint for
 //! grammar/spelling fixes. Falls back gracefully if Ollama is unavailable.
+//!
+//! Also supports direct audio-to-text mode via Ollama's multimodal chat API,
+//! bypassing Whisper entirely (requires an audio-capable model like gemma4).
 
 use std::collections::HashMap;
+use std::io::Cursor;
 
+use base64::Engine;
+use hound::{SampleFormat, WavSpec, WavWriter};
 use reqwest::Client;
 use serde_json::json;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::OllamaConfig;
 
@@ -22,6 +28,8 @@ Output ONLY the corrected text, nothing else.
 Text: {text}
 
 Corrected:"#;
+
+const AUDIO_PROMPT: &str = "Transcribe this audio word for word. Output ONLY the transcription, nothing else.";
 
 pub struct OllamaProcessor {
     config: OllamaConfig,
@@ -65,6 +73,7 @@ impl OllamaProcessor {
             "model": self.config.model,
             "prompt": prompt,
             "stream": false,
+            "think": false,
             "options": {
                 "temperature": 0.1,
                 "num_predict": 500
@@ -112,4 +121,119 @@ impl OllamaProcessor {
             }
         }
     }
+
+    /// Send audio directly to Ollama for transcription + correction in a single pass.
+    /// Bypasses Whisper entirely. Requires an audio-capable model (e.g. gemma4).
+    /// Returns None on failure so the caller can fall back to the Whisper path.
+    pub async fn process_audio(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        corrections: Option<&HashMap<String, String>>,
+    ) -> Option<String> {
+        if !self.config.enabled || samples.is_empty() {
+            return None;
+        }
+
+        // Encode PCM f32 samples as WAV in memory
+        let wav_bytes = encode_wav(samples, sample_rate);
+        let audio_b64 = base64::engine::general_purpose::STANDARD.encode(&wav_bytes);
+
+        let audio_duration = samples.len() as f64 / sample_rate as f64;
+        info!(
+            "Audio mode: sending {:.1}s ({} bytes WAV) to Ollama model '{}'",
+            audio_duration,
+            wav_bytes.len(),
+            self.config.model
+        );
+
+        // Build prompt with optional corrections
+        let mut prompt = AUDIO_PROMPT.to_string();
+        if let Some(corrections) = corrections {
+            if !corrections.is_empty() {
+                prompt.push_str("\n\nKnown corrections (apply these substitutions):\n");
+                for (wrong, right) in corrections {
+                    prompt.push_str(&format!("- \"{wrong}\" → \"{right}\"\n"));
+                }
+            }
+        }
+
+        // Use /api/chat with multimodal message (audio sent via images field)
+        let body = json!({
+            "model": self.config.model,
+            "messages": [{
+                "role": "user",
+                "content": prompt,
+                "images": [audio_b64]
+            }],
+            "stream": false,
+            "think": false,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 500
+            }
+        });
+
+        let url = format!("{}/api/chat", self.config.host);
+
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    warn!("Ollama audio mode returned status {}", resp.status());
+                    return None;
+                }
+                match resp.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        let result = data["message"]["content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if result.is_empty() {
+                            warn!("Ollama audio mode returned empty response");
+                            None
+                        } else {
+                            debug!("Ollama audio output: '{result}'");
+                            Some(result)
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse Ollama audio response: {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                if e.is_connect() {
+                    warn!("Cannot connect to Ollama at {}", self.config.host);
+                } else if e.is_timeout() {
+                    warn!("Ollama audio request timed out");
+                } else {
+                    warn!("Ollama audio request failed: {e}");
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Encode f32 PCM samples as 16-bit WAV in memory.
+fn encode_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut writer = WavWriter::new(&mut buf, spec).expect("WAV writer creation failed");
+        for &s in samples {
+            let clamped = s.clamp(-1.0, 1.0);
+            let val = (clamped * 32767.0) as i16;
+            writer.write_sample(val).expect("WAV write failed");
+        }
+        writer.finalize().expect("WAV finalize failed");
+    }
+    buf.into_inner()
 }
