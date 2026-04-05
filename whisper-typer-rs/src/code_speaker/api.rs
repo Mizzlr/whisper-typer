@@ -297,23 +297,11 @@ fn spawn_queue_consumer(
             };
 
             if cancelled {
-                if is_job_expired(&backup) {
-                    let age_min = backup.created_at.elapsed().as_secs() / 60;
-                    info!(
-                        "Queue: EXPIRED cancelled [{}] sid={} (age={age_min}m, retries={}) [deferred={deferred_count}]",
-                        event_type, sid, backup.retries,
-                    );
-                } else {
-                    let retries = backup.retries;
-                    let mut def = deferred.lock().unwrap();
-                    if def.len() < MAX_DEFERRED {
-                        def.push(backup);
-                    }
-                    info!(
-                        "Queue: DEFERRED cancelled [{}] sid={} (retries={retries}) [deferred={}]",
-                        event_type, sid, def.len(),
-                    );
-                }
+                // Job was already playing — user heard part of it. Drop, don't re-queue.
+                info!(
+                    "Queue: DROPPED cancelled [{}] sid={} (played partially) [deferred={deferred_count}]",
+                    event_type, sid,
+                );
             } else {
                 let new_deferred = deferred.lock().unwrap().len();
                 info!(

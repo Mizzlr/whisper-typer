@@ -270,8 +270,10 @@ impl KokoroTtsEngine {
         let mut cancelled = false;
 
         for (i, sentence) in sentences.iter().enumerate() {
-            // Check cancel before generation
-            if self.cancel_flag.load(Ordering::Relaxed) {
+            // Check cancel or voice gate closed (user started recording)
+            if self.cancel_flag.load(Ordering::Relaxed)
+                || !self.voice_idle.load(Ordering::Relaxed)
+            {
                 cancelled = true;
                 info!("Cancelled before sentence {}/{}", i + 1, sentences.len());
                 break;
@@ -289,8 +291,10 @@ impl KokoroTtsEngine {
             let gen_ms = t_gen.elapsed().as_secs_f64() * 1000.0;
             total_gen_ms += gen_ms;
 
-            // Check cancel after generation
-            if self.cancel_flag.load(Ordering::Relaxed) {
+            // Check cancel or voice gate closed after generation
+            if self.cancel_flag.load(Ordering::Relaxed)
+                || !self.voice_idle.load(Ordering::Relaxed)
+            {
                 cancelled = true;
                 info!("Cancelled after generating sentence {}/{}", i + 1, sentences.len());
                 break;
@@ -433,8 +437,9 @@ impl KokoroTtsEngine {
         // Store sink for cancel access
         *self.active_sink.lock().unwrap() = Some(sink);
 
-        // Poll for completion or cancellation
+        // Poll for completion, cancellation, or voice gate closure
         let cancel_flag = self.cancel_flag.clone();
+        let voice_idle = self.voice_idle.clone();
         let active_sink = self.active_sink.clone();
 
         let was_cancelled = tokio::task::spawn_blocking(move || {
@@ -452,8 +457,10 @@ impl KokoroTtsEngine {
                     return false;
                 }
 
-                // Check cancel (explicit hotkey press via cancel_tts)
-                if cancel_flag.load(Ordering::Relaxed) {
+                // Check cancel flag (HTTP /cancel) or voice gate closed (user recording)
+                if cancel_flag.load(Ordering::Relaxed)
+                    || !voice_idle.load(Ordering::Relaxed)
+                {
                     if let Some(sink) = active_sink.lock().unwrap().take() {
                         sink.stop();
                     }
