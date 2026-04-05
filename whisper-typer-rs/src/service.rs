@@ -466,6 +466,8 @@ impl DictationService {
                 "i'm sorry.",
                 "i'm going to",
                 "i'm going to.",
+                "the president",
+                "the president.",
             ];
 
             let normalized = raw_text.trim().to_lowercase();
