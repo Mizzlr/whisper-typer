@@ -140,16 +140,23 @@ fn load_vocabulary() -> String {
     }
 }
 
-/// Remove trailing "Thank you[.!]?" if the preceding text has more than 10 words.
-/// Whisper commonly appends a spoken "Thank you" at the end of real dictations.
-fn strip_trailing_thankyou(text: &str) -> &str {
+/// Remove trailing Whisper hallucination phrases if the preceding text has more than 10 words.
+/// Whisper commonly appends stray phrases like "Thank you", "I'm gonna", "I'm sorry" at the
+/// end of real dictations.
+fn strip_trailing_hallucination(text: &str) -> &str {
+    const TRAILING_SUFFIXES: &[&str] = &[
+        "thank you.", "thank you!", "thank you",
+        "i'm gonna.", "i'm gonna",
+        "i'm going to.", "i'm going to",
+        "i'm sorry.", "i'm sorry",
+    ];
     let trimmed = text.trim();
     let lower = trimmed.to_lowercase();
-    for suffix in &["thank you.", "thank you!", "thank you"] {
+    for suffix in TRAILING_SUFFIXES {
         if lower.ends_with(suffix) {
             let preceding = trimmed[..trimmed.len() - suffix.len()].trim();
             if preceding.split_whitespace().count() > 10 {
-                debug!("Stripped trailing 'Thank you' from dictation");
+                debug!("Stripped trailing '{}' from dictation", &trimmed[trimmed.len() - suffix.len()..]);
                 return preceding;
             }
         }
@@ -453,6 +460,12 @@ impl DictationService {
                 "bye.",
                 "goodbye",
                 "goodbye.",
+                "i'm gonna",
+                "i'm gonna.",
+                "i'm sorry",
+                "i'm sorry.",
+                "i'm going to",
+                "i'm going to.",
             ];
 
             let normalized = raw_text.trim().to_lowercase();
@@ -483,9 +496,9 @@ impl DictationService {
             ollama_text = ot;
         }
 
-        // Strip trailing "Thank you" — common speech artifact when user ends dictation
-        let raw_clean = strip_trailing_thankyou(&raw_text);
-        let processed_clean = processed_text.as_deref().map(|t| strip_trailing_thankyou(t));
+        // Strip trailing hallucination phrases — common speech artifacts when user ends dictation
+        let raw_clean = strip_trailing_hallucination(&raw_text);
+        let processed_clean = processed_text.as_deref().map(|t| strip_trailing_hallucination(t));
 
         // Build final output
         let final_text = match self.output_mode {
