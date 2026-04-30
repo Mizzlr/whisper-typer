@@ -20,13 +20,14 @@ recording:
   max_duration: 120       # Maximum recording length in seconds
 
 whisper:
-  model: "distil-whisper/distil-large-v3"
+  model: "models/ggml-distil-large-v3.bin"
   device: "cuda"          # cuda, cpu, or mps (Mac)
 
 ollama:
   enabled: true
   model: "gemma4:e2b"
   host: "http://127.0.0.1:11434"
+  keep_alive: 3600          # Keep model loaded for 1 hour after each request
   skip_threshold: 5
   audio_mode: false             # e2b/e4b audio mode truncates; Whisper + e2b correction is more reliable              # Skip Ollama for utterances ≤ N words (0 = disabled)
 
@@ -56,6 +57,4 @@ tts:
   voice: "am_michael"      # Kokoro voice (af_heart, bf_emma, am_adam, etc.)
   speed: 1.0               # Speech speed multiplier
   api_port: 8767           # HTTP API port for hook integration
-  max_direct_chars: 150    # Text longer than this gets summarized by Ollama
-  reminder_interval: 300   # Seconds between reminder repeats (5 min)
-  model_path: ""           # Path to kokoro-v1.0.onnx (empty = auto-detect)
+  model_path: ""           # Path to models/kokoro-v1.0.onnx (empty = auto-detect)

@@ -55,18 +55,16 @@ pub fn save_record(record: &TranscriptionRecord) {
 
     let path = history_file("today");
     match fs::OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(mut file) => {
-            match serde_json::to_string(record) {
-                Ok(json) => {
-                    if let Err(e) = writeln!(file, "{json}") {
-                        error!("Failed to write history record: {e}");
-                    } else {
-                        debug!("Saved transcription record to {}", path.display());
-                    }
+        Ok(mut file) => match serde_json::to_string(record) {
+            Ok(json) => {
+                if let Err(e) = writeln!(file, "{json}") {
+                    error!("Failed to write history record: {e}");
+                } else {
+                    debug!("Saved transcription record to {}", path.display());
                 }
-                Err(e) => error!("Failed to serialize record: {e}"),
             }
-        }
+            Err(e) => error!("Failed to serialize record: {e}"),
+        },
         Err(e) => error!("Failed to open history file: {e}"),
     }
 }
@@ -159,22 +157,20 @@ pub fn generate_report(date: &str) -> String {
     };
 
     if records.is_empty() {
-        return format!(
-            "# WhisperTyper Report - {display_date}\n\nNo transcriptions recorded."
-        );
+        return format!("# WhisperTyper Report - {display_date}\n\nNo transcriptions recorded.");
     }
 
     let total_chars: usize = records.iter().map(|r| r.char_count).sum();
     let total_words: usize = records.iter().map(|r| r.word_count).sum();
     let total_audio: f64 = records.iter().map(|r| r.audio_duration_s).sum();
-    let total_processing: f64 =
-        records.iter().map(|r| r.total_latency_ms as f64).sum::<f64>() / 1000.0;
+    let total_processing: f64 = records
+        .iter()
+        .map(|r| r.total_latency_ms as f64)
+        .sum::<f64>()
+        / 1000.0;
 
     let whisper_latencies: Vec<i64> = records.iter().map(|r| r.whisper_latency_ms).collect();
-    let ollama_latencies: Vec<i64> = records
-        .iter()
-        .filter_map(|r| r.ollama_latency_ms)
-        .collect();
+    let ollama_latencies: Vec<i64> = records.iter().filter_map(|r| r.ollama_latency_ms).collect();
     let typing_latencies: Vec<i64> = records.iter().map(|r| r.typing_latency_ms).collect();
 
     let avg_whisper = if whisper_latencies.is_empty() {
@@ -192,8 +188,7 @@ pub fn generate_report(date: &str) -> String {
     } else {
         typing_latencies.iter().sum::<i64>() as f64 / typing_latencies.len() as f64
     };
-    let avg_speed: f64 =
-        records.iter().map(|r| r.speed_ratio).sum::<f64>() / records.len() as f64;
+    let avg_speed: f64 = records.iter().map(|r| r.speed_ratio).sum::<f64>() / records.len() as f64;
 
     let mut lines = vec![
         format!("# WhisperTyper Report - {display_date}"),

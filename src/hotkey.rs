@@ -138,7 +138,11 @@ impl HotkeyMonitor {
             let supported = device.supported_keys();
             if let Some(keys) = supported {
                 if keys.contains(Key::KEY_A) && keys.contains(Key::KEY_ENTER) {
-                    info!("Found keyboard: {} at {:?}", device.name().unwrap_or("unknown"), device.physical_path());
+                    info!(
+                        "Found keyboard: {} at {:?}",
+                        device.name().unwrap_or("unknown"),
+                        device.physical_path()
+                    );
                     keyboards.push(device);
                 }
             }
@@ -186,8 +190,12 @@ impl HotkeyMonitor {
                     let mut state = state.lock().unwrap();
 
                     match value {
-                        1 => { state.pressed_keys.insert(key); }
-                        0 => { state.pressed_keys.remove(&key); }
+                        1 => {
+                            state.pressed_keys.insert(key);
+                        }
+                        0 => {
+                            state.pressed_keys.remove(&key);
+                        }
                         _ => continue, // ignore repeats
                     }
 
@@ -211,29 +219,45 @@ impl HotkeyMonitor {
         }
     }
 
-    /// Start monitoring all keyboards. Runs until all devices disconnect.
+    /// Start monitoring all keyboards with auto-reconnect.
+    ///
+    /// If all device monitors exit (disconnect, evdev stream failure, etc.),
+    /// the watchdog re-enumerates keyboards and reconnects after a brief delay.
+    /// This prevents permanent hotkey loss after transient system stress.
     pub async fn run(self) {
-        let keyboards = Self::find_keyboards();
-        if keyboards.is_empty() {
-            panic!(
-                "No keyboards found. Make sure you're in the 'input' group: \
-                 sudo usermod -aG input $USER"
-            );
-        }
+        loop {
+            let keyboards = Self::find_keyboards();
+            if keyboards.is_empty() {
+                warn!("No keyboards found (are you in the 'input' group?). Retrying in 5s...");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
 
-        info!("Monitoring {} keyboard(s)", keyboards.len());
+            info!("Monitoring {} keyboard(s)", keyboards.len());
 
-        let mut handles = Vec::new();
-        for device in keyboards {
-            let combos = self.combos.clone();
-            let state = Arc::clone(&self.state);
-            let tx = self.tx.clone();
-            handles.push(tokio::spawn(Self::monitor_device(device, combos, state, tx)));
-        }
+            let mut handles = Vec::new();
+            for device in keyboards {
+                let combos = self.combos.clone();
+                let state = Arc::clone(&self.state);
+                let tx = self.tx.clone();
+                handles.push(tokio::spawn(Self::monitor_device(
+                    device, combos, state, tx,
+                )));
+            }
 
-        // Wait for all monitors (they run until device disconnect)
-        for handle in handles {
-            let _ = handle.await;
+            // Wait for all monitors to exit
+            for handle in handles {
+                let _ = handle.await;
+            }
+
+            // All device monitors exited — reset state and reconnect
+            {
+                let mut state = self.state.lock().unwrap();
+                state.pressed_keys.clear();
+                state.hotkey_active = false;
+            }
+            warn!("All keyboard monitors exited — reconnecting in 2s...");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
 }

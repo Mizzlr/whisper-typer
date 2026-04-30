@@ -29,7 +29,8 @@ Text: {text}
 
 Corrected:"#;
 
-const AUDIO_PROMPT: &str = "Transcribe this audio word for word. Output ONLY the transcription, nothing else.";
+const AUDIO_PROMPT: &str =
+    "Transcribe this audio word for word. Output ONLY the transcription, nothing else.";
 
 pub struct OllamaProcessor {
     config: OllamaConfig,
@@ -49,7 +50,11 @@ impl OllamaProcessor {
     /// Process text through Ollama for grammar correction.
     /// Returns the original text if Ollama is disabled or unavailable.
     /// If `corrections` is provided, known substitutions are appended to the prompt.
-    pub async fn process(&self, text: &str, corrections: Option<&HashMap<String, String>>) -> String {
+    pub async fn process(
+        &self,
+        text: &str,
+        corrections: Option<&HashMap<String, String>>,
+    ) -> String {
         if !self.config.enabled || text.trim().is_empty() {
             return text.to_string();
         }
@@ -59,7 +64,8 @@ impl OllamaProcessor {
         // Inject per-project corrections into the prompt
         if let Some(corrections) = corrections {
             if !corrections.is_empty() {
-                let mut section = String::from("\n\nKnown corrections (apply these substitutions):\n");
+                let mut section =
+                    String::from("\n\nKnown corrections (apply these substitutions):\n");
                 for (wrong, right) in corrections {
                     section.push_str(&format!("- \"{wrong}\" → \"{right}\"\n"));
                 }
@@ -74,6 +80,7 @@ impl OllamaProcessor {
             "prompt": prompt,
             "stream": false,
             "think": false,
+            "keep_alive": self.config.keep_alive,
             "options": {
                 "temperature": 0.1,
                 "num_predict": 500
@@ -90,11 +97,7 @@ impl OllamaProcessor {
                 }
                 match resp.json::<serde_json::Value>().await {
                     Ok(data) => {
-                        let result = data["response"]
-                            .as_str()
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
+                        let result = data["response"].as_str().unwrap_or("").trim().to_string();
                         if result.is_empty() {
                             warn!("Ollama returned empty response, using original text");
                             text.to_string()
@@ -168,6 +171,7 @@ impl OllamaProcessor {
             }],
             "stream": false,
             "think": false,
+            "keep_alive": self.config.keep_alive,
             "options": {
                 "temperature": 0.1,
                 "num_predict": 500

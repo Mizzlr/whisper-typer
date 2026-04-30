@@ -63,13 +63,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     info!("Output mode: {:?}", output_mode);
 
-    // Load Whisper model (blocking, takes a few seconds)
+    // Load Whisper model and pre-warm CUDA state.
+    // Pre-warming forces whisper_init_state() to allocate GPU buffers NOW,
+    // not on the first hotkey press (which would cause a 10+ minute CPU storm
+    // that starves the evdev hotkey monitor).
     info!("Loading Whisper model...");
     let transcriber = tokio::task::spawn_blocking({
         let whisper_config = config.whisper.clone();
-        move || transcriber::WhisperTranscriber::load(&whisper_config)
+        move || {
+            let t = transcriber::WhisperTranscriber::load(&whisper_config)?;
+            t.warm_up()?;
+            Ok::<_, String>(t)
+        }
     })
     .await??;
+
+    // Run the service. Transcriber is Arc-backed + Clone, so cloning here
+    // keeps a handle for the /transcribe HTTP endpoint while the original
+    // moves into DictationService.
+    let transcriber_for_http = transcriber.clone();
+    let mut service = service::DictationService::new(config.clone(), transcriber, output_mode);
 
     // Start MCP server (background task)
     if config.mcp.enabled {
@@ -77,9 +90,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tts_port = config.tts.api_port;
         mcp_server::start_mcp_server(mcp_port, tts_port).await;
     }
-
-    // Run the service
-    let mut service = service::DictationService::new(config.clone(), transcriber, output_mode);
 
     // Start native TTS server (replaces Python code-speaker.service)
     if config.tts.enabled {
@@ -99,23 +109,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let tts = Arc::new(tts_engine);
-                let summarizer = Arc::new(code_speaker::summarizer::OllamaSummarizer::new(
-                    &config.ollama.model,
-                    &config.ollama.host,
-                ));
-                let reminder = Arc::new(code_speaker::reminder::ReminderManager::new(
-                    config.tts.reminder_interval, 2,
-                ));
 
                 let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(20);
                 let api_state = code_speaker::api::TtsApiState {
                     tts,
-                    summarizer,
-                    reminder,
                     enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     queue_tx,
                     generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                     deferred: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    transcriber: transcriber_for_http.clone(),
                 };
                 code_speaker::api::start_tts_api(api_state, config.tts.api_port, queue_rx).await;
                 info!(

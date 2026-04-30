@@ -152,7 +152,9 @@ impl AudioRecorder {
             )
             .map_err(|e| format!("Failed to build input stream: {e}"))?;
 
-        stream.play().map_err(|e| format!("Failed to start audio stream: {e}"))?;
+        stream
+            .play()
+            .map_err(|e| format!("Failed to start audio stream: {e}"))?;
         info!("Audio stream opened (ready for low-latency recording)");
 
         self._stream = Some(stream);
@@ -176,7 +178,11 @@ impl AudioRecorder {
         inner.is_recording = false;
         let samples = std::mem::take(&mut inner.buffer);
         let duration = samples.len() as f64 / self.config.sample_rate as f64;
-        info!("Recording stopped: {:.1}s ({} samples)", duration, samples.len());
+        info!(
+            "Recording stopped: {:.1}s ({} samples)",
+            duration,
+            samples.len()
+        );
         samples
     }
 

@@ -118,9 +118,7 @@ impl TextTyper {
                 .write_all(text.as_bytes())
                 .map_err(|e| format!("Failed to write to xclip: {e}"))?;
         }
-        child
-            .wait()
-            .map_err(|e| format!("xclip failed: {e}"))?;
+        child.wait().map_err(|e| format!("xclip failed: {e}"))?;
 
         // Small delay for clipboard sync
         thread::sleep(Duration::from_millis(10));

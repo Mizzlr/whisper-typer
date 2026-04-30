@@ -71,7 +71,9 @@ fn update_state(updates: serde_json::Value) -> serde_json::Value {
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct SetModeRequest {
-    #[schemars(description = "Output mode - 'ollama' (corrected text only), 'whisper' (raw transcription only), 'both' (corrected + [raw] in brackets)")]
+    #[schemars(
+        description = "Output mode - 'ollama' (corrected text only), 'whisper' (raw transcription only), 'both' (corrected + [raw] in brackets)"
+    )]
     pub mode: String,
 }
 
@@ -83,7 +85,9 @@ pub struct GetRecentRequest {
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct GetDailyReportRequest {
-    #[schemars(description = "Date to get report for - 'today' (default), 'list' (show available dates), or YYYY-MM-DD format")]
+    #[schemars(
+        description = "Date to get report for - 'today' (default), 'list' (show available dates), or YYYY-MM-DD format"
+    )]
     pub date: Option<String>,
 }
 
@@ -107,7 +111,9 @@ pub struct ReportRequest {
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct TeachRequest {
-    #[schemars(description = "Vocabulary terms to teach Whisper (comma-separated, e.g., 'Ollama, Kokoro, ndarray')")]
+    #[schemars(
+        description = "Vocabulary terms to teach Whisper (comma-separated, e.g., 'Ollama, Kokoro, ndarray')"
+    )]
     pub terms: String,
 }
 
@@ -143,7 +149,9 @@ impl WhisperTyperMcp {
         }
     }
 
-    #[tool(description = "Set the output mode for WhisperTyper.\n\nArgs:\n    mode: Output mode - 'ollama' (corrected text only), 'whisper' (raw transcription only), 'both' (corrected + [raw] in brackets)")]
+    #[tool(
+        description = "Set the output mode for WhisperTyper.\n\nArgs:\n    mode: Output mode - 'ollama' (corrected text only), 'whisper' (raw transcription only), 'both' (corrected + [raw] in brackets)"
+    )]
     async fn whisper_set_mode(
         &self,
         Parameters(req): Parameters<SetModeRequest>,
@@ -196,7 +204,9 @@ impl WhisperTyperMcp {
         Ok(CallToolResult::success(vec![Content::text(status)]))
     }
 
-    #[tool(description = "Get recent transcriptions.\n\nArgs:\n    count: Number of recent transcriptions to return (default: 5)")]
+    #[tool(
+        description = "Get recent transcriptions.\n\nArgs:\n    count: Number of recent transcriptions to return (default: 5)"
+    )]
     async fn whisper_get_recent(
         &self,
         Parameters(req): Parameters<GetRecentRequest>,
@@ -231,7 +241,9 @@ impl WhisperTyperMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get Markdown productivity report for a specific date.\n\nArgs:\n    date: Date to get report for - 'today' (default), 'list' (show available dates), or YYYY-MM-DD format")]
+    #[tool(
+        description = "Get Markdown productivity report for a specific date.\n\nArgs:\n    date: Date to get report for - 'today' (default), 'list' (show available dates), or YYYY-MM-DD format"
+    )]
     async fn whisper_get_daily_report(
         &self,
         Parameters(req): Parameters<GetDailyReportRequest>,
@@ -247,7 +259,11 @@ impl WhisperTyperMcp {
             }
             let text = format!(
                 "Available dates:\n{}",
-                dates.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n")
+                dates
+                    .iter()
+                    .map(|d| format!("- {d}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
             return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
@@ -258,7 +274,9 @@ impl WhisperTyperMcp {
 
     // --- Code Speaker TTS tools ---
 
-    #[tool(description = "Speak text aloud using Kokoro TTS.\n\nArgs:\n    text: The text to speak aloud")]
+    #[tool(
+        description = "Speak text aloud using Kokoro TTS.\n\nArgs:\n    text: The text to speak aloud"
+    )]
     async fn code_speaker_speak(
         &self,
         Parameters(req): Parameters<SpeakRequest>,
@@ -269,7 +287,6 @@ impl WhisperTyperMcp {
             .post(&url)
             .json(&json!({
                 "text": req.text,
-                "summarize": false,
                 "event_type": "manual"
             }))
             .send()
@@ -292,7 +309,9 @@ impl WhisperTyperMcp {
         }
     }
 
-    #[tool(description = "Set the TTS voice for code_speaker.\n\nArgs:\n    voice: Voice name (e.g., 'af_heart', 'bf_emma', 'am_adam')")]
+    #[tool(
+        description = "Set the TTS voice for code_speaker.\n\nArgs:\n    voice: Voice name (e.g., 'af_heart', 'bf_emma', 'am_adam')"
+    )]
     async fn code_speaker_set_voice(
         &self,
         Parameters(req): Parameters<SetVoiceRequest>,
@@ -366,7 +385,9 @@ impl WhisperTyperMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get unified Voice I/O report (STT + TTS statistics).\n\nArgs:\n    date: Date for report - 'today' (default), 'list', or YYYY-MM-DD")]
+    #[tool(
+        description = "Get unified Voice I/O report (STT + TTS statistics).\n\nArgs:\n    date: Date for report - 'today' (default), 'list', or YYYY-MM-DD"
+    )]
     async fn code_speaker_report(
         &self,
         Parameters(req): Parameters<ReportRequest>,
@@ -382,7 +403,11 @@ impl WhisperTyperMcp {
             }
             let text = format!(
                 "Available dates:\n{}",
-                dates.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n")
+                dates
+                    .iter()
+                    .map(|d| format!("- {d}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
             return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
@@ -393,7 +418,9 @@ impl WhisperTyperMcp {
 
     // --- Vocabulary & Corrections tools ---
 
-    #[tool(description = "Teach WhisperTyper vocabulary terms for better speech recognition. Terms are added to .whisper/vocabulary.txt and used as Whisper initial prompt.\n\nArgs:\n    terms: Comma-separated vocabulary terms (e.g., 'Ollama, Kokoro, ndarray')")]
+    #[tool(
+        description = "Teach WhisperTyper vocabulary terms for better speech recognition. Terms are added to .whisper/vocabulary.txt and used as Whisper initial prompt.\n\nArgs:\n    terms: Comma-separated vocabulary terms (e.g., 'Ollama, Kokoro, ndarray')"
+    )]
     async fn whisper_teach(
         &self,
         Parameters(req): Parameters<TeachRequest>,
@@ -439,7 +466,11 @@ impl WhisperTyperMcp {
         }
         let mut sorted: Vec<&String> = existing.iter().collect();
         sorted.sort();
-        let contents = sorted.iter().map(|t| t.as_str()).collect::<Vec<_>>().join("\n");
+        let contents = sorted
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         if let Err(e) = fs::write(&vocab_path, format!("{contents}\n")) {
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "Failed to write vocabulary file: {e}"
@@ -450,7 +481,10 @@ impl WhisperTyperMcp {
         update_state(json!({ "vocabulary_updated": true }));
 
         let msg = if added.is_empty() {
-            format!("All {} terms already existed in vocabulary.", new_terms.len())
+            format!(
+                "All {} terms already existed in vocabulary.",
+                new_terms.len()
+            )
         } else {
             format!(
                 "Added {} new term(s): {}. Total vocabulary: {} terms.",
@@ -462,7 +496,9 @@ impl WhisperTyperMcp {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "Add a speech correction mapping. When Whisper misrecognizes a word, this teaches Ollama the correct replacement. Stored in .whisper/corrections.yaml.\n\nArgs:\n    wrong: The misrecognized text\n    right: The correct replacement")]
+    #[tool(
+        description = "Add a speech correction mapping. When Whisper misrecognizes a word, this teaches Ollama the correct replacement. Stored in .whisper/corrections.yaml.\n\nArgs:\n    wrong: The misrecognized text\n    right: The correct replacement"
+    )]
     async fn whisper_add_correction(
         &self,
         Parameters(req): Parameters<AddCorrectionRequest>,
@@ -516,6 +552,7 @@ impl WhisperTyperMcp {
             corrections.len()
         ))]))
     }
+
 }
 
 #[tool_handler]

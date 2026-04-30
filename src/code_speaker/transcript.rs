@@ -13,7 +13,10 @@ fn read_entries_reversed(transcript_path: &Path) -> Vec<serde_json::Value> {
     let contents = match fs::read_to_string(transcript_path) {
         Ok(c) => c,
         Err(e) => {
-            warn!("Failed to read transcript {}: {e}", transcript_path.display());
+            warn!(
+                "Failed to read transcript {}: {e}",
+                transcript_path.display()
+            );
             return Vec::new();
         }
     };

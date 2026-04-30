@@ -25,6 +25,14 @@ pub struct TranscribeResult {
     pub latency_ms: f64,
 }
 
+/// One timestamped segment, as emitted by `transcribe_segments`.
+#[derive(Debug, Clone)]
+pub struct TranscribeSegment {
+    pub text: String,
+    pub start_s: f64,
+    pub end_s: f64,
+}
+
 impl WhisperTranscriber {
     /// Load the Whisper GGML model.
     pub fn load(config: &WhisperConfig) -> Result<Self, String> {
@@ -44,6 +52,44 @@ impl WhisperTranscriber {
             ctx: Arc::new(ctx),
             model_path,
         })
+    }
+
+    /// Pre-warm CUDA state by running a dummy inference.
+    ///
+    /// `WhisperContext::new_with_params` only loads model weights (fast).
+    /// The heavy CUDA buffer allocation (`whisper_init_state`) is deferred
+    /// to the first `create_state()` call. Without pre-warming, this 10+
+    /// minute GPU init storm happens on the first hotkey press, which can
+    /// starve the evdev hotkey monitor and make it unresponsive.
+    pub fn warm_up(&self) -> Result<(), String> {
+        info!("Pre-warming Whisper CUDA state (this may take several minutes)...");
+        let t0 = Instant::now();
+
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| format!("CUDA warm-up create_state failed: {e}"))?;
+
+        // Run a tiny inference to fully initialize all compute buffers
+        let dummy_audio = vec![0.0f32; 16000]; // 1 second of silence
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("en"));
+        params.set_single_segment(true);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        state
+            .full(params, &dummy_audio)
+            .map_err(|e| format!("CUDA warm-up inference failed: {e}"))?;
+
+        let elapsed = t0.elapsed();
+        info!(
+            "Whisper CUDA state pre-warmed in {:.1}s",
+            elapsed.as_secs_f64()
+        );
+        Ok(())
     }
 
     /// Transcribe audio samples (f32, 16kHz, mono) to text.
@@ -114,6 +160,61 @@ impl WhisperTranscriber {
         Ok(TranscribeResult { text, latency_ms })
     }
 
+    /// Long-form transcription with native segment timestamps. Used by the
+    /// `/transcribe` HTTP endpoint that the voice-journal GUI calls.
+    pub fn transcribe_segments(&self, samples: &[f32]) -> Result<Vec<TranscribeSegment>, String> {
+        let t0 = Instant::now();
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create whisper state: {e}"))?;
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("en"));
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_single_segment(false);
+        params.set_token_timestamps(false);
+
+        state
+            .full(params, samples)
+            .map_err(|e| format!("Whisper inference failed: {e}"))?;
+
+        let n_segments = state.full_n_segments();
+        let mut segments = Vec::with_capacity(n_segments as usize);
+        for i in 0..n_segments {
+            let Some(seg) = state.get_segment(i) else {
+                continue;
+            };
+            let Ok(text) = seg.to_str_lossy() else {
+                continue;
+            };
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let start_s = seg.start_timestamp() as f64 / 100.0;
+            let end_s = seg.end_timestamp() as f64 / 100.0;
+            segments.push(TranscribeSegment {
+                text: trimmed.to_string(),
+                start_s,
+                end_s,
+            });
+        }
+
+        let latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let audio_duration = samples.len() as f64 / 16000.0;
+        info!(
+            "Segmented transcription: {:.1}s audio → {} segments in {:.0}ms",
+            audio_duration,
+            segments.len(),
+            latency_ms,
+        );
+        Ok(segments)
+    }
+
     #[allow(dead_code)]
     pub fn model_path(&self) -> &Path {
         &self.model_path
@@ -139,8 +240,10 @@ impl WhisperTranscriber {
         // Search locations
         let search_dirs: Vec<PathBuf> = [
             std::env::current_dir().ok(),
+            std::env::current_dir().ok().map(|d| d.join("models")),
             dirs::home_dir().map(|h| h.join(".cache/whisper")),
             dirs::home_dir().map(|h| h.join("whisper-typer")),
+            dirs::home_dir().map(|h| h.join("whisper-typer/models")),
         ]
         .into_iter()
         .flatten()

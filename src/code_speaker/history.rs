@@ -24,16 +24,12 @@ fn history_file(date: &str) -> PathBuf {
 pub struct TTSRecord {
     pub timestamp: String,
     pub event_type: String,
-    pub input_text_chars: usize,
-    pub summarized: bool,
-    pub summary_text: String,
-    pub ollama_latency_ms: i64,
+    pub spoken_text: String,
     pub kokoro_latency_ms: i64,
     pub playback_duration_ms: i64,
     pub total_latency_ms: i64,
     pub voice: String,
     pub cancelled: bool,
-    pub reminder_count: u32,
 }
 
 pub fn save_tts_record(record: &TTSRecord) {
@@ -107,12 +103,17 @@ pub fn generate_tts_report(date: &str) -> String {
 
     let total = records.len();
     let cancelled = records.iter().filter(|r| r.cancelled).count();
-    let summarized = records.iter().filter(|r| r.summarized).count();
 
-    let avg_kokoro: f64 =
-        records.iter().map(|r| r.kokoro_latency_ms as f64).sum::<f64>() / total as f64;
-    let avg_total: f64 =
-        records.iter().map(|r| r.total_latency_ms as f64).sum::<f64>() / total as f64;
+    let avg_kokoro: f64 = records
+        .iter()
+        .map(|r| r.kokoro_latency_ms as f64)
+        .sum::<f64>()
+        / total as f64;
+    let avg_total: f64 = records
+        .iter()
+        .map(|r| r.total_latency_ms as f64)
+        .sum::<f64>()
+        / total as f64;
 
     // Event type breakdown
     let mut event_counts = std::collections::HashMap::new();
@@ -124,7 +125,6 @@ pub fn generate_tts_report(date: &str) -> String {
         "# TTS Report for {date}\n\n\
         - Total events: {total}\n\
         - Cancelled: {cancelled}\n\
-        - Summarized: {summarized}\n\
         - Avg Kokoro latency: {avg_kokoro:.0}ms\n\
         - Avg total latency: {avg_total:.0}ms\n\n\
         ## Event Types\n"

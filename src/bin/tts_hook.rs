@@ -1,9 +1,9 @@
 //! tts-hook: Claude Code hook binary for TTS notifications.
 //!
 //! Reads event JSON from stdin, sends HTTP requests to the TTS API.
-//! Supports multi-session focus tracking: only the session the user
-//! most recently typed in ("focus session") gets full TTS. Non-focus
-//! sessions get short announcements when the speaker is idle.
+//! Speaks fixed 2-3 word phrases — task done vs. waiting for input —
+//! never the full assistant text. Multi-session focus tracking still
+//! applies: non-focus sessions get a `{project} done.` announcement.
 //! Logs all events to ~/.tts-hook-history/YYYY-MM-DD.jsonl.
 
 use std::fs;
@@ -35,9 +35,7 @@ struct HookEvent {
 #[derive(Serialize)]
 struct SpeakRequest {
     text: String,
-    summarize: bool,
     event_type: String,
-    start_reminder: bool,
     session_id: String,
 }
 
@@ -125,8 +123,7 @@ fn read_focus() -> Option<FocusState> {
     let state: FocusState = serde_json::from_str(&content).ok()?;
 
     // Expire focus after 6 hours (handles overnight staleness)
-    if let Ok(ts) =
-        chrono::NaiveDateTime::parse_from_str(&state.timestamp, "%Y-%m-%dT%H:%M:%S%.3f")
+    if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(&state.timestamp, "%Y-%m-%dT%H:%M:%S%.3f")
     {
         let age = chrono::Local::now().naive_local() - ts;
         if age > chrono::Duration::hours(6) {
@@ -218,6 +215,20 @@ fn project_name(event: &HookEvent) -> String {
         .to_string()
 }
 
+/// True if this Claude Code session is a non-interactive background worker
+/// (e.g. claude-mem observers) that should not generate any TTS or claim focus.
+/// Currently muted: anything under ~/.claude-mem/.
+fn is_muted_project(event: &HookEvent) -> bool {
+    let Some(cwd) = event.cwd.as_deref() else {
+        return false;
+    };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let muted_root = home.join(".claude-mem");
+    std::path::Path::new(cwd).starts_with(&muted_root)
+}
+
 fn save_record(record: &HistoryRecord) {
     let dir = history_dir();
     let _ = fs::create_dir_all(&dir);
@@ -226,11 +237,7 @@ fn save_record(record: &HistoryRecord) {
     let path = dir.join(format!("{date}.jsonl"));
 
     if let Ok(json) = serde_json::to_string(record) {
-        if let Ok(mut file) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(file, "{json}");
         }
     }
@@ -273,6 +280,26 @@ async fn main() {
     let project = project_name(&event);
     let is_focus = is_focus_session(&session_id);
 
+    // Skip non-interactive background sessions (claude-mem observers, etc.)
+    // before doing anything else — they must not claim focus or trigger TTS.
+    if is_muted_project(&event) {
+        save_record(&HistoryRecord {
+            timestamp: now_timestamp(),
+            event: event_name,
+            action: "skipped".into(),
+            detail: Some(format!("muted project ({project})")),
+            text: None,
+            text_chars: None,
+            duration_ms: u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+            tts_api_up: false,
+            session_id: Some(session_id),
+            cwd: event.cwd.clone(),
+            project: Some(project),
+            is_focus,
+        });
+        return;
+    }
+
     // Build HTTP client with short timeouts
     let client = Client::builder()
         .connect_timeout(Duration::from_millis(300))
@@ -281,11 +308,7 @@ async fn main() {
         .unwrap_or_else(|_| Client::new());
 
     // Quick connectivity check — exit cleanly if TTS API is down
-    let tts_api_up = client
-        .get(format!("{TTS_API}/status"))
-        .send()
-        .await
-        .is_ok();
+    let tts_api_up = client.get(format!("{TTS_API}/status")).send().await.is_ok();
 
     if !tts_api_up {
         save_record(&HistoryRecord {
@@ -306,13 +329,15 @@ async fn main() {
     }
 
     let (action, detail, text) = match event_name.as_str() {
-        "SessionStart" => handle_session_start(&client, &event, &session_id, &project, is_focus).await,
+        "SessionStart" => {
+            handle_session_start(&client, &event, &session_id, &project, is_focus).await
+        }
         "Stop" => handle_stop(&client, &event, &session_id, &project, is_focus).await,
         "PermissionRequest" => handle_permission(&client, &event, &session_id, &project).await,
-        "Notification" => handle_notification(&client, &event, &session_id, &project, is_focus).await,
-        "UserPromptSubmit" => {
-            handle_user_prompt_submit(&client, &session_id, &project).await
+        "Notification" => {
+            handle_notification(&client, &event, &session_id, &project, is_focus).await
         }
+        "UserPromptSubmit" => handle_user_prompt_submit(&client, &session_id, &project).await,
         _ => ("ignored".into(), Some("unknown event".into()), None),
     };
 
@@ -345,11 +370,7 @@ async fn handle_session_start(
     // Skip resume and compaction restarts
     if let Some(source) = &event.source {
         if source == "resume" || source == "compact" {
-            return (
-                "skipped".into(),
-                Some(format!("source={source}")),
-                None,
-            );
+            return ("skipped".into(), Some(format!("source={source}")), None);
         }
     }
 
@@ -371,11 +392,7 @@ async fn handle_session_start(
     };
 
     if status.model_loaded != Some(true) {
-        return (
-            "skipped".into(),
-            Some("model not loaded".into()),
-            None,
-        );
+        return ("skipped".into(), Some("model not loaded".into()), None);
     }
 
     let text = "Claude Code is ready.".to_string();
@@ -383,9 +400,7 @@ async fn handle_session_start(
         .post(format!("{TTS_API}/speak"))
         .json(&SpeakRequest {
             text: text.clone(),
-            summarize: false,
             event_type: "session_start".into(),
-            start_reminder: false,
             session_id: session_id.into(),
         })
         .send()
@@ -406,16 +421,15 @@ async fn handle_stop(
         _ => return ("skipped".into(), Some("no transcript path".into()), None),
     };
 
-    // Try extracting last bash command+result for action-oriented summary
-    let bash_action = extract_last_bash_action(transcript_path);
-
-    // Use bash action text if available, otherwise fall back to assistant text
-    let text = match &bash_action {
-        Some(action_text) => action_text.clone(),
-        None => match extract_last_assistant_text(transcript_path) {
-            Some(t) => t,
-            None => return ("skipped".into(), Some("no assistant text found".into()), None),
-        },
+    let text = match extract_last_assistant_text(transcript_path) {
+        Some(t) => t,
+        None => {
+            return (
+                "skipped".into(),
+                Some("no assistant text found".into()),
+                None,
+            )
+        }
     };
 
     // Per-session dedup — Claude Code can fire multiple Stop events for one turn
@@ -428,36 +442,30 @@ async fn handle_stop(
     }
 
     if is_focus {
-        // Both paths use summarize: true — Ollama produces concise TTS text
-        let detail = if bash_action.is_some() {
-            format!("action ({project})")
-        } else {
-            format!("focus ({project})")
-        };
-
+        let short_text = "Task done.".to_string();
         let _ = client
             .post(format!("{TTS_API}/speak"))
             .json(&SpeakRequest {
-                text: text.clone(),
-                summarize: true,
+                text: short_text.clone(),
                 event_type: "stop".into(),
-                start_reminder: true,
                 session_id: session_id.into(),
             })
             .send()
             .await;
 
-        ("spoke".into(), Some(detail), Some(text))
+        (
+            "spoke".into(),
+            Some(format!("focus ({project})")),
+            Some(short_text),
+        )
     } else {
         // Non-focus session: short announcement (queued, plays after current speech)
-        let short_text = format!("{project} finished.");
+        let short_text = format!("{project} done.");
         let _ = client
             .post(format!("{TTS_API}/speak"))
             .json(&SpeakRequest {
                 text: short_text.clone(),
-                summarize: false,
                 event_type: "background_stop".into(),
-                start_reminder: false,
                 session_id: session_id.into(),
             })
             .send()
@@ -478,23 +486,23 @@ async fn handle_permission(
     project: &str,
 ) -> (String, Option<String>, Option<String>) {
     let tool = event.tool_name.as_deref().unwrap_or("unknown tool");
-
-    // Always speak permission requests with project context
-    let text = format!("{project} needs permission for {tool}.");
+    let text = format!("{project} needs permission.");
 
     let _ = client
         .post(format!("{TTS_API}/speak"))
         .json(&SpeakRequest {
             text: text.clone(),
-            summarize: false,
             event_type: "permission".into(),
-            start_reminder: true,
             session_id: session_id.into(),
         })
         .send()
         .await;
 
-    ("spoke".into(), Some(format!("{project}/{tool}")), Some(text))
+    (
+        "spoke".into(),
+        Some(format!("{project}/{tool}")),
+        Some(text),
+    )
 }
 
 async fn handle_notification(
@@ -515,9 +523,12 @@ async fn handle_notification(
 
     let (text, event_type) = match event.notification_type.as_deref() {
         Some("idle_prompt") => {
-            // Skip — the reminder system already handles post-stop reminders,
-            // and Claude Code's idle_prompt fires false positives.
-            return ("skipped".into(), Some("idle_prompt (redundant)".into()), None);
+            // Skip — Claude Code's idle_prompt fires false positives.
+            return (
+                "skipped".into(),
+                Some("idle_prompt (redundant)".into()),
+                None,
+            );
         }
         Some("permission_prompt") => ("Permission needed.", "permission"),
         Some(other) => {
@@ -534,9 +545,7 @@ async fn handle_notification(
         .post(format!("{TTS_API}/speak"))
         .json(&SpeakRequest {
             text: text.into(),
-            summarize: false,
             event_type: event_type.into(),
-            start_reminder: true,
             session_id: session_id.into(),
         })
         .send()
@@ -559,7 +568,7 @@ async fn handle_user_prompt_submit(
         write_focus(session_id, project);
     }
 
-    // Notify TTS API: cancel reminders + re-queue deferred non-focus items
+    // Notify TTS API: interrupt focus speech + re-queue deferred non-focus items
     let _ = client
         .post(format!("{TTS_API}/user-input"))
         .json(&UserInputRequest {
@@ -569,70 +578,6 @@ async fn handle_user_prompt_submit(
         .await;
 
     ("user_input".into(), Some(format!("focus={project}")), None)
-}
-
-/// Scan the last ~20 JSONL lines for the last Bash tool_use + tool_result pair.
-/// Returns formatted "Command: ...\nOutput: ..." text for Ollama summarization.
-fn extract_last_bash_action(path: &str) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(20);
-
-    let mut last_bash_command: Option<String> = None;
-    let mut last_bash_result: Option<String> = None;
-
-    for line in &lines[start..] {
-        let val: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let blocks = val
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array());
-
-        let Some(blocks) = blocks else { continue };
-
-        for block in blocks {
-            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-            if entry_type == "assistant" && block_type == "tool_use" {
-                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                if name == "Bash" {
-                    let cmd = block
-                        .get("input")
-                        .and_then(|i| i.get("command"))
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
-                    if !cmd.is_empty() {
-                        last_bash_command = Some(cmd.to_string());
-                        last_bash_result = None;
-                    }
-                }
-            }
-
-            if entry_type == "human" && block_type == "tool_result" {
-                if let Some(content) = block.get("content").and_then(|c| c.as_str()) {
-                    if last_bash_command.is_some() {
-                        // Take last 500 chars of output (tail is most informative)
-                        let trimmed = content.trim();
-                        let tail: String = if trimmed.len() > 500 {
-                            trimmed[trimmed.len() - 500..].to_string()
-                        } else {
-                            trimmed.to_string()
-                        };
-                        last_bash_result = Some(tail);
-                    }
-                }
-            }
-        }
-    }
-
-    let cmd = last_bash_command?;
-    let result = last_bash_result.unwrap_or_default();
-    Some(format!("Command: {cmd}\nOutput: {result}"))
 }
 
 /// Read a JSONL transcript file and extract the last assistant text block.

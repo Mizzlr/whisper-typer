@@ -79,6 +79,7 @@ pub struct OllamaConfig {
     pub enabled: bool,
     pub model: String,
     pub host: String,
+    pub keep_alive: i64,
     pub skip_threshold: usize,
     /// When true, bypass Whisper and send audio directly to Ollama (requires audio-capable model).
     pub audio_mode: bool,
@@ -90,6 +91,7 @@ impl Default for OllamaConfig {
             enabled: true,
             model: "llama3.2:3b".into(),
             host: "http://localhost:11434".into(),
+            keep_alive: 3600,
             skip_threshold: 0,
             audio_mode: false,
         }
@@ -153,7 +155,6 @@ pub struct TTSConfig {
     pub voice: String,
     pub speed: f32,
     pub api_port: u16,
-    pub reminder_interval: u64,
     pub model_path: String,
 }
 
@@ -164,7 +165,6 @@ impl Default for TTSConfig {
             voice: "af_heart".into(),
             speed: 1.0,
             api_port: 8767,
-            reminder_interval: 300,
             model_path: String::new(),
         }
     }
@@ -230,12 +230,18 @@ impl Config {
                     config
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to parse {}: {e}, using defaults", config_path.display());
+                    tracing::warn!(
+                        "Failed to parse {}: {e}, using defaults",
+                        config_path.display()
+                    );
                     Self::default()
                 }
             },
             Err(e) => {
-                tracing::warn!("Failed to read {}: {e}, using defaults", config_path.display());
+                tracing::warn!(
+                    "Failed to read {}: {e}, using defaults",
+                    config_path.display()
+                );
                 Self::default()
             }
         }

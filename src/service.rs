@@ -103,8 +103,6 @@ impl VoiceGate {
         }
     }
 
-
-
     /// Signal that voice input has started (suppress + cancel TTS).
     fn begin_voice_input(&self) {
         self.is_idle.store(false, Ordering::Relaxed);
@@ -132,7 +130,10 @@ fn load_vocabulary() -> String {
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .collect();
             if !terms.is_empty() {
-                info!("Loaded {} vocabulary terms from .whisper/vocabulary.txt", terms.len());
+                info!(
+                    "Loaded {} vocabulary terms from .whisper/vocabulary.txt",
+                    terms.len()
+                );
             }
             terms.join(", ")
         }
@@ -145,10 +146,15 @@ fn load_vocabulary() -> String {
 /// end of real dictations.
 fn strip_trailing_hallucination(text: &str) -> &str {
     const TRAILING_SUFFIXES: &[&str] = &[
-        "thank you.", "thank you!", "thank you",
-        "i'm gonna.", "i'm gonna",
-        "i'm going to.", "i'm going to",
-        "i'm sorry.", "i'm sorry",
+        "thank you.",
+        "thank you!",
+        "thank you",
+        "i'm gonna.",
+        "i'm gonna",
+        "i'm going to.",
+        "i'm going to",
+        "i'm sorry.",
+        "i'm sorry",
     ];
     let trimmed = text.trim();
     let lower = trimmed.to_lowercase();
@@ -156,7 +162,10 @@ fn strip_trailing_hallucination(text: &str) -> &str {
         if lower.ends_with(suffix) {
             let preceding = trimmed[..trimmed.len() - suffix.len()].trim();
             if preceding.split_whitespace().count() > 10 {
-                debug!("Stripped trailing '{}' from dictation", &trimmed[trimmed.len() - suffix.len()..]);
+                debug!(
+                    "Stripped trailing '{}' from dictation",
+                    &trimmed[trimmed.len() - suffix.len()..]
+                );
                 return preceding;
             }
         }
@@ -168,20 +177,21 @@ fn strip_trailing_hallucination(text: &str) -> &str {
 fn load_corrections() -> HashMap<String, String> {
     let path = PathBuf::from(".whisper/corrections.yaml");
     match fs::read_to_string(&path) {
-        Ok(contents) => {
-            match serde_yml::from_str::<HashMap<String, String>>(&contents) {
-                Ok(map) => {
-                    if !map.is_empty() {
-                        info!("Loaded {} corrections from .whisper/corrections.yaml", map.len());
-                    }
-                    map
+        Ok(contents) => match serde_yml::from_str::<HashMap<String, String>>(&contents) {
+            Ok(map) => {
+                if !map.is_empty() {
+                    info!(
+                        "Loaded {} corrections from .whisper/corrections.yaml",
+                        map.len()
+                    );
                 }
-                Err(e) => {
-                    warn!("Failed to parse .whisper/corrections.yaml: {e}");
-                    HashMap::new()
-                }
+                map
             }
-        }
+            Err(e) => {
+                warn!("Failed to parse .whisper/corrections.yaml: {e}");
+                HashMap::new()
+            }
+        },
         Err(_) => HashMap::new(),
     }
 }
@@ -204,11 +214,7 @@ pub struct DictationService {
 }
 
 impl DictationService {
-    pub fn new(
-        config: Config,
-        transcriber: WhisperTranscriber,
-        output_mode: OutputMode,
-    ) -> Self {
+    pub fn new(config: Config, transcriber: WhisperTranscriber, output_mode: OutputMode) -> Self {
         let recorder = AudioRecorder::new(
             config.audio.clone(),
             config.recording.clone(),
@@ -305,7 +311,10 @@ impl DictationService {
             hotkey_monitor.run().await;
         });
 
-        info!("Service ready — press hotkey to start recording (mode: {:?})", self.output_mode);
+        info!(
+            "Service ready — press hotkey to start recording (mode: {:?})",
+            self.output_mode
+        );
 
         // Auto-stop poll interval
         let mut auto_stop_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
@@ -376,13 +385,21 @@ impl DictationService {
         }
 
         let audio_duration = samples.len() as f64 / self.recorder.sample_rate() as f64;
-        info!("Captured {:.1}s of audio ({} samples)", audio_duration, samples.len());
+        info!(
+            "Captured {:.1}s of audio ({} samples)",
+            audio_duration,
+            samples.len()
+        );
 
         // Check if vocabulary/corrections need reloading (MCP tools set flags in state file)
         self.check_whisper_reload();
 
         let corrections = self.corrections.read().unwrap().clone();
-        let corrections_ref = if corrections.is_empty() { None } else { Some(&corrections) };
+        let corrections_ref = if corrections.is_empty() {
+            None
+        } else {
+            Some(&corrections)
+        };
 
         // --- Audio mode: bypass Whisper, send audio directly to Ollama ---
         let (raw_text, t_whisper, t_ollama, processed_text, ollama_text);
@@ -392,7 +409,11 @@ impl DictationService {
             let t_ollama_start = Instant::now();
 
             let sample_rate = self.recorder.sample_rate();
-            match self.processor.process_audio(&samples, sample_rate, corrections_ref).await {
+            match self
+                .processor
+                .process_audio(&samples, sample_rate, corrections_ref)
+                .await
+            {
                 Some(text) => {
                     info!("Ollama audio transcribed: \"{}\"", text);
                     raw_text = text.clone();
@@ -418,7 +439,9 @@ impl DictationService {
             let vocab_prompt = if vocab.is_empty() { None } else { Some(vocab) };
             raw_text = match tokio::task::spawn_blocking(move || {
                 transcriber.transcribe(&samples, vocab_prompt.as_deref())
-            }).await {
+            })
+            .await
+            {
                 Ok(Ok(result)) => {
                     info!(
                         "Transcription ({:.0}ms): \"{}\"",
@@ -500,7 +523,9 @@ impl DictationService {
 
         // Strip trailing hallucination phrases — common speech artifacts when user ends dictation
         let raw_clean = strip_trailing_hallucination(&raw_text);
-        let processed_clean = processed_text.as_deref().map(|t| strip_trailing_hallucination(t));
+        let processed_clean = processed_text
+            .as_deref()
+            .map(|t| strip_trailing_hallucination(t));
 
         // Build final output
         let final_text = match self.output_mode {
@@ -540,7 +565,11 @@ impl DictationService {
             final_text: final_text.clone(),
             output_mode: self.output_mode.as_str().to_string(),
             whisper_latency_ms: t_whisper as i64,
-            ollama_latency_ms: if t_ollama > 0.0 { Some(t_ollama as i64) } else { None },
+            ollama_latency_ms: if t_ollama > 0.0 {
+                Some(t_ollama as i64)
+            } else {
+                None
+            },
             typing_latency_ms: t_type as i64,
             total_latency_ms: t_total as i64,
             audio_duration_s: (audio_duration * 100.0).round() / 100.0,
@@ -566,7 +595,9 @@ impl DictationService {
         let state = {
             let path = state_file();
             match fs::read_to_string(&path) {
-                Ok(contents) => serde_json::from_str::<serde_json::Value>(&contents).unwrap_or_default(),
+                Ok(contents) => {
+                    serde_json::from_str::<serde_json::Value>(&contents).unwrap_or_default()
+                }
                 Err(_) => return,
             }
         };

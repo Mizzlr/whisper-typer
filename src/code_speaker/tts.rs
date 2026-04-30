@@ -87,12 +87,12 @@ impl KokoroTtsEngine {
         let base_dir = std::env::current_dir().unwrap_or_default();
 
         let model_path = if config.model_path.is_empty() {
-            base_dir.join("kokoro-v1.0.onnx")
+            base_dir.join("models").join("kokoro-v1.0.onnx")
         } else {
             PathBuf::from(&config.model_path)
         };
 
-        let voices_path = base_dir.join("voices-v1.0.bin");
+        let voices_path = base_dir.join("models").join("voices-v1.0.bin");
         let tokenizer_path = base_dir.join("tokenizer.json");
 
         Self {
@@ -271,8 +271,7 @@ impl KokoroTtsEngine {
 
         for (i, sentence) in sentences.iter().enumerate() {
             // Check cancel or voice gate closed (user started recording)
-            if self.cancel_flag.load(Ordering::Relaxed)
-                || !self.voice_idle.load(Ordering::Relaxed)
+            if self.cancel_flag.load(Ordering::Relaxed) || !self.voice_idle.load(Ordering::Relaxed)
             {
                 cancelled = true;
                 info!("Cancelled before sentence {}/{}", i + 1, sentences.len());
@@ -292,11 +291,14 @@ impl KokoroTtsEngine {
             total_gen_ms += gen_ms;
 
             // Check cancel or voice gate closed after generation
-            if self.cancel_flag.load(Ordering::Relaxed)
-                || !self.voice_idle.load(Ordering::Relaxed)
+            if self.cancel_flag.load(Ordering::Relaxed) || !self.voice_idle.load(Ordering::Relaxed)
             {
                 cancelled = true;
-                info!("Cancelled after generating sentence {}/{}", i + 1, sentences.len());
+                info!(
+                    "Cancelled after generating sentence {}/{}",
+                    i + 1,
+                    sentences.len()
+                );
                 break;
             }
 
@@ -312,7 +314,11 @@ impl KokoroTtsEngine {
 
             if was_cancelled {
                 cancelled = true;
-                info!("Cancelled during playback of sentence {}/{}", i + 1, sentences.len());
+                info!(
+                    "Cancelled during playback of sentence {}/{}",
+                    i + 1,
+                    sentences.len()
+                );
                 break;
             }
 
@@ -372,15 +378,13 @@ impl KokoroTtsEngine {
         let style_vec: Vec<f32> = voice_data.styles.row(style_idx).to_vec();
 
         // 4. Build ONNX input tensors (ort 2.0: must convert to Tensor values)
-        let tokens_array =
-            ndarray::Array2::from_shape_vec((1, n_tokens), token_ids)
-                .map_err(|e| format!("Failed to create tokens tensor: {e}"))?;
+        let tokens_array = ndarray::Array2::from_shape_vec((1, n_tokens), token_ids)
+            .map_err(|e| format!("Failed to create tokens tensor: {e}"))?;
         let tokens_tensor = Tensor::from_array(tokens_array)
             .map_err(|e| format!("Failed to create tokens ort tensor: {e}"))?;
 
-        let style_array =
-            ndarray::Array2::from_shape_vec((1, 256), style_vec)
-                .map_err(|e| format!("Failed to create style tensor: {e}"))?;
+        let style_array = ndarray::Array2::from_shape_vec((1, 256), style_vec)
+            .map_err(|e| format!("Failed to create style tensor: {e}"))?;
         let style_tensor = Tensor::from_array(style_array)
             .map_err(|e| format!("Failed to create style ort tensor: {e}"))?;
 
@@ -399,10 +403,7 @@ impl KokoroTtsEngine {
 
         // 6. Extract audio samples from output
         // ort 2.0: try_extract_tensor returns (&Shape, &[T]) tuple
-        let first_output = outputs
-            .iter()
-            .next()
-            .ok_or("No output tensor from model")?;
+        let first_output = outputs.iter().next().ok_or("No output tensor from model")?;
 
         let (_shape, audio_slice) = first_output
             .1
@@ -458,9 +459,7 @@ impl KokoroTtsEngine {
                 }
 
                 // Check cancel flag (HTTP /cancel) or voice gate closed (user recording)
-                if cancel_flag.load(Ordering::Relaxed)
-                    || !voice_idle.load(Ordering::Relaxed)
-                {
+                if cancel_flag.load(Ordering::Relaxed) || !voice_idle.load(Ordering::Relaxed) {
                     if let Some(sink) = active_sink.lock().unwrap().take() {
                         sink.stop();
                     }
@@ -523,8 +522,8 @@ impl KokoroTtsEngine {
 
 /// Load tokenizer vocabulary from tokenizer.json.
 fn load_tokenizer(path: &Path) -> Result<HashMap<char, i64>, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read tokenizer: {e}"))?;
+    let contents =
+        fs::read_to_string(path).map_err(|e| format!("Failed to read tokenizer: {e}"))?;
 
     let data: serde_json::Value = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse tokenizer JSON: {e}"))?;
@@ -547,11 +546,10 @@ fn load_tokenizer(path: &Path) -> Result<HashMap<char, i64>, String> {
 
 /// Load all voice styles from an NPZ file.
 fn load_voices(path: &Path) -> Result<HashMap<String, VoiceData>, String> {
-    let file = fs::File::open(path)
-        .map_err(|e| format!("Failed to open voices file: {e}"))?;
+    let file = fs::File::open(path).map_err(|e| format!("Failed to open voices file: {e}"))?;
 
-    let mut npz = NpzReader::new(file)
-        .map_err(|e| format!("Failed to read NPZ voices file: {e}"))?;
+    let mut npz =
+        NpzReader::new(file).map_err(|e| format!("Failed to read NPZ voices file: {e}"))?;
 
     let names: Vec<String> = npz
         .names()
