@@ -138,13 +138,6 @@ impl KokoroTtsEngine {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn list_voices(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.voices.keys().cloned().collect();
-        names.sort();
-        names
-    }
-
     /// Connect the TTS engine to the dictation service's voice gate.
     /// When voice_idle is false, speak() waits for it before playing.
     pub fn set_voice_gate(&mut self, idle_flag: Arc<AtomicBool>, idle_notify: Arc<Notify>) {
@@ -410,7 +403,7 @@ impl KokoroTtsEngine {
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("Failed to extract audio tensor: {e}"))?;
 
-        let samples: Vec<f32> = audio_slice.iter().copied().collect();
+        let samples: Vec<f32> = audio_slice.to_vec();
         debug!(
             "Generated {} samples ({:.1}s)",
             samples.len(),
@@ -422,12 +415,9 @@ impl KokoroTtsEngine {
 
     /// Play audio samples through rodio. Returns true if cancelled during playback.
     async fn play_audio(&self, samples: Vec<f32>) -> bool {
-        let stream = match &self.output_stream {
-            Some(s) => s,
-            None => {
-                warn!("No audio output stream");
-                return false;
-            }
+        let Some(stream) = &self.output_stream else {
+            warn!("No audio output stream");
+            return false;
         };
 
         // rodio 0.21: Sink::connect_new takes &Mixer
@@ -507,14 +497,6 @@ impl KokoroTtsEngine {
     /// cancel() doesn't poison the next unrelated speak.
     pub fn clear_cancel(&self) {
         self.cancel_flag.store(false, Ordering::Relaxed);
-    }
-
-    /// Cancel and wait for speak lock to be released.
-    #[allow(dead_code)]
-    pub async fn cancel_and_wait(&self) {
-        self.cancel();
-        // Wait for any in-progress speak to finish
-        let _guard = self.speak_lock.lock().await;
     }
 }
 

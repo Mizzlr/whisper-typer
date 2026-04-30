@@ -15,7 +15,6 @@ path = "src/bin/tts_hook.rs"
 [[bin]]
 name = "voice-journal"
 path = "src/bin/voice_journal.rs"
-required-features = ["voice-journal-gui"]
 
 [dependencies]
 # Async runtime
@@ -27,6 +26,7 @@ clap = { version = "4", features = ["derive"] }
 # Config
 serde = { version = "1", features = ["derive"] }
 serde_yml = "0.0.12"
+regex = "1"
 
 # Logging
 tracing = "0.1"
@@ -47,7 +47,7 @@ dirs = "5"
 # Whisper ASR
 whisper-rs = { version = "0.15", features = ["tracing_backend"] }
 
-# HTTP client (Ollama API + voice-journal GUI multipart upload)
+# HTTP client (Ollama API + voice-journal multipart upload)
 reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
 serde_json = "1"
 base64 = "0.22"
@@ -72,13 +72,9 @@ ndarray = "0.17"
 ndarray-npy = "0.10"
 rodio = "0.21"
 
-# egui GUI for the voice-journal binary. Optional — pulled in only by
-# the `voice-journal-gui` feature so it doesn't bloat the main service build.
-eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"], optional = true }
-egui = { version = "0.32", optional = true }
-rfd = { version = "0.15", optional = true }
+crossterm = "0.29"
+ratatui = "0.29"
 
 [features]
 default = ["cuda"]
 cuda = ["whisper-rs/cuda"]
-voice-journal-gui = ["dep:eframe", "dep:egui", "dep:rfd"]

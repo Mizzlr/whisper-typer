@@ -76,25 +76,26 @@ pub fn load_records(date: &str) -> Vec<TranscriptionRecord> {
         return Vec::new();
     }
 
-    let mut records = Vec::new();
-    match fs::File::open(&path) {
-        Ok(file) => {
-            for line in std::io::BufReader::new(file).lines() {
-                if let Ok(line) = line {
-                    let line = line.trim().to_string();
-                    if !line.is_empty() {
-                        match serde_json::from_str::<TranscriptionRecord>(&line) {
-                            Ok(record) => records.push(record),
-                            Err(e) => debug!("Skipping malformed history line: {e}"),
-                        }
-                    }
-                }
-            }
+    let file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to load history records: {e}");
+            return Vec::new();
         }
-        Err(e) => error!("Failed to load history records: {e}"),
-    }
+    };
 
-    records
+    std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| match serde_json::from_str::<TranscriptionRecord>(line.trim()) {
+            Ok(record) => Some(record),
+            Err(e) => {
+                debug!("Skipping malformed history line: {e}");
+                None
+            }
+        })
+        .collect()
 }
 
 /// List all dates with history records (newest first).
@@ -107,14 +108,10 @@ pub fn list_available_dates() -> Vec<String> {
     let mut dates: Vec<String> = fs::read_dir(&dir)
         .into_iter()
         .flatten()
+        .flatten()
         .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".jsonl") {
-                Some(name.trim_end_matches(".jsonl").to_string())
-            } else {
-                None
-            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".jsonl").map(str::to_owned)
         })
         .collect();
 
@@ -169,25 +166,21 @@ pub fn generate_report(date: &str) -> String {
         .sum::<f64>()
         / 1000.0;
 
+    let avg = |xs: &[i64]| -> f64 {
+        if xs.is_empty() {
+            0.0
+        } else {
+            xs.iter().sum::<i64>() as f64 / xs.len() as f64
+        }
+    };
+
     let whisper_latencies: Vec<i64> = records.iter().map(|r| r.whisper_latency_ms).collect();
     let ollama_latencies: Vec<i64> = records.iter().filter_map(|r| r.ollama_latency_ms).collect();
     let typing_latencies: Vec<i64> = records.iter().map(|r| r.typing_latency_ms).collect();
 
-    let avg_whisper = if whisper_latencies.is_empty() {
-        0.0
-    } else {
-        whisper_latencies.iter().sum::<i64>() as f64 / whisper_latencies.len() as f64
-    };
-    let avg_ollama = if ollama_latencies.is_empty() {
-        0.0
-    } else {
-        ollama_latencies.iter().sum::<i64>() as f64 / ollama_latencies.len() as f64
-    };
-    let avg_typing = if typing_latencies.is_empty() {
-        0.0
-    } else {
-        typing_latencies.iter().sum::<i64>() as f64 / typing_latencies.len() as f64
-    };
+    let avg_whisper = avg(&whisper_latencies);
+    let avg_ollama = avg(&ollama_latencies);
+    let avg_typing = avg(&typing_latencies);
     let avg_speed: f64 = records.iter().map(|r| r.speed_ratio).sum::<f64>() / records.len() as f64;
 
     let mut lines = vec![

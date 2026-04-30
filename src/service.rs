@@ -277,9 +277,9 @@ impl DictationService {
     /// Add a transcription to the recent list and update state file.
     fn add_transcription(&mut self, text: &str) {
         self.recent_transcriptions.push(text.to_string());
-        if self.recent_transcriptions.len() > 20 {
-            let excess = self.recent_transcriptions.len() - 20;
-            self.recent_transcriptions.drain(..excess);
+        let len = self.recent_transcriptions.len();
+        if len > 20 {
+            self.recent_transcriptions.drain(..len - 20);
         }
         self.write_mcp_state();
     }
@@ -291,9 +291,8 @@ impl DictationService {
         let client = self.tts_cancel_client.clone();
         tokio::spawn(async move {
             let url = format!("http://127.0.0.1:{tts_port}/cancel");
-            match client.post(&url).send().await {
-                Ok(_) => debug!("TTS cancel sent"),
-                Err(_) => {} // TTS not running — that's fine
+            if client.post(&url).send().await.is_ok() {
+                debug!("TTS cancel sent");
             }
         });
     }
@@ -421,11 +420,7 @@ impl DictationService {
                     ollama_text = Some(text);
                 }
                 None => {
-                    warn!("Ollama audio mode failed, falling back to Whisper");
-                    // Fall through to Whisper path below
-                    t_ollama = t_ollama_start.elapsed().as_secs_f64() * 1000.0;
-                    // Recursive-ish: run the whisper path. To keep it simple,
-                    // just log and bail — the user can disable audio_mode.
+                    warn!("Ollama audio mode failed; dropping utterance (Whisper fallback not implemented for this path)");
                     self.transition_to_idle();
                     return;
                 }
@@ -523,9 +518,7 @@ impl DictationService {
 
         // Strip trailing hallucination phrases — common speech artifacts when user ends dictation
         let raw_clean = strip_trailing_hallucination(&raw_text);
-        let processed_clean = processed_text
-            .as_deref()
-            .map(|t| strip_trailing_hallucination(t));
+        let processed_clean = processed_text.as_deref().map(strip_trailing_hallucination);
 
         // Build final output
         let final_text = match self.output_mode {
@@ -592,40 +585,34 @@ impl DictationService {
 
     /// Check state file for vocabulary/corrections reload flags (set by MCP tools).
     fn check_whisper_reload(&self) {
-        let state = {
-            let path = state_file();
-            match fs::read_to_string(&path) {
-                Ok(contents) => {
-                    serde_json::from_str::<serde_json::Value>(&contents).unwrap_or_default()
-                }
-                Err(_) => return,
-            }
+        let path = state_file();
+        let Ok(contents) = fs::read_to_string(&path) else {
+            return;
         };
+        let state: serde_json::Value = serde_json::from_str(&contents).unwrap_or_default();
 
         if state.get("vocabulary_updated").and_then(|v| v.as_bool()) == Some(true) {
-            let new_vocab = load_vocabulary();
-            *self.vocabulary.write().unwrap() = new_vocab;
-            // Clear the flag
-            let path = state_file();
-            if let Ok(contents) = fs::read_to_string(&path) {
-                if let Ok(mut s) = serde_json::from_str::<serde_json::Value>(&contents) {
-                    s.as_object_mut().map(|o| o.remove("vocabulary_updated"));
-                    let _ = fs::write(&path, serde_json::to_string_pretty(&s).unwrap());
-                }
-            }
+            *self.vocabulary.write().unwrap() = load_vocabulary();
+            clear_state_flag(&path, "vocabulary_updated");
         }
 
         if state.get("corrections_updated").and_then(|v| v.as_bool()) == Some(true) {
-            let new_corrections = load_corrections();
-            *self.corrections.write().unwrap() = new_corrections;
-            // Clear the flag
-            let path = state_file();
-            if let Ok(contents) = fs::read_to_string(&path) {
-                if let Ok(mut s) = serde_json::from_str::<serde_json::Value>(&contents) {
-                    s.as_object_mut().map(|o| o.remove("corrections_updated"));
-                    let _ = fs::write(&path, serde_json::to_string_pretty(&s).unwrap());
-                }
-            }
+            *self.corrections.write().unwrap() = load_corrections();
+            clear_state_flag(&path, "corrections_updated");
         }
     }
+}
+
+/// Remove a boolean reload flag from the MCP state file.
+fn clear_state_flag(path: &std::path::Path, flag: &str) {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return;
+    };
+    if let Some(obj) = state.as_object_mut() {
+        obj.remove(flag);
+    }
+    let _ = fs::write(path, serde_json::to_string_pretty(&state).unwrap());
 }

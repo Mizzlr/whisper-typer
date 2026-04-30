@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::{info, warn};
 
+use crate::code_speaker::history as tts_history;
 use crate::history;
 
 /// State file path (shared with service.rs).
@@ -32,18 +33,16 @@ fn state_file() -> PathBuf {
 
 fn read_state() -> serde_json::Value {
     let path = state_file();
-    if path.exists() {
-        if let Ok(contents) = fs::read_to_string(&path) {
-            if let Ok(state) = serde_json::from_str(&contents) {
-                return state;
-            }
-        }
-    }
-    json!({
-        "output_mode": "ollama_only",
-        "ollama_enabled": true,
-        "recent_transcriptions": []
-    })
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_else(|| {
+            json!({
+                "output_mode": "ollama_only",
+                "ollama_enabled": true,
+                "recent_transcriptions": []
+            })
+        })
 }
 
 fn write_state(state: &serde_json::Value) {
@@ -65,6 +64,29 @@ fn update_state(updates: serde_json::Value) -> serde_json::Value {
     }
     write_state(&state);
     state
+}
+
+/// Format the "list" response shared by whisper_get_daily_report and code_speaker_report.
+fn available_dates_text() -> String {
+    let dates = history::list_available_dates();
+    if dates.is_empty() {
+        "No history records found.".to_string()
+    } else {
+        format!("Available dates:\n{}", bullet_list(dates))
+    }
+}
+
+/// Render a bulleted Markdown list ("- {item}\n- {item}").
+fn bullet_list<I, S>(items: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: std::fmt::Display,
+{
+    items
+        .into_iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // --- Tool parameter structs ---
@@ -230,14 +252,7 @@ impl WhisperTyperMcp {
             )]));
         }
 
-        let text = format!(
-            "Recent transcriptions:\n{}",
-            recent
-                .iter()
-                .map(|t| format!("- {t}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+        let text = format!("Recent transcriptions:\n{}", bullet_list(recent));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -251,21 +266,9 @@ impl WhisperTyperMcp {
         let date = req.date.as_deref().unwrap_or("today");
 
         if date == "list" {
-            let dates = history::list_available_dates();
-            if dates.is_empty() {
-                return Ok(CallToolResult::success(vec![Content::text(
-                    "No history records found.",
-                )]));
-            }
-            let text = format!(
-                "Available dates:\n{}",
-                dates
-                    .iter()
-                    .map(|d| format!("- {d}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-            return Ok(CallToolResult::success(vec![Content::text(text)]));
+            return Ok(CallToolResult::success(vec![Content::text(
+                available_dates_text(),
+            )]));
         }
 
         let report = history::generate_report(date);
@@ -395,24 +398,14 @@ impl WhisperTyperMcp {
         let date = req.date.as_deref().unwrap_or("today");
 
         if date == "list" {
-            let dates = history::list_available_dates();
-            if dates.is_empty() {
-                return Ok(CallToolResult::success(vec![Content::text(
-                    "No history records found.",
-                )]));
-            }
-            let text = format!(
-                "Available dates:\n{}",
-                dates
-                    .iter()
-                    .map(|d| format!("- {d}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-            return Ok(CallToolResult::success(vec![Content::text(text)]));
+            return Ok(CallToolResult::success(vec![Content::text(
+                available_dates_text(),
+            )]));
         }
 
-        let report = history::generate_report(date);
+        let stt_report = history::generate_report(date);
+        let tts_report = tts_history::generate_tts_report(date);
+        let report = format!("{stt_report}\n\n---\n\n{tts_report}");
         Ok(CallToolResult::success(vec![Content::text(report)]))
     }
 
@@ -468,7 +461,7 @@ impl WhisperTyperMcp {
         sorted.sort();
         let contents = sorted
             .iter()
-            .map(|t| t.as_str())
+            .map(|s| s.as_str())
             .collect::<Vec<_>>()
             .join("\n");
         if let Err(e) = fs::write(&vocab_path, format!("{contents}\n")) {

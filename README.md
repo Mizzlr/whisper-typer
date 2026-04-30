@@ -1,260 +1,215 @@
-# WhisperTyper
+# WhisperTyper RS
 
-Speech-to-text dictation service for Linux using Whisper and Ollama.
+Speech-to-text dictation, voice journaling, and Claude-Code voice feedback for Linux. Pure Rust.
 
-Press a hotkey (or say a wake word), speak, and your words are transcribed and typed into any application.
+Press a hotkey, speak, and your words are transcribed (Whisper, CUDA) and pasted into the focused application — optionally grammar-corrected by a local LLM (Ollama). A separate TUI app records and filters a daily voice journal. Claude Code lifecycle events get spoken aloud through Kokoro TTS.
 
-## Features
+## What's in this repo
 
-- **Instant recording** - Always-running audio stream for ~10ms startup latency
-- **Whisper transcription** - Uses distil-whisper/distil-large-v3 for fast, accurate ASR
-- **Ollama correction** - Optional grammar/spelling correction via local LLM
-- **Wake word activation** - Hands-free recording with OpenWakeWord (e.g., "Hey Jarvis")
-- **Silence detection** - Auto-stops recording after speech ends (wake word mode)
-- **Hallucination filtering** - Blocks common Whisper phantom outputs ("Thank you", "Bye", etc.)
-- **Multiple typing backends** - ydotool, dotool, or xdotool with auto-detection
-- **Code Speaker TTS** - Text-to-speech output via Kokoro ONNX for Claude Code events
-- **MCP integration** - Control from Claude Code via MCP server
-- **Productivity reports** - Daily transcription history with latency breakdowns
-- **Desktop notifications** - Visual feedback via libnotify
+This repo builds three binaries from one Rust workspace:
+
+| Binary | Purpose |
+|---|---|
+| `whisper-typer-rs` | Background dictation service: hotkey → Whisper → Ollama → paste. Hosts the MCP HTTP server (port 8766) and the Kokoro TTS HTTP API (port 8767). |
+| `tts-hook` | Standalone binary invoked by Claude Code on lifecycle events (SessionStart, Stop, Notification, PermissionRequest, UserPromptSubmit). Speaks short status phrases via the TTS API. |
+| `voice-journal` | TUI for personal voice journaling. Captures audio, runs VAD, transcribes via the running service's `/transcribe` endpoint, applies regex + LLM hallucination filtering, appends to `~/voice-journal/journal_YYYY-MM-DD.md`. |
+
+## Architecture
+
+```
+                      ┌──────────────────┐
+   Hotkey  ─evdev──▶  │                  │
+   (Win+Alt etc.)     │  whisper-typer-rs│ ──▶ Whisper (CUDA, distil-large-v3)
+                      │   state machine  │
+   Claude Code ──┐    │   IDLE→REC→PROC  │ ──▶ Ollama /api/generate (gemma4:e2b)
+   (MCP HTTP)    │    │                  │
+                 ├──▶ │  ┌─────────────┐ │ ──▶ Typer (xdotool / arboard paste)
+   Voice Journal │    │  │ MCP server  │ │
+   (HTTP)        │    │  │ port 8766   │ │
+                 │    │  └─────────────┘ │
+                 │    │  ┌─────────────┐ │
+   Claude Code ──┘    │  │ TTS API     │ │ ──▶ Kokoro ONNX → rodio playback
+   (tts-hook bin)     │  │ port 8767   │ │
+                      │  └─────────────┘ │
+                      └──────────────────┘
+```
 
 ## Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/Mizzlr/whisper-typer.git
 cd whisper-typer
-
-# Create virtual environment and install
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+./infra/install.sh
 ```
 
-### System Dependencies
+`install.sh` does five things: adds you to the `input` group, installs the udev rule for `/dev/uinput`, runs `cargo build --release`, copies the three binaries to `~/.local/bin/`, and installs the systemd user service as `whisper-typer-rs.service`.
+
+You'll need to:
+- Log out and back in (for `input` group to take effect)
+- `ollama pull gemma4:e2b` (default LLM)
+- Place Whisper and Kokoro models under `models/` (paths are `models/ggml-distil-large-v3.bin` and `models/kokoro-v1.0.onnx` by default — see `config.yaml`)
+
+System packages: a recent Rust toolchain, CUDA + cuDNN if you want GPU Whisper, `xdotool` and `xclip` for X11 paste, ALSA dev headers (`libasound2-dev`) for `cpal`.
+
+## Running
 
 ```bash
-# Ubuntu/Debian
-sudo apt install portaudio19-dev python3-gi xdotool xclip libnotify-bin
+# Service (after install)
+systemctl --user start whisper-typer-rs
+journalctl --user -fu whisper-typer-rs
 
-# For evdev hotkey detection (required)
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
-```
+# Dev (foreground, verbose)
+cargo run --release -- --verbose
 
-## Usage
-
-### Run directly
-
-```bash
-# Activate venv
-source .venv/bin/activate
-
-# Run with default settings
-python -m whisper_typer
-
-# Run with verbose logging
-python -m whisper_typer --verbose
-
-# Run with specific output mode
-python -m whisper_typer --mode whisper    # Raw transcription only
-python -m whisper_typer --mode ollama     # Ollama-corrected only (default)
-python -m whisper_typer --mode both       # Show both outputs
-
-# Enable wake word activation
-python -m whisper_typer --enable-wakeword
-python -m whisper_typer --enable-wakeword --wakeword-model hey_jarvis
-
-# Enable Code Speaker TTS
-python -m whisper_typer --enable-tts --tts-voice af_heart
-
-# View productivity report
-python -m whisper_typer --report            # Today's report
-python -m whisper_typer --report 2026-02-12  # Specific date
-python -m whisper_typer --report list        # List available dates
-```
-
-### Run as systemd service
-
-```bash
-# Copy service file
-mkdir -p ~/.config/systemd/user
-cp systemd/whisper-input.service ~/.config/systemd/user/whisper-typer.service
-
-# Edit paths if needed
-# vim ~/.config/systemd/user/whisper-typer.service
-
-# Enable and start
-systemctl --user daemon-reload
-systemctl --user enable whisper-typer.service
-systemctl --user start whisper-typer.service
-
-# View logs
-journalctl --user -u whisper-typer.service -f
+# Voice journal (interactive TUI)
+voice-journal
+# or
+./target/release/voice-journal
 ```
 
 ## Hotkeys
 
-Default hotkey combinations (configurable in `config.yaml`):
+Configured in `config.yaml`. Defaults:
 
-| Hotkey | Description |
-|--------|-------------|
-| Win + Alt | Primary hotkey |
+| Hotkey | Notes |
+|---|---|
+| Win + Alt | Primary |
 | Ctrl + Alt | Alternative |
+| Right Ctrl + Right Alt | Alternative |
 | Page Down + Right Arrow | Alternative |
 | Page Down + Down Arrow | Alternative |
 
-Press and hold to record, release to transcribe.
+Press and hold to record, release to transcribe. Wake-word activation (`alexa` / `hey_jarvis`) is configurable but not currently implemented in the Rust path — the config is parsed and ignored.
 
 ## Configuration
 
-Create `config.yaml` in the working directory:
+`config.yaml` (repo root) controls hotkeys, audio capture, Whisper model, Ollama, typer backend, silence detection, and Kokoro TTS:
 
 ```yaml
-hotkey:
-  combo: [KEY_LEFTMETA, KEY_LEFTALT]
-  alt_combos:
-    - [KEY_LEFTCTRL, KEY_LEFTALT]
-    - [KEY_PAGEDOWN, KEY_DOWN]
-
-audio:
-  sample_rate: 16000
-  # device_index: null  # null = default device
-
-whisper:
-  model: distil-whisper/distil-large-v3
-  device: cuda  # cuda, cpu, or mps
-
 ollama:
   enabled: true
-  model: qwen2.5:1.5b
-  host: http://127.0.0.1:11434
+  model: "gemma4:e2b"            # gemma4:e2b for grammar correction
+  host: "http://127.0.0.1:11434"
+  keep_alive: 3600
+  skip_threshold: 5              # skip Ollama on utterances ≤ N words
 
-typer:
-  backend: auto  # auto, ydotool, dotool, or xdotool
-
-wakeword:
-  enabled: false
-  model: hey_jarvis
-  threshold: 0.5
-
-silence:
-  threshold: 0.01
-  duration: 1.5
+whisper:
+  model: "models/ggml-distil-large-v3.bin"
+  device: "cuda"                 # cuda | cpu | mps
 
 tts:
-  enabled: false
-  voice: af_heart
+  enabled: true                  # native Kokoro TTS
+  voice: "am_michael"            # any af_*, am_*, bf_*, bm_* preset
   speed: 1.0
   api_port: 8767
 ```
 
-## MCP Integration
+## MCP integration
 
-WhisperTyper includes an MCP server for control from Claude Code.
-
-Add to your `.mcp.json`:
+The service exposes an MCP HTTP server on `http://localhost:8766/mcp` that Claude Code can connect to. Add to `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "whisper-typer": {
-      "command": "/path/to/whisper-typer/.venv/bin/python",
-      "args": ["-m", "whisper_typer.mcp_server"]
+      "type": "http",
+      "url": "http://localhost:8766/mcp"
     }
   }
 }
 ```
 
-Available MCP tools:
-- `whisper_set_mode` - Set output mode (whisper/ollama/both)
-- `whisper_enable_ollama` / `whisper_disable_ollama` - Toggle Ollama
-- `whisper_get_status` - Get current configuration
-- `whisper_get_recent` - Get recent transcriptions
-- `whisper_report` - View productivity reports
-- `code_speaker_speak` - Speak text aloud via Kokoro TTS
-- `code_speaker_set_voice` - Change TTS voice
-- `code_speaker_report` - View TTS latency reports
+Tools exposed:
 
-## Architecture
+| Tool | Purpose |
+|---|---|
+| `whisper_set_mode` | Switch output mode: `whisper` / `ollama` / `both` |
+| `whisper_enable_ollama` / `whisper_disable_ollama` | Toggle grammar correction |
+| `whisper_get_status` | Current mode + Ollama state |
+| `whisper_get_recent` | Last N transcriptions |
+| `whisper_get_daily_report` | Productivity report (WPM, latencies) |
+| `whisper_teach` | Add term to vocabulary (`.whisper/vocabulary.txt`) — used as Whisper initial prompt |
+| `whisper_add_correction` | Add wrong→right substitution (`.whisper/corrections.yaml`) — injected into Ollama prompt |
+| `code_speaker_speak` | Enqueue text to TTS |
+| `code_speaker_set_voice` | Persist Kokoro voice across restarts |
+| `code_speaker_enable` / `code_speaker_disable` | Toggle TTS playback |
+| `code_speaker_voices` | List available voice presets |
+| `code_speaker_report` | Same daily report unified across STT + TTS |
+
+## Voice Journal
+
+`voice-journal` is a separate TUI binary tuned for long dictation sessions. It captures audio, runs VAD, sends each utterance to the running service's `/transcribe` endpoint (port 8767, reuses the loaded Whisper model — no second model load), and runs each transcribed chunk through a two-stage hallucination filter.
+
+**VAD (voice activity detection)**
+
+| Mode | Default | Trigger | Notes |
+|---|---|---|---|
+| RMS energy threshold | yes | always (default) | Cheap, distinguishes silence from sound but not speech from background ambient/podcast |
+| Silero VAD ONNX (v5) | no | `WHISPER_VOICE_JOURNAL_VAD=silero` | 1.8 MB ONNX model, ~1ms/frame on CPU. Distinguishes intentional speech from background noise. Eliminates most podcast-bleed hallucinations at source. Requires `models/silero_vad.onnx` on disk; download from <https://github.com/snakers4/silero-vad>. Path overridable via `WHISPER_VAD_MODEL`. Falls back to RMS with stderr warning if the model can't be loaded. |
+
+**Hallucination filter (two stages)**
+
+1. **Regex pass** — fast, deterministic. Rules live in `~/voice-journal/hallucinations.txt`. Catches known echo patterns, podcast bleed, named-entity garble.
+2. **LLM pass** — Ollama (gemma4:e2b) chat API with few-shot prompt. Catches novel hallucinations the regex doesn't know about. Runs in ~0.4s per chunk on a warm model. Auto-disables if Ollama is unreachable; can be force-disabled via `WHISPER_VOICE_JOURNAL_LLM=0`.
+
+Filtered chunks appear inline with a `[filtered]` (regex) or `[filtered-llm]` (LLM) prefix and don't write to the journal file. Output: `~/voice-journal/journal_YYYY-MM-DD.md`.
+
+## Layout
 
 ```
-                    ┌─────────────┐
-Wake Word ─────────▶│             │
-(OpenWakeWord)      │             │
-                    │   Service   │──▶ Notifier (libnotify)
-Hotkey ────────────▶│   (state    │
-(evdev)             │   machine)  │──▶ MCP Server (FastMCP)
-                    │             │
-                    └──────┬──────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-          Recorder      Ollama       Typer
-         (PyAudio)     Client      (ydotool/
-              │        (httpx)      xdotool)
-              ▼            │
-         Transcriber       ├──▶ Processor (grammar)
-         (Whisper)         └──▶ Summarizer (TTS)
-                                     │
-                                     ▼
-                               Code Speaker
-                               (Kokoro TTS)
+src/
+├── main.rs                  # service entry point
+├── service.rs               # state machine, voice gate
+├── hotkey.rs                # evdev monitoring
+├── recorder.rs              # cpal audio capture
+├── transcriber.rs           # whisper-rs ASR
+├── processor.rs             # Ollama grammar correction
+├── typer.rs                 # arboard + enigo paste
+├── mcp_server.rs            # rmcp HTTP server (port 8766)
+├── history.rs               # JSONL transcription history
+├── config.rs                # YAML loader
+├── code_speaker/            # native Kokoro TTS
+│   ├── mod.rs
+│   ├── tts.rs               # ONNX inference + rodio playback
+│   └── api.rs               # axum HTTP API (port 8767)
+└── bin/
+    ├── tts_hook.rs          # Claude Code lifecycle listener
+    └── voice_journal.rs     # voice journal TUI
+
+infra/
+├── install.sh               # one-shot setup script
+├── systemd/
+│   └── whisper-typer.service
+└── udev/
+    └── 99-uinput.rules
+
+models/                      # Whisper, Kokoro, Silero-VAD model files (gitignored)
+config.yaml                  # runtime configuration
 ```
 
-### State Machine
+## Common operations
 
+```bash
+# Rebuild + redeploy after pulling
+cargo build --release
+install -m 0755 target/release/{whisper-typer-rs,tts-hook,voice-journal} ~/.local/bin/
+systemctl --user restart whisper-typer-rs
+
+# Check service health
+systemctl --user status whisper-typer-rs
+curl -s http://localhost:8766/mcp -X POST -d '{}' | head    # MCP probe
+curl -s http://localhost:8767/status                        # TTS probe
+
+# Tail TTS hook events
+tail -f ~/.cache/whisper-typer/tts-hook.log
 ```
-                    ┌──(hotkey pressed)──▶ RECORDING ──(hotkey released)──┐
-                    │                                                     │
-IDLE ◀──(done)──────┤                                                     ├──▶ PROCESSING
-                    │                                                     │
-                    └──(wake word)──▶ WAKE_RECORDING ──(silence)─────────┘
-```
 
-### Components
+## Known issues
 
-| Component | File | Description |
-|-----------|------|-------------|
-| Service | `service.py` | Main orchestration and state machine |
-| Ollama Client | `ollama_client.py` | Shared async HTTP client for Ollama API |
-| Hotkey | `hotkey.py` | evdev-based global hotkey detection |
-| Recorder | `recorder.py` | PyAudio with always-running stream, subscriber pattern |
-| Transcriber | `transcriber.py` | Whisper ASR via HuggingFace transformers |
-| Processor | `processor.py` | Ollama grammar/spelling correction |
-| Typer | `typer.py` | Multi-backend text typing (ydotool/dotool/xdotool) |
-| Wake Word | `wakeword.py` | OpenWakeWord-based voice activation |
-| Silence Detector | `silence_detector.py` | RMS-based silence detection for auto-stop |
-| MCP Server | `mcp_server.py` | FastMCP server for Claude Code control |
-| Notifier | `notifier.py` | Desktop notifications via libnotify |
-| History | `history.py` | Transcription logging and productivity reports |
-| TTS Engine | `code_speaker/tts.py` | Kokoro ONNX text-to-speech |
-| TTS API | `code_speaker/api.py` | HTTP API server for TTS requests |
-| Summarizer | `code_speaker/summarizer.py` | Ollama text summarization for TTS |
-| Reminder | `code_speaker/reminder.py` | Escalating TTS reminders |
-| Config | `config.py` | Dataclass-based YAML configuration |
-
-## Requirements
-
-- Python 3.10+
-- CUDA-capable GPU (recommended for Whisper)
-- Ollama running locally (optional, for text correction)
-- X11 display server (for xdotool/xclip) or Wayland (for ydotool/dotool)
-
-## Roadmap
-
-### Streaming Transcription
-
-Currently, transcription happens after the hotkey is released. Future work could add real-time streaming output as you speak.
-
-| Approach | Library | Latency | Notes |
-|----------|---------|---------|-------|
-| VAD-based chunking | [silero-vad](https://github.com/snakers4/silero-vad) + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | ~1-2s | Transcribe on natural pauses |
-| LocalAgreement | [whisper_streaming](https://github.com/ufal/whisper_streaming) | ~3.3s | Emit when 2+ iterations agree |
-| SimulStreaming | [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) | <1s | SOTA 2025, AlignAtt policy |
-
-**Recommended starting point**: Silero-VAD + faster-whisper, since we already have silence detection infrastructure.
+- **MCP HTTP 410 after `/clear`**: rmcp Streamable HTTP sessions expire when Claude Code reconnects. Workaround: `systemctl --user restart whisper-typer-rs`.
+- **Wake word**: `wakeword:` block in `config.yaml` is parsed but no Rust module currently implements activation. Carryover from the Python era.
+- **Verbose `whisper_init_state` startup**: 7 lines of GPU buffer allocation per service start. Cosmetic, not an error.
 
 ## License
 
-MIT
+MIT.

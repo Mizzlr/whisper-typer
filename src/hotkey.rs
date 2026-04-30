@@ -6,6 +6,7 @@
 use crate::config::HotkeyConfig;
 use evdev::{Device, EventType, InputEventKind, Key};
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -19,71 +20,13 @@ pub enum HotkeyEvent {
 
 /// Resolve a key name like "KEY_LEFTMETA" to an evdev Key code.
 fn resolve_key(name: &str) -> Option<Key> {
-    // evdev::Key has a from_str-like constructor via the key code number.
-    // We need to map string names to codes manually for common keys.
-    let key = match name {
-        "KEY_LEFTMETA" => Key::KEY_LEFTMETA,
-        "KEY_RIGHTMETA" => Key::KEY_RIGHTMETA,
-        "KEY_LEFTALT" => Key::KEY_LEFTALT,
-        "KEY_RIGHTALT" => Key::KEY_RIGHTALT,
-        "KEY_LEFTCTRL" => Key::KEY_LEFTCTRL,
-        "KEY_RIGHTCTRL" => Key::KEY_RIGHTCTRL,
-        "KEY_LEFTSHIFT" => Key::KEY_LEFTSHIFT,
-        "KEY_RIGHTSHIFT" => Key::KEY_RIGHTSHIFT,
-        "KEY_PAGEDOWN" => Key::KEY_PAGEDOWN,
-        "KEY_PAGEUP" => Key::KEY_PAGEUP,
-        "KEY_RIGHT" => Key::KEY_RIGHT,
-        "KEY_LEFT" => Key::KEY_LEFT,
-        "KEY_UP" => Key::KEY_UP,
-        "KEY_DOWN" => Key::KEY_DOWN,
-        "KEY_SPACE" => Key::KEY_SPACE,
-        "KEY_ENTER" => Key::KEY_ENTER,
-        "KEY_TAB" => Key::KEY_TAB,
-        "KEY_ESC" => Key::KEY_ESC,
-        "KEY_A" => Key::KEY_A,
-        "KEY_B" => Key::KEY_B,
-        "KEY_C" => Key::KEY_C,
-        "KEY_D" => Key::KEY_D,
-        "KEY_E" => Key::KEY_E,
-        "KEY_F" => Key::KEY_F,
-        "KEY_G" => Key::KEY_G,
-        "KEY_H" => Key::KEY_H,
-        "KEY_I" => Key::KEY_I,
-        "KEY_J" => Key::KEY_J,
-        "KEY_K" => Key::KEY_K,
-        "KEY_L" => Key::KEY_L,
-        "KEY_M" => Key::KEY_M,
-        "KEY_N" => Key::KEY_N,
-        "KEY_O" => Key::KEY_O,
-        "KEY_P" => Key::KEY_P,
-        "KEY_Q" => Key::KEY_Q,
-        "KEY_R" => Key::KEY_R,
-        "KEY_S" => Key::KEY_S,
-        "KEY_T" => Key::KEY_T,
-        "KEY_U" => Key::KEY_U,
-        "KEY_V" => Key::KEY_V,
-        "KEY_W" => Key::KEY_W,
-        "KEY_X" => Key::KEY_X,
-        "KEY_Y" => Key::KEY_Y,
-        "KEY_Z" => Key::KEY_Z,
-        "KEY_F1" => Key::KEY_F1,
-        "KEY_F2" => Key::KEY_F2,
-        "KEY_F3" => Key::KEY_F3,
-        "KEY_F4" => Key::KEY_F4,
-        "KEY_F5" => Key::KEY_F5,
-        "KEY_F6" => Key::KEY_F6,
-        "KEY_F7" => Key::KEY_F7,
-        "KEY_F8" => Key::KEY_F8,
-        "KEY_F9" => Key::KEY_F9,
-        "KEY_F10" => Key::KEY_F10,
-        "KEY_F11" => Key::KEY_F11,
-        "KEY_F12" => Key::KEY_F12,
-        _ => {
+    match Key::from_str(name) {
+        Ok(k) => Some(k),
+        Err(_) => {
             warn!("Unknown key name: {name}");
-            return None;
+            None
         }
-    };
-    Some(key)
+    }
 }
 
 /// Shared state for tracking pressed keys across devices.
@@ -100,21 +43,11 @@ pub struct HotkeyMonitor {
 
 impl HotkeyMonitor {
     pub fn new(config: &HotkeyConfig, tx: mpsc::Sender<HotkeyEvent>) -> Self {
-        let mut combos = Vec::new();
-
-        // Primary combo
-        let primary: HashSet<Key> = config.combo.iter().filter_map(|s| resolve_key(s)).collect();
-        if !primary.is_empty() {
-            combos.push(primary);
-        }
-
-        // Alternate combos
-        for alt in &config.alt_combos {
-            let combo: HashSet<Key> = alt.iter().filter_map(|s| resolve_key(s)).collect();
-            if !combo.is_empty() {
-                combos.push(combo);
-            }
-        }
+        let combos: Vec<HashSet<Key>> = std::iter::once(&config.combo)
+            .chain(config.alt_combos.iter())
+            .map(|combo| combo.iter().filter_map(|s| resolve_key(s)).collect::<HashSet<_>>())
+            .filter(|combo| !combo.is_empty())
+            .collect();
 
         info!("Hotkey combos: {} configured", combos.len());
 
@@ -130,25 +63,21 @@ impl HotkeyMonitor {
 
     /// Find all keyboard input devices.
     pub fn find_keyboards() -> Vec<Device> {
-        let mut keyboards = Vec::new();
-
-        let devices = evdev::enumerate();
-
-        for (_path, device) in devices {
-            let supported = device.supported_keys();
-            if let Some(keys) = supported {
+        evdev::enumerate()
+            .filter_map(|(_path, device)| {
+                let keys = device.supported_keys()?;
                 if keys.contains(Key::KEY_A) && keys.contains(Key::KEY_ENTER) {
                     info!(
                         "Found keyboard: {} at {:?}",
                         device.name().unwrap_or("unknown"),
                         device.physical_path()
                     );
-                    keyboards.push(device);
+                    Some(device)
+                } else {
+                    None
                 }
-            }
-        }
-
-        keyboards
+            })
+            .collect()
     }
 
     fn any_combo_active(combos: &[HashSet<Key>], pressed: &HashSet<Key>) -> bool {

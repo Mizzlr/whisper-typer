@@ -55,7 +55,7 @@ Edit `config.yaml`:
 
 ## MCP Tools
 
-When loaded in Claude Code (SSE on `http://localhost:8766/sse`), provides:
+When loaded in Claude Code (Streamable HTTP on `http://localhost:8766/mcp`), provides:
 - `whisper_set_mode` - Set output mode
 - `whisper_enable_ollama` / `whisper_disable_ollama`
 - `whisper_get_status` - Current configuration
@@ -67,5 +67,6 @@ When loaded in Claude Code (SSE on `http://localhost:8766/sse`), provides:
 
 ## Known Issues
 
-- **HTTP 410 from MCP**: rmcp SSE sessions expire when Claude Code reconnects (e.g., after `/clear` or new session). The stale session ID returns 410 "Gone". Workaround: restart `whisper-typer-rs.service`.
+- **HTTP 410 from MCP**: rmcp Streamable HTTP sessions expire when Claude Code reconnects (e.g., after `/clear` or new session). The stale session ID returns 410 "Gone". Workaround: restart `whisper-typer-rs.service`.
+- **MCP not appearing in Claude Code**: The project-local `.mcp.json` overrides `~/.claude.json`. Make sure `/home/mizzlr/whisper-typer/.mcp.json` points at the running rmcp HTTP server (`type: http`, `url: http://localhost:8766/mcp`), not the deprecated Python `-m whisper_typer.mcp_server` command.
 - **Verbose whisper_init_state logs**: Each transcription emits 7 lines of buffer allocation info from the whisper.cpp backend. This is cosmetic noise, not an error.

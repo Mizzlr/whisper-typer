@@ -22,13 +22,19 @@ build/
 *.log
 .grepai/
 
-# Kokoro TTS model files (large binaries, download separately)
-kokoro-v1.0.onnx
+# Model files (large binaries, download separately)
+*.onnx
 voices-v1.0.bin
-
-# Whisper GGML model files (large binaries, download separately)
 ggml-*.bin
 .ruff_cache/
 
 # Rust build artifacts
-whisper-typer-rs/target/
+target/
+Cargo.lock.bak
+
+# Auto-generated session memory (claude-mem plugin)
+AGENTS.md
+
+# Stale log files
+mcp-logs.txt
+wa-logs.txt

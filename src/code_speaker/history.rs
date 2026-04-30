@@ -73,28 +73,6 @@ pub fn load_tts_records(date: &str) -> Vec<TTSRecord> {
         .collect()
 }
 
-pub fn list_tts_dates() -> Vec<String> {
-    let dir = history_dir();
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut dates: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.ends_with("-tts.jsonl") {
-                Some(name.trim_end_matches("-tts.jsonl").to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-    dates.sort();
-    dates
-}
-
 pub fn generate_tts_report(date: &str) -> String {
     let records = load_tts_records(date);
     if records.is_empty() {

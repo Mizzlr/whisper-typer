@@ -7,8 +7,5 @@
 //! - `history`: TTS event history and reporting
 
 pub mod api;
-#[allow(dead_code)]
 pub mod history;
-#[allow(dead_code)]
-pub mod transcript;
 pub mod tts;

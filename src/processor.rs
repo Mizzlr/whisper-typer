@@ -62,16 +62,10 @@ impl OllamaProcessor {
         let mut prompt = PROMPT_TEMPLATE.replace("{text}", text);
 
         // Inject per-project corrections into the prompt
-        if let Some(corrections) = corrections {
-            if !corrections.is_empty() {
-                let mut section =
-                    String::from("\n\nKnown corrections (apply these substitutions):\n");
-                for (wrong, right) in corrections {
-                    section.push_str(&format!("- \"{wrong}\" → \"{right}\"\n"));
-                }
-                // Insert before the "Text:" line
-                prompt = prompt.replacen("\nText:", &format!("{section}\nText:"), 1);
-            }
+        if let Some(map) = corrections.filter(|m| !m.is_empty()) {
+            let section = format_corrections_section(map);
+            // Insert before the "Text:" line
+            prompt = prompt.replacen("\nText:", &format!("{section}\nText:"), 1);
         }
         debug!("Sending to Ollama model '{}': {}", self.config.model, text);
 
@@ -113,13 +107,7 @@ impl OllamaProcessor {
                 }
             }
             Err(e) => {
-                if e.is_connect() {
-                    warn!("Cannot connect to Ollama at {}", self.config.host);
-                } else if e.is_timeout() {
-                    warn!("Ollama request timed out");
-                } else {
-                    warn!("Ollama request failed: {e}");
-                }
+                self.log_request_error(&e, "Ollama request");
                 text.to_string()
             }
         }
@@ -152,13 +140,8 @@ impl OllamaProcessor {
 
         // Build prompt with optional corrections
         let mut prompt = AUDIO_PROMPT.to_string();
-        if let Some(corrections) = corrections {
-            if !corrections.is_empty() {
-                prompt.push_str("\n\nKnown corrections (apply these substitutions):\n");
-                for (wrong, right) in corrections {
-                    prompt.push_str(&format!("- \"{wrong}\" → \"{right}\"\n"));
-                }
-            }
+        if let Some(map) = corrections.filter(|m| !m.is_empty()) {
+            prompt.push_str(&format_corrections_section(map));
         }
 
         // Use /api/chat with multimodal message (audio sent via images field)
@@ -208,17 +191,30 @@ impl OllamaProcessor {
                 }
             }
             Err(e) => {
-                if e.is_connect() {
-                    warn!("Cannot connect to Ollama at {}", self.config.host);
-                } else if e.is_timeout() {
-                    warn!("Ollama audio request timed out");
-                } else {
-                    warn!("Ollama audio request failed: {e}");
-                }
+                self.log_request_error(&e, "Ollama audio request");
                 None
             }
         }
     }
+
+    fn log_request_error(&self, e: &reqwest::Error, label: &str) {
+        if e.is_connect() {
+            warn!("Cannot connect to Ollama at {}", self.config.host);
+        } else if e.is_timeout() {
+            warn!("{label} timed out");
+        } else {
+            warn!("{label} failed: {e}");
+        }
+    }
+}
+
+/// Format the "Known corrections" section appended to Ollama prompts.
+fn format_corrections_section(corrections: &HashMap<String, String>) -> String {
+    let mut section = String::from("\n\nKnown corrections (apply these substitutions):\n");
+    for (wrong, right) in corrections {
+        section.push_str(&format!("- \"{wrong}\" → \"{right}\"\n"));
+    }
+    section
 }
 
 /// Encode f32 PCM samples as 16-bit WAV in memory.

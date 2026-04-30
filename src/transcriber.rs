@@ -3,7 +3,7 @@
 //! Loads a GGML model once at startup, then transcribes f32 audio
 //! samples (16kHz mono) to text on demand.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
@@ -16,7 +16,6 @@ use crate::config::WhisperConfig;
 #[derive(Clone)]
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
-    model_path: PathBuf,
 }
 
 /// Result of a transcription with timing info.
@@ -50,7 +49,6 @@ impl WhisperTranscriber {
 
         Ok(Self {
             ctx: Arc::new(ctx),
-            model_path,
         })
     }
 
@@ -125,20 +123,22 @@ impl WhisperTranscriber {
 
         // Collect all segments into a single string
         let n_segments = state.full_n_segments();
-
         let mut text = String::new();
         for i in 0..n_segments {
-            if let Some(segment) = state.get_segment(i) {
-                if let Ok(segment_text) = segment.to_str_lossy() {
-                    let trimmed = segment_text.trim();
-                    if !trimmed.is_empty() {
-                        if !text.is_empty() {
-                            text.push(' ');
-                        }
-                        text.push_str(trimmed);
-                    }
-                }
+            let Some(segment) = state.get_segment(i) else {
+                continue;
+            };
+            let Ok(segment_text) = segment.to_str_lossy() else {
+                continue;
+            };
+            let trimmed = segment_text.trim();
+            if trimmed.is_empty() {
+                continue;
             }
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(trimmed);
         }
 
         let latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -215,11 +215,6 @@ impl WhisperTranscriber {
         Ok(segments)
     }
 
-    #[allow(dead_code)]
-    pub fn model_path(&self) -> &Path {
-        &self.model_path
-    }
-
     /// Find the GGML model file.
     fn find_model(model_name: &str) -> Result<PathBuf, String> {
         // Check if it's a direct path to an existing file
@@ -271,6 +266,7 @@ fn truncate_preview(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let end = s.floor_char_boundary(max);
+        format!("{}...", &s[..end])
     }
 }

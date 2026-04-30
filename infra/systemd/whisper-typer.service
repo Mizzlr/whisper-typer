@@ -1,0 +1,26 @@
+[Unit]
+Description=Whisper Typer RS - Speech to Text Dictation (Rust)
+Documentation=https://github.com/Mizzlr/whisper-typer
+After=graphical-session.target
+Conflicts=whisper-typer.service code-speaker.service
+
+[Service]
+Type=simple
+ExecStart=/home/mizzlr/whisper-typer/target/release/whisper-typer-rs
+WorkingDirectory=/home/mizzlr/whisper-typer
+Restart=on-failure
+RestartSec=5
+
+# ONNX Runtime CUDA providers (ort dlopen needs these on LD_LIBRARY_PATH)
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Environment=LD_LIBRARY_PATH=/home/mizzlr/whisper-typer/target/release:/home/mizzlr/whisper-typer/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib
+
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits (GPU + Kokoro ONNX)
+MemoryHigh=10G
+MemoryMax=14G
+
+[Install]
+WantedBy=default.target

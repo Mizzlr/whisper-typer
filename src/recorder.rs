@@ -191,12 +191,6 @@ impl AudioRecorder {
         self.shared.inner.lock().unwrap().should_auto_stop
     }
 
-    /// Check if currently recording.
-    #[allow(dead_code)]
-    pub fn is_recording(&self) -> bool {
-        self.shared.inner.lock().unwrap().is_recording
-    }
-
     /// Check if audio data is silent.
     pub fn is_silent(samples: &[f32], threshold: f32) -> bool {
         let rms = rms_energy(samples);
