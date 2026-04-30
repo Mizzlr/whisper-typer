@@ -6,7 +6,6 @@
 //! Also supports direct audio-to-text mode via Ollama's multimodal chat API,
 //! bypassing Whisper entirely (requires an audio-capable model like gemma4).
 
-use std::collections::HashMap;
 use std::io::Cursor;
 
 use base64::Engine;
@@ -49,24 +48,12 @@ impl OllamaProcessor {
 
     /// Process text through Ollama for grammar correction.
     /// Returns the original text if Ollama is disabled or unavailable.
-    /// If `corrections` is provided, known substitutions are appended to the prompt.
-    pub async fn process(
-        &self,
-        text: &str,
-        corrections: Option<&HashMap<String, String>>,
-    ) -> String {
+    pub async fn process(&self, text: &str) -> String {
         if !self.config.enabled || text.trim().is_empty() {
             return text.to_string();
         }
 
-        let mut prompt = PROMPT_TEMPLATE.replace("{text}", text);
-
-        // Inject per-project corrections into the prompt
-        if let Some(map) = corrections.filter(|m| !m.is_empty()) {
-            let section = format_corrections_section(map);
-            // Insert before the "Text:" line
-            prompt = prompt.replacen("\nText:", &format!("{section}\nText:"), 1);
-        }
+        let prompt = PROMPT_TEMPLATE.replace("{text}", text);
         debug!("Sending to Ollama model '{}': {}", self.config.model, text);
 
         let body = json!({
@@ -116,12 +103,7 @@ impl OllamaProcessor {
     /// Send audio directly to Ollama for transcription + correction in a single pass.
     /// Bypasses Whisper entirely. Requires an audio-capable model (e.g. gemma4).
     /// Returns None on failure so the caller can fall back to the Whisper path.
-    pub async fn process_audio(
-        &self,
-        samples: &[f32],
-        sample_rate: u32,
-        corrections: Option<&HashMap<String, String>>,
-    ) -> Option<String> {
+    pub async fn process_audio(&self, samples: &[f32], sample_rate: u32) -> Option<String> {
         if !self.config.enabled || samples.is_empty() {
             return None;
         }
@@ -138,11 +120,7 @@ impl OllamaProcessor {
             self.config.model
         );
 
-        // Build prompt with optional corrections
-        let mut prompt = AUDIO_PROMPT.to_string();
-        if let Some(map) = corrections.filter(|m| !m.is_empty()) {
-            prompt.push_str(&format_corrections_section(map));
-        }
+        let prompt = AUDIO_PROMPT.to_string();
 
         // Use /api/chat with multimodal message (audio sent via images field)
         let body = json!({
@@ -206,15 +184,6 @@ impl OllamaProcessor {
             warn!("{label} failed: {e}");
         }
     }
-}
-
-/// Format the "Known corrections" section appended to Ollama prompts.
-fn format_corrections_section(corrections: &HashMap<String, String>) -> String {
-    let mut section = String::from("\n\nKnown corrections (apply these substitutions):\n");
-    for (wrong, right) in corrections {
-        section.push_str(&format!("- \"{wrong}\" → \"{right}\"\n"));
-    }
-    section
 }
 
 /// Encode f32 PCM samples as 16-bit WAV in memory.

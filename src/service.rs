@@ -6,11 +6,10 @@
 //! When the user presses the hotkey, any active TTS is cancelled immediately.
 //! TTS waits for `voice_idle` before playing so it never talks over the user.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Local;
@@ -118,29 +117,6 @@ impl VoiceGate {
     }
 }
 
-/// Load vocabulary terms from `.whisper/vocabulary.txt` (one term per line).
-/// Returns a comma-separated string suitable as Whisper initial prompt.
-fn load_vocabulary() -> String {
-    let path = PathBuf::from(".whisper/vocabulary.txt");
-    match fs::read_to_string(&path) {
-        Ok(contents) => {
-            let terms: Vec<&str> = contents
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .collect();
-            if !terms.is_empty() {
-                info!(
-                    "Loaded {} vocabulary terms from .whisper/vocabulary.txt",
-                    terms.len()
-                );
-            }
-            terms.join(", ")
-        }
-        Err(_) => String::new(),
-    }
-}
-
 /// Remove trailing Whisper hallucination phrases if the preceding text has more than 10 words.
 /// Whisper commonly appends stray phrases like "Thank you", "I'm gonna", "I'm sorry" at the
 /// end of real dictations.
@@ -173,29 +149,6 @@ fn strip_trailing_hallucination(text: &str) -> &str {
     trimmed
 }
 
-/// Load correction mappings from `.whisper/corrections.yaml` (wrong: right).
-fn load_corrections() -> HashMap<String, String> {
-    let path = PathBuf::from(".whisper/corrections.yaml");
-    match fs::read_to_string(&path) {
-        Ok(contents) => match serde_yml::from_str::<HashMap<String, String>>(&contents) {
-            Ok(map) => {
-                if !map.is_empty() {
-                    info!(
-                        "Loaded {} corrections from .whisper/corrections.yaml",
-                        map.len()
-                    );
-                }
-                map
-            }
-            Err(e) => {
-                warn!("Failed to parse .whisper/corrections.yaml: {e}");
-                HashMap::new()
-            }
-        },
-        Err(_) => HashMap::new(),
-    }
-}
-
 pub struct DictationService {
     config: Config,
     state: ServiceState,
@@ -207,10 +160,6 @@ pub struct DictationService {
     recent_transcriptions: Vec<String>,
     voice_gate: VoiceGate,
     tts_cancel_client: reqwest::Client,
-    /// Whisper initial prompt from .whisper/vocabulary.txt
-    vocabulary: Arc<RwLock<String>>,
-    /// Ollama correction mappings from .whisper/corrections.yaml
-    corrections: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl DictationService {
@@ -230,9 +179,6 @@ impl DictationService {
             .build()
             .expect("Failed to create TTS cancel client");
 
-        let vocabulary = Arc::new(RwLock::new(load_vocabulary()));
-        let corrections = Arc::new(RwLock::new(load_corrections()));
-
         let svc = Self {
             config,
             state: ServiceState::Idle,
@@ -244,8 +190,6 @@ impl DictationService {
             recent_transcriptions: Vec::new(),
             voice_gate,
             tts_cancel_client,
-            vocabulary,
-            corrections,
         };
         svc.write_mcp_state();
         svc
@@ -390,16 +334,6 @@ impl DictationService {
             samples.len()
         );
 
-        // Check if vocabulary/corrections need reloading (MCP tools set flags in state file)
-        self.check_whisper_reload();
-
-        let corrections = self.corrections.read().unwrap().clone();
-        let corrections_ref = if corrections.is_empty() {
-            None
-        } else {
-            Some(&corrections)
-        };
-
         // --- Audio mode: bypass Whisper, send audio directly to Ollama ---
         let (raw_text, t_whisper, t_ollama, processed_text, ollama_text);
 
@@ -408,10 +342,7 @@ impl DictationService {
             let t_ollama_start = Instant::now();
 
             let sample_rate = self.recorder.sample_rate();
-            match self
-                .processor
-                .process_audio(&samples, sample_rate, corrections_ref)
-                .await
+            match self.processor.process_audio(&samples, sample_rate).await
             {
                 Some(text) => {
                     info!("Ollama audio transcribed: \"{}\"", text);
@@ -430,10 +361,8 @@ impl DictationService {
             // --- Standard Whisper transcription path ---
             let t_whisper_start = Instant::now();
             let transcriber = self.transcriber.clone();
-            let vocab = self.vocabulary.read().unwrap().clone();
-            let vocab_prompt = if vocab.is_empty() { None } else { Some(vocab) };
             raw_text = match tokio::task::spawn_blocking(move || {
-                transcriber.transcribe(&samples, vocab_prompt.as_deref())
+                transcriber.transcribe(&samples, None)
             })
             .await
             {
@@ -506,7 +435,7 @@ impl DictationService {
                     (Some(raw_text.clone()), None)
                 }
                 OutputMode::Ollama | OutputMode::Both => {
-                    let corrected = self.processor.process(&raw_text, corrections_ref).await;
+                    let corrected = self.processor.process(&raw_text).await;
                     info!("Ollama corrected: \"{}\"", corrected);
                     (Some(corrected.clone()), Some(corrected))
                 }
@@ -583,36 +512,4 @@ impl DictationService {
         info!("State: → IDLE");
     }
 
-    /// Check state file for vocabulary/corrections reload flags (set by MCP tools).
-    fn check_whisper_reload(&self) {
-        let path = state_file();
-        let Ok(contents) = fs::read_to_string(&path) else {
-            return;
-        };
-        let state: serde_json::Value = serde_json::from_str(&contents).unwrap_or_default();
-
-        if state.get("vocabulary_updated").and_then(|v| v.as_bool()) == Some(true) {
-            *self.vocabulary.write().unwrap() = load_vocabulary();
-            clear_state_flag(&path, "vocabulary_updated");
-        }
-
-        if state.get("corrections_updated").and_then(|v| v.as_bool()) == Some(true) {
-            *self.corrections.write().unwrap() = load_corrections();
-            clear_state_flag(&path, "corrections_updated");
-        }
-    }
-}
-
-/// Remove a boolean reload flag from the MCP state file.
-fn clear_state_flag(path: &std::path::Path, flag: &str) {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-    if let Some(obj) = state.as_object_mut() {
-        obj.remove(flag);
-    }
-    let _ = fs::write(path, serde_json::to_string_pretty(&state).unwrap());
 }

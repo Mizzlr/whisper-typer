@@ -63,7 +63,6 @@ When loaded in Claude Code (Streamable HTTP on `http://localhost:8766/mcp`), pro
 - `whisper_get_daily_report` - Productivity reports from JSONL history
 - `code_speaker_speak` / `code_speaker_set_voice` / `code_speaker_enable` / `code_speaker_disable`
 - `code_speaker_voices` / `code_speaker_report`
-- `whisper_teach` / `whisper_add_correction`
 
 ## Known Issues
 

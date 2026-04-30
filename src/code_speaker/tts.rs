@@ -93,7 +93,7 @@ impl KokoroTtsEngine {
         };
 
         let voices_path = base_dir.join("models").join("voices-v1.0.bin");
-        let tokenizer_path = base_dir.join("tokenizer.json");
+        let tokenizer_path = base_dir.join("models").join("tokenizer.json");
 
         Self {
             session: Mutex::new(None),

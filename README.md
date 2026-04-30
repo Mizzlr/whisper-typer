@@ -128,8 +128,6 @@ Tools exposed:
 | `whisper_get_status` | Current mode + Ollama state |
 | `whisper_get_recent` | Last N transcriptions |
 | `whisper_get_daily_report` | Productivity report (WPM, latencies) |
-| `whisper_teach` | Add term to vocabulary (`.whisper/vocabulary.txt`) — used as Whisper initial prompt |
-| `whisper_add_correction` | Add wrong→right substitution (`.whisper/corrections.yaml`) — injected into Ollama prompt |
 | `code_speaker_speak` | Enqueue text to TTS |
 | `code_speaker_set_voice` | Persist Kokoro voice across restarts |
 | `code_speaker_enable` / `code_speaker_disable` | Toggle TTS playback |

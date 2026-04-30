@@ -6,14 +6,14 @@ Conflicts=whisper-typer.service code-speaker.service
 
 [Service]
 Type=simple
-ExecStart=/home/mizzlr/whisper-typer/target/release/whisper-typer-rs
-WorkingDirectory=/home/mizzlr/whisper-typer
+ExecStart=__REPO_DIR__/target/release/whisper-typer-rs
+WorkingDirectory=__REPO_DIR__
 Restart=on-failure
 RestartSec=5
 
-# ONNX Runtime CUDA providers (ort dlopen needs these on LD_LIBRARY_PATH)
+# ONNX Runtime providers (ort dlopens libonnxruntime_providers_*.so from target/release)
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
-Environment=LD_LIBRARY_PATH=/home/mizzlr/whisper-typer/target/release:/home/mizzlr/whisper-typer/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib
+Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release
 
 StandardOutput=journal
 StandardError=journal

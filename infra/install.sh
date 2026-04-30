@@ -57,23 +57,30 @@ install -m 0755 "$REPO_DIR/target/release/tts-hook"         "$HOME/.local/bin/tt
 install -m 0755 "$REPO_DIR/target/release/voice-journal"    "$HOME/.local/bin/voice-journal"
 echo -e "${GREEN}  Installed to ~/.local/bin/${NC}"
 
-# 5. systemd user service
+# 5. systemd user service. Substitute __REPO_DIR__ in the unit template
+# with the actual repo path so the same template works for any user/location.
 echo -e "${YELLOW}[5/5] systemd user service...${NC}"
 mkdir -p "$HOME/.config/systemd/user"
-install -m 0644 "$INFRA_DIR/systemd/whisper-typer.service" \
-    "$HOME/.config/systemd/user/whisper-typer-rs.service"
+UNIT_DEST="$HOME/.config/systemd/user/whisper-typer-rs.service"
+sed "s|__REPO_DIR__|$REPO_DIR|g" \
+    "$INFRA_DIR/systemd/whisper-typer.service" > "$UNIT_DEST"
+chmod 0644 "$UNIT_DEST"
 systemctl --user daemon-reload
 systemctl --user enable whisper-typer-rs.service
-echo -e "${GREEN}  Service installed (whisper-typer-rs.service)${NC}"
+echo -e "${GREEN}  Service installed at $UNIT_DEST${NC}"
 
 echo
 echo "=== Setup Complete ==="
 echo
 echo -e "${YELLOW}Next steps:${NC}"
 echo "  1. Log out and back in (for input group to take effect)"
-echo "  2. Pull the Ollama model: ollama pull gemma4:e2b"
-echo "  3. Download Whisper + Kokoro models into models/ (see README.md)"
-echo "  4. Start the service: systemctl --user start whisper-typer-rs"
-echo "  5. Tail logs:         journalctl --user -fu whisper-typer-rs"
+echo "  2. Pull the Ollama model:  ollama pull gemma4:e2b"
+echo "  3. Drop model files into models/ (see README.md):"
+echo "       - ggml-distil-large-v3.bin (Whisper)"
+echo "       - kokoro-v1.0.onnx + voices-v1.0.bin (TTS)"
+echo "       - tokenizer.json (Kokoro phoneme tokenizer)"
+echo "       - silero_vad.onnx (optional, for voice-journal Silero VAD)"
+echo "  4. Start the service:      systemctl --user start whisper-typer-rs"
+echo "  5. Tail logs:              journalctl --user -fu whisper-typer-rs"
 echo
 echo -e "${GREEN}Usage:${NC} Hold Win+Alt while speaking, release to transcribe and type."
