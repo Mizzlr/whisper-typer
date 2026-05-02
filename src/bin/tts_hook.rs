@@ -28,6 +28,10 @@ struct HookEvent {
     transcript_path: Option<String>,
     tool_name: Option<String>,
     notification_type: Option<String>,
+    /// Set by UserPromptSubmit. Captured per-session and replayed on Stop
+    /// to disambiguate "task done" announcements when multiple Claude Code
+    /// sessions finish around the same time.
+    prompt: Option<String>,
 }
 
 // --- TTS API request ---
@@ -172,7 +176,8 @@ fn is_duplicate_stop(session_id: &str, text: &str) -> bool {
     previous == text
 }
 
-/// Clean up dedup files older than 24 hours and the legacy single dedup file.
+/// Clean up dedup + last-prompt files older than 24 hours and the legacy
+/// single dedup file.
 fn cleanup_stale_files() {
     let dir = history_dir();
 
@@ -182,14 +187,14 @@ fn cleanup_stale_files() {
         let _ = fs::remove_file(&old_dedup);
     }
 
-    // Remove stale per-session dedup files
+    // Remove stale per-session dedup + prompt files
     let Ok(entries) = fs::read_dir(&dir) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if !name_str.starts_with(".last-stop-") {
+        if !name_str.starts_with(".last-stop-") && !name_str.starts_with(".last-prompt-") {
             continue;
         }
         if let Ok(meta) = entry.metadata() {
@@ -199,6 +204,111 @@ fn cleanup_stale_files() {
                 }
             }
         }
+    }
+}
+
+// --- Per-session prompt store ---
+
+fn last_prompt_file_for(session_id: &str) -> PathBuf {
+    let short_id = &session_id[..session_id.len().min(8)];
+    history_dir().join(format!(".last-prompt-{short_id}"))
+}
+
+fn save_last_prompt(session_id: &str, prompt: &str) {
+    if session_id.is_empty() || prompt.trim().is_empty() {
+        return;
+    }
+    let _ = fs::create_dir_all(history_dir());
+    let _ = fs::write(last_prompt_file_for(session_id), prompt);
+}
+
+fn read_last_prompt(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    fs::read_to_string(last_prompt_file_for(session_id)).ok()
+}
+
+/// Pull a short, speakable label out of a free-form user prompt. Strips
+/// leading filler ("okay", "by the way", "so", ...) and returns the first
+/// few content words capped at MAX_LABEL_LEN. Returns None if nothing
+/// substantive remains. The label gets quoted into the TTS line so a
+/// listener can tell which task finished when several finish back-to-back.
+fn extract_short_label(prompt: &str) -> Option<String> {
+    const MAX_LABEL_LEN: usize = 32;
+    const FILLERS: &[&str] = &[
+        "by the way,", "by the way",
+        "first of all,", "first of all",
+        "actually,", "actually",
+        "please,", "please",
+        "okay,", "okay", "ok,", "ok",
+        "well,", "well",
+        "hey,", "hey",
+        "now,", "now",
+        "so,", "so",
+        "alright,", "alright",
+    ];
+
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut start_byte = 0usize;
+    loop {
+        let lower_rem = trimmed[start_byte..].to_ascii_lowercase();
+        let mut advanced = false;
+        for f in FILLERS {
+            if lower_rem.starts_with(f) {
+                start_byte += f.len();
+                while let Some(ch) = trimmed[start_byte..].chars().next() {
+                    if ch.is_whitespace() || ch == ',' {
+                        start_byte += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                advanced = true;
+                break;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+
+    let body = &trimmed[start_byte.min(trimmed.len())..];
+    let words: Vec<&str> = body.split_whitespace().take(6).collect();
+    if words.is_empty() {
+        return None;
+    }
+    let mut label = words.join(" ");
+    if label.len() > MAX_LABEL_LEN {
+        let cut = label[..MAX_LABEL_LEN]
+            .rfind(' ')
+            .unwrap_or(MAX_LABEL_LEN);
+        label.truncate(cut);
+    }
+    let trimmed_label = label.trim_end_matches(|c: char| !c.is_alphanumeric());
+    if trimmed_label.is_empty() {
+        None
+    } else {
+        Some(trimmed_label.to_string())
+    }
+}
+
+/// Compose the spoken text for a Stop event using the per-session prompt
+/// if available. Falls back to the prior fixed phrasing when no prompt is
+/// known (fresh session, prompt file pruned, etc.).
+fn task_done_text(session_id: &str, project: &str, is_focus: bool) -> String {
+    let label = read_last_prompt(session_id)
+        .as_deref()
+        .and_then(extract_short_label);
+    match (label, is_focus) {
+        (Some(l), true) => format!("\"{l}\" task done."),
+        (Some(l), false) => format!("\"{l}\" {project} done."),
+        (None, true) => "Task done.".to_string(),
+        (None, false) => format!("{project} done."),
     }
 }
 
@@ -337,7 +447,9 @@ async fn main() {
         "Notification" => {
             handle_notification(&client, &event, &session_id, &project, is_focus).await
         }
-        "UserPromptSubmit" => handle_user_prompt_submit(&client, &session_id, &project).await,
+        "UserPromptSubmit" => {
+            handle_user_prompt_submit(&client, &event, &session_id, &project).await
+        }
         _ => ("ignored".into(), Some("unknown event".into()), None),
     };
 
@@ -441,8 +553,8 @@ async fn handle_stop(
         );
     }
 
+    let short_text = task_done_text(session_id, project, is_focus);
     if is_focus {
-        let short_text = "Task done.".to_string();
         let _ = client
             .post(format!("{TTS_API}/speak"))
             .json(&SpeakRequest {
@@ -460,7 +572,6 @@ async fn handle_stop(
         )
     } else {
         // Non-focus session: short announcement (queued, plays after current speech)
-        let short_text = format!("{project} done.");
         let _ = client
             .post(format!("{TTS_API}/speak"))
             .json(&SpeakRequest {
@@ -560,12 +671,18 @@ async fn handle_notification(
 
 async fn handle_user_prompt_submit(
     client: &Client,
+    event: &HookEvent,
     session_id: &str,
     project: &str,
 ) -> (String, Option<String>, Option<String>) {
     // Claim focus for this session
     if !session_id.is_empty() {
         write_focus(session_id, project);
+    }
+
+    // Save the prompt so the next Stop event can quote a short label from it.
+    if let Some(prompt) = event.prompt.as_deref() {
+        save_last_prompt(session_id, prompt);
     }
 
     // Notify TTS API: interrupt focus speech + re-queue deferred non-focus items

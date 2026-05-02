@@ -61,7 +61,7 @@ journalctl --user -fu whisper-typer-rs
 # Dev (foreground, verbose)
 cargo run --release -- --verbose
 
-# Voice journal (interactive TUI)
+# Voice journal (interactive TUI; auto-uses Silero VAD when models/silero_vad.onnx exists)
 voice-journal
 # or
 ./target/release/voice-journal
@@ -134,23 +134,67 @@ Tools exposed:
 | `code_speaker_voices` | List available voice presets |
 | `code_speaker_report` | Same daily report unified across STT + TTS |
 
+## TTS hook (Claude Code lifecycle voice notifications)
+
+`tts-hook` is the standalone binary Claude Code invokes on session events. It reads event JSON from stdin and POSTs short phrases to the TTS API at `http://127.0.0.1:8767`. Per-event behavior:
+
+| Event | Speaks | Notes |
+|---|---|---|
+| `SessionStart` | `"Claude Code is ready."` | Skipped for `source=resume` and `source=compact` (only fresh starts). Focus session only. |
+| `UserPromptSubmit` | (silent) | Claims focus for this session, captures the user's prompt to `~/.tts-hook-history/.last-prompt-{short_id}` for later use, and notifies the TTS API to interrupt focus speech and re-queue any deferred non-focus items. |
+| `Stop` | `"<label>" task done.` (focus) or `"<label>" {project} done.` (non-focus) | The label is extracted from the saved user prompt: leading filler ("okay", "by the way", "so", "actually", "well", ...) is stripped, then the first ~6 words / 32 chars become the label. If no prompt is on file, falls back to `Task done.` / `{project} done.`. Per-session dedup prevents Claude Code's multi-Stop bursts from speaking the same announcement twice. |
+| `PermissionRequest` | `"{project} needs permission."` | Always speaks regardless of focus. |
+| `Notification` (`permission_prompt`) | `"Permission needed."` | Focus session only. |
+
+The label feature lets you tell which task finished when several Claude Code sessions complete back-to-back. Sessions whose `cwd` is under `~/.claude-mem/` are muted (background observer noise).
+
+Per-session state files live under `~/.tts-hook-history/`:
+- `.focus-session` — current focus session ID (6h expiry)
+- `.last-stop-{short_id}` — dedup token for Stop events
+- `.last-prompt-{short_id}` — most recent prompt for label extraction
+- `YYYY-MM-DD.jsonl` — full event log for debugging
+
 ## Voice Journal
 
-`voice-journal` is a separate TUI binary tuned for long dictation sessions. It captures audio, runs VAD, sends each utterance to the running service's `/transcribe` endpoint (port 8767, reuses the loaded Whisper model — no second model load), and runs each transcribed chunk through a two-stage hallucination filter.
+`voice-journal` is a separate TUI binary tuned for long dictation sessions. It captures audio, runs VAD, sends each utterance to the running service's `/transcribe` endpoint (port 8767, reuses the loaded Whisper model — no second model load), and runs each transcribed chunk through a two-stage hallucination filter. Debug capture is available with `voice-journal --debug` or `WHISPER_VOICE_JOURNAL_DEBUG=1 voice-journal`; it writes sidecars next to the journal: `journal_YYYY-MM-DD_HHMMSS.mic.wav` for the raw mic stream and `journal_YYYY-MM-DD_HHMMSS.vad.csv` for RMS, Silero probability, threshold, voiced decision, capture state, and utterance events.
 
 **VAD (voice activity detection)**
 
-| Mode | Default | Trigger | Notes |
-|---|---|---|---|
-| RMS energy threshold | yes | always (default) | Cheap, distinguishes silence from sound but not speech from background ambient/podcast |
-| Silero VAD ONNX (v5) | no | `WHISPER_VOICE_JOURNAL_VAD=silero` | 1.8 MB ONNX model, ~1ms/frame on CPU. Distinguishes intentional speech from background noise. Eliminates most podcast-bleed hallucinations at source. Requires `models/silero_vad.onnx` on disk; download from <https://github.com/snakers4/silero-vad>. Path overridable via `WHISPER_VAD_MODEL`. Falls back to RMS with stderr warning if the model can't be loaded. |
+The detection chain has four stacked gates, each addressing a different false-positive mode observed in real journaling sessions. The first three are entry-only (they decide *whether to start* an utterance); the fourth runs at finalize time (decides whether to *send* it to Whisper).
 
-**Hallucination filter (two stages)**
+| Gate | Default | Purpose |
+|---|---|---|
+| **Silero VAD ONNX (v5)** with hysteresis | enabled when model present | Probability ≥ `enter` (default `0.5`) is needed to start speech; once started, probability ≥ `stay` (default `0.35`) keeps the utterance voiced. Hysteresis prevents probabilities bouncing across a single threshold from chopping a sentence into fragments. Falls back to RMS energy thresholding if the model can't be loaded. Override via `WHISPER_VOICE_JOURNAL_SILERO_THRESHOLD` and `WHISPER_VOICE_JOURNAL_SILERO_STAY_THRESHOLD`. RMS rescue threshold for very-near-field speech that Silero scored low: `WHISPER_VOICE_JOURNAL_RMS_RESCUE_THRESHOLD` (default `0.05`). |
+| **Speech-start streak** | 4 frames (≈128ms) | Requires N consecutive ≥enter-threshold frames before declaring speech_start. Single keystroke clicks (≈20–50ms broadband transients) and brief desk taps cannot sustain 4 frames; speech onsets do. Once `in_speech` is true, the streak requirement drops to 1 frame so naturally short pauses inside a sentence don't restart the count. |
+| **Keystroke gate** | 250ms after each key event | A background thread reads `/dev/input/event*` for any key press/repeat and stamps an atomic timestamp. The audio callback forces `voiced=false` for `KEYSTROKE_GATE_MS` after each event, so typing on a mechanical keyboard near the mic can't open the speech gate. Only applied while `!in_speech` — if you're already speaking, typing won't truncate the utterance. Needs `input` group membership (same as the hotkey monitor). The TUI status changes to `Typing` while the gate is active. |
+| **Minimum voiced time** | 250ms | Pre-roll plus silence-tail puff up every utterance to ≈1.2s of bytes — byte-length alone can't distinguish a real sentence from a single transient followed by silence. Voiced sample count is tracked separately, and utterances containing less than `MIN_VOICED_MS` of actually-voiced audio are dropped before being sent to Whisper. Visible in the TUI as `dropped low-voiced: N`. |
+
+**TUI flicker telemetry**
+
+The status panel shows live VAD diagnostics so you can see whether speech is being captured cleanly or chopped. Format:
+
+```
+Flicker: 268 (15.6/min) | voiced: 0ms (max 3413ms) | gated: 3000 | dropped low-voiced: 0
+```
+
+- `transitions/min` should stay low during silence/typing and spike only when you speak.
+- `max voiced run` should reach into the seconds during real sentences. If it stays below ~500ms, the stay threshold is too high.
+- `gated` counts callbacks the keystroke gate suppressed. Climbs while you type without speaking.
+- `dropped low-voiced` counts utterances skipped before Whisper was called.
+
+**Hallucination filter (two stages, post-Whisper)**
 
 1. **Regex pass** — fast, deterministic. Rules live in `~/voice-journal/hallucinations.txt`. Catches known echo patterns, podcast bleed, named-entity garble.
 2. **LLM pass** — Ollama (gemma4:e2b) chat API with few-shot prompt. Catches novel hallucinations the regex doesn't know about. Runs in ~0.4s per chunk on a warm model. Auto-disables if Ollama is unreachable; can be force-disabled via `WHISPER_VOICE_JOURNAL_LLM=0`.
 
-Filtered chunks appear inline with a `[filtered]` (regex) or `[filtered-llm]` (LLM) prefix and don't write to the journal file. Output: `~/voice-journal/journal_YYYY-MM-DD.md`.
+**Output files**
+
+- `~/voice-journal/journal_YYYY-MM-DD.md` — clean journal. Real speech only.
+- `~/voice-journal/journal_YYYY-MM-DD.unfiltered.md` — sibling file capturing **every** transcribed utterance, including `[filtered]`, `[filtered-llm]`, and `[error]` lines. Use this to audit what the filters are catching without re-running audio.
+
+**Whisper-typer integration**
+
+When the `whisper-typer-rs` service is running, voice-journal tails its history file at `~/.whisper-typer-history/YYYY-MM-DD.jsonl` and injects each new dictation into both the live TUI (cyan `[dictated]` line) and the journal + unfiltered files. This means dictations performed via the global hotkey appear in the same daily journal alongside ambient capture — single source of truth for "what was said today." The integration is one-way (read-only on whisper-typer's side) and falls back silently if the file or service isn't present.
 
 ## Layout
 
