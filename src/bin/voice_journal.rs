@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Cursor, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -206,29 +206,131 @@ fn transcribe(samples: &[f32]) -> Result<String, String> {
     Ok(text)
 }
 
-fn output_file_for_session() -> io::Result<PathBuf> {
-    let base = dirs::home_dir()
+/// Today's date in `YYYY-MM-DD`. Honors `WHISPER_VOICE_JOURNAL_TODAY_OVERRIDE`
+/// so rotation can be exercised without a system-clock change.
+fn current_date_string() -> String {
+    if let Ok(override_date) = std::env::var("WHISPER_VOICE_JOURNAL_TODAY_OVERRIDE") {
+        let trimmed = override_date.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn voice_journal_dir() -> PathBuf {
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("voice-journal");
+        .join("voice-journal")
+}
+
+fn output_file_for_session() -> io::Result<PathBuf> {
+    let base = voice_journal_dir();
     fs::create_dir_all(&base)?;
-    let date = Local::now().format("%Y-%m-%d");
+    let date = current_date_string();
     Ok(base.join(format!("journal_{date}.md")))
 }
 
-/// Sibling of the journal that captures EVERY transcribed utterance —
-/// including `[filtered]`, `[filtered-llm]`, and `[error]` lines that the
-/// clean journal drops. Used to audit false positives from the regex/LLM
-/// filters and Silero VAD without re-running audio.
-fn unfiltered_path_for(journal: &PathBuf) -> PathBuf {
-    let parent = journal
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let stem = journal
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("journal");
-    parent.join(format!("{stem}.unfiltered.md"))
+/// Open `path` in append mode, atomically writing `header` if and only if
+/// we are the thread that creates the file. The `create_new` open fails with
+/// `AlreadyExists` for everyone after the winner, so racing threads get a
+/// plain append handle without re-emitting the header. We flush + drop the
+/// bootstrap handle before reopening so the header bytes are visible to any
+/// concurrent appender.
+fn open_or_bootstrap(path: &Path, header: &str) -> io::Result<File> {
+    match OpenOptions::new().create_new(true).write(true).open(path) {
+        Ok(mut bootstrap) => {
+            bootstrap.write_all(header.as_bytes())?;
+            bootstrap.flush()?;
+            drop(bootstrap);
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    OpenOptions::new().append(true).open(path)
+}
+
+fn journal_header() -> String {
+    format!("# Voice Journal\n\nStarted: {}\n\n", Local::now().to_rfc3339())
+}
+
+fn unfiltered_header() -> String {
+    format!(
+        "# Voice Journal (unfiltered)\n\n\
+         Captures every transcribed utterance — including [filtered], \
+         [filtered-llm], and [error] lines — for false-positive auditing.\n\n\
+         Started: {}\n\n",
+        Local::now().to_rfc3339()
+    )
+}
+
+/// Resolves today's `(journal, unfiltered)` paths fresh on every call.
+/// Used by the dictation tailer's poll loop, which already reopens files
+/// each iteration; recomputing the paths is what makes its rotation work.
+fn output_paths_for_today() -> (PathBuf, PathBuf) {
+    let base = voice_journal_dir();
+    let date = current_date_string();
+    (
+        base.join(format!("journal_{date}.md")),
+        base.join(format!("journal_{date}.unfiltered.md")),
+    )
+}
+
+/// Holds long-lived append handles to today's journal + unfiltered files,
+/// rotating both atomically when the local calendar date crosses. Used by
+/// `spawn_transcriber`, which writes on every utterance and would otherwise
+/// keep yesterday's handles open across midnight.
+struct RotatingJournalWriter {
+    base_dir: PathBuf,
+    current_date: String,
+    journal: File,
+    unfiltered: File,
+}
+
+impl RotatingJournalWriter {
+    fn open_today() -> io::Result<Self> {
+        let base_dir = voice_journal_dir();
+        fs::create_dir_all(&base_dir)?;
+        let date = current_date_string();
+        let (journal, unfiltered) = Self::open_pair(&base_dir, &date)?;
+        Ok(Self {
+            base_dir,
+            current_date: date,
+            journal,
+            unfiltered,
+        })
+    }
+
+    fn open_pair(base_dir: &Path, date: &str) -> io::Result<(File, File)> {
+        let journal_path = base_dir.join(format!("journal_{date}.md"));
+        let unfiltered_path = base_dir.join(format!("journal_{date}.unfiltered.md"));
+        let journal = open_or_bootstrap(&journal_path, &journal_header())?;
+        let unfiltered = open_or_bootstrap(&unfiltered_path, &unfiltered_header())?;
+        Ok((journal, unfiltered))
+    }
+
+    fn rotate_if_needed(&mut self) -> io::Result<()> {
+        let today = current_date_string();
+        if today != self.current_date {
+            let (journal, unfiltered) = Self::open_pair(&self.base_dir, &today)?;
+            self.journal = journal;
+            self.unfiltered = unfiltered;
+            self.current_date = today;
+        }
+        Ok(())
+    }
+
+    fn write_journal(&mut self, line: &str) -> io::Result<()> {
+        self.rotate_if_needed()?;
+        writeln!(self.journal, "{line}")?;
+        self.journal.flush()
+    }
+
+    fn write_unfiltered(&mut self, line: &str) -> io::Result<()> {
+        self.rotate_if_needed()?;
+        writeln!(self.unfiltered, "{line}")?;
+        self.unfiltered.flush()
+    }
 }
 
 fn debug_paths_for_session(journal_path: &PathBuf) -> io::Result<(PathBuf, PathBuf)> {
@@ -896,14 +998,12 @@ fn start_capture(
 
 /// Tail today's whisper-typer JSONL history and inject each new dictation
 /// as a `[dictated]` line into both the live TUI channel and the journal +
-/// unfiltered files. Date rolls naturally because the path is recomputed
-/// every poll cycle. If the file disappears (path moved, day rolled,
-/// service stopped), the tailer transparently reopens.
-fn spawn_dictation_tailer(
-    line_tx: Sender<String>,
-    journal_path: PathBuf,
-    unfiltered_path: PathBuf,
-) {
+/// unfiltered files. Both the input JSONL path and the output journal
+/// paths are recomputed each poll cycle, so a session that runs across
+/// midnight transparently rolls onto the new day's files. If the input
+/// file disappears (path moved, day rolled, service stopped), the tailer
+/// reopens on the next poll.
+fn spawn_dictation_tailer(line_tx: Sender<String>) {
     #[derive(Deserialize)]
     struct DictationEntry {
         #[serde(default)]
@@ -913,7 +1013,7 @@ fn spawn_dictation_tailer(
     }
 
     fn jsonl_path_for_today() -> PathBuf {
-        let date = Local::now().format("%Y-%m-%d");
+        let date = current_date_string();
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".whisper-typer-history")
@@ -971,16 +1071,10 @@ fn spawn_dictation_tailer(
             };
 
             if !new_lines.is_empty() {
-                let mut journal = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&journal_path)
-                    .ok();
-                let mut unfiltered = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&unfiltered_path)
-                    .ok();
+                let (journal_path, unfiltered_path) = output_paths_for_today();
+                let mut journal = open_or_bootstrap(&journal_path, &journal_header()).ok();
+                let mut unfiltered =
+                    open_or_bootstrap(&unfiltered_path, &unfiltered_header()).ok();
                 for raw in new_lines {
                     let entry: DictationEntry = match serde_json::from_str(&raw) {
                         Ok(e) => e,
@@ -1016,51 +1110,36 @@ fn spawn_dictation_tailer(
 fn spawn_transcriber(
     rx: Receiver<Vec<f32>>,
     tx: Sender<String>,
-    path: PathBuf,
-    unfiltered_path: PathBuf,
+    mut writer: RotatingJournalWriter,
     hallucination_filters: Vec<Regex>,
     llm_filter: Arc<OllamaFilter>,
 ) {
     std::thread::spawn(move || {
-        let mut journal = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .expect("failed to open journal file");
-        let mut unfiltered = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(unfiltered_path)
-            .expect("failed to open unfiltered journal file");
         for chunk in rx {
             match transcribe(&chunk) {
                 Ok(text) if !text.trim().is_empty() => {
                     let trimmed = text.trim();
                     let ts = Local::now().format("%H:%M:%S");
                     if is_hallucination(trimmed, &hallucination_filters) {
-                        let _ = writeln!(unfiltered, "[{ts}] [filtered] {trimmed}");
-                        let _ = unfiltered.flush();
+                        let _ = writer.write_unfiltered(&format!("[{ts}] [filtered] {trimmed}"));
                         let _ = tx.send(format!("[filtered] {trimmed}"));
                         continue;
                     }
                     if matches!(llm_filter.check(trimmed), Some(true)) {
-                        let _ = writeln!(unfiltered, "[{ts}] [filtered-llm] {trimmed}");
-                        let _ = unfiltered.flush();
+                        let _ =
+                            writer.write_unfiltered(&format!("[{ts}] [filtered-llm] {trimmed}"));
                         let _ = tx.send(format!("[filtered-llm] {trimmed}"));
                         continue;
                     }
                     let line = format!("[{ts}] {trimmed}");
-                    let _ = writeln!(journal, "{line}");
-                    let _ = journal.flush();
-                    let _ = writeln!(unfiltered, "{line}");
-                    let _ = unfiltered.flush();
+                    let _ = writer.write_journal(&line);
+                    let _ = writer.write_unfiltered(&line);
                     let _ = tx.send(line);
                 }
                 Ok(_) => {}
                 Err(e) => {
                     let ts = Local::now().format("%H:%M:%S");
-                    let _ = writeln!(unfiltered, "[{ts}] [error] {e}");
-                    let _ = unfiltered.flush();
+                    let _ = writer.write_unfiltered(&format!("[{ts}] [error] {e}"));
                     let _ = tx.send(format!("[error] {e}"));
                 }
             }
@@ -1180,28 +1259,12 @@ fn build_vad_mode() -> VadMode {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out = output_file_for_session()?;
-    if !out.exists() {
-        let mut bootstrap = File::create(&out)?;
-        writeln!(
-            bootstrap,
-            "# Voice Journal\n\nStarted: {}\n",
-            Local::now().to_rfc3339()
-        )?;
-    }
-    let unfiltered_out = unfiltered_path_for(&out);
-    if !unfiltered_out.exists() {
-        let mut bootstrap = File::create(&unfiltered_out)?;
-        writeln!(
-            bootstrap,
-            "# Voice Journal (unfiltered)\n\n\
-             Captures every transcribed utterance — including [filtered], \
-             [filtered-llm], and [error] lines — for false-positive auditing.\n\n\
-             Started: {}\n",
-            Local::now().to_rfc3339()
-        )?;
-    }
+    // Bootstrap today's files (idempotent under racing threads via create_new)
+    // and hand the long-lived append handles to spawn_transcriber. The tailer
+    // recomputes paths each poll, so it doesn't need the writer.
+    let writer = RotatingJournalWriter::open_today()?;
     let (debug_recorder, debug_label) = if debug_enabled() {
+        let out = output_file_for_session()?;
         let (debug_wav, debug_csv) = debug_paths_for_session(&out)?;
         let recorder = Arc::new(Mutex::new(VadDebugRecorder::create(
             &debug_wav,
@@ -1273,12 +1336,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_transcriber(
         audio_rx,
         line_tx.clone(),
-        out.clone(),
-        unfiltered_out.clone(),
+        writer,
         hallucination_filters,
         llm_filter,
     );
-    spawn_dictation_tailer(line_tx, out.clone(), unfiltered_out.clone());
+    spawn_dictation_tailer(line_tx);
 
     enable_raw_mode()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -1315,13 +1377,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .constraints([Constraint::Length(status_height), Constraint::Min(1)])
                 .split(f.area());
 
+            let (today_journal, today_unfiltered) = output_paths_for_today();
             let mut header = vec![
                 Line::from(format!(
                     "Voice Journal TUI | elapsed: {}s | press q/esc stop | p pause/resume",
                     started.elapsed().as_secs(),
                 )),
-                Line::from(format!("Output: {}", out.display())),
-                Line::from(format!("Unfiltered: {}", unfiltered_out.display())),
+                Line::from(format!("Output: {}", today_journal.display())),
+                Line::from(format!("Unfiltered: {}", today_unfiltered.display())),
             ];
             if let Some(label) = &debug_label {
                 header.push(Line::from(label.clone()));
@@ -1422,6 +1485,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     disable_raw_mode()?;
     terminal.clear()?;
-    println!("Voice journal saved to {}", out.display());
+    let (today_journal, _) = output_paths_for_today();
+    println!("Voice journal saved to {}", today_journal.display());
     Ok(())
 }
