@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -54,6 +56,12 @@ const KEYSTROKE_GATE_MS: u64 = 250;
 /// of every utterance to ~1.2s, so byte-length alone can't tell a real
 /// sentence apart from a single transient followed by silence.
 const MIN_VOICED_MS: u32 = 250;
+/// After releasing a whisper-typer hotkey combo, suppress voice-journal
+/// recording for this long. Covers whisper-typer's transcribe latency
+/// (~300–700ms for distil-large-v3) plus the dictation-tailer's 500ms poll
+/// interval, so the dictated text appears in the journal via the tailer
+/// before voice-journal would otherwise resume recording the same utterance.
+const HOTKEY_GRACE_MS: u64 = 1500;
 const SILERO_VAD_MODEL_REL_PATH: &str = "models/silero_vad.onnx";
 const SILENCE_FINALIZE_MS: u32 = 900;
 const MIN_UTTERANCE_MS: u32 = 500;
@@ -77,10 +85,11 @@ enum VadMode {
 }
 
 // Ollama-based hallucination filter (second pass after regex).
-// Ablation on journal_2026-04-30.md: 38 additional drops regex missed
-// (podcast bleed, novel phoneme clusters), 0.39s avg latency on gemma4:e2b.
+// Switched from gemma4:e2b (7.3 GB) to granite4.1:3b (2.1 GB) on 2026-05-03 —
+// frees ~5 GB of GPU memory while passing 7/7 of the existing few-shot
+// regression cases at ~150–250ms steady-state latency.
 const OLLAMA_HOST: &str = "http://127.0.0.1:11434";
-const OLLAMA_MODEL: &str = "gemma4:e2b";
+const OLLAMA_MODEL: &str = "granite4.1:3b";
 const OLLAMA_TIMEOUT_SEC: u64 = 8;
 const OLLAMA_KEEP_ALIVE_SEC: u64 = 3600;
 
@@ -634,13 +643,80 @@ impl OllamaFilter {
     }
 }
 
+/// Default whisper-typer hotkey combos used when config.yaml is missing or
+/// unparseable. Mirrors `HotkeyConfig::default()` plus the alt_combos shipped
+/// in the repo's example config.
+fn default_whisper_combos() -> Vec<Vec<String>> {
+    vec![
+        vec!["KEY_LEFTMETA".into(), "KEY_LEFTALT".into()],
+        vec!["KEY_LEFTCTRL".into(), "KEY_LEFTALT".into()],
+        vec!["KEY_RIGHTCTRL".into(), "KEY_RIGHTALT".into()],
+        vec!["KEY_PAGEDOWN".into(), "KEY_RIGHT".into()],
+        vec!["KEY_PAGEDOWN".into(), "KEY_DOWN".into()],
+    ]
+}
+
+/// Read whisper-typer's hotkey combos from config.yaml so voice-journal
+/// suppresses recording during dictation. Falls back to defaults if the
+/// file is missing or malformed.
+fn load_whisper_combos() -> Vec<HashSet<evdev::Key>> {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct HotkeyShim {
+        combo: Vec<String>,
+        alt_combos: Vec<Vec<String>>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct ConfigShim {
+        hotkey: HotkeyShim,
+    }
+
+    let candidates = [
+        std::env::current_dir().ok().map(|d| d.join("config.yaml")),
+        dirs::home_dir().map(|h| h.join("whisper-typer/config.yaml")),
+    ];
+    let path = candidates.into_iter().flatten().find(|p| p.exists());
+
+    let raw: Vec<Vec<String>> = match path
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|t| serde_yml::from_str::<ConfigShim>(&t).ok())
+    {
+        Some(cfg) => std::iter::once(cfg.hotkey.combo)
+            .chain(cfg.hotkey.alt_combos)
+            .filter(|c| !c.is_empty())
+            .collect(),
+        None => default_whisper_combos(),
+    };
+
+    raw.into_iter()
+        .map(|combo| {
+            combo
+                .iter()
+                .filter_map(|s| evdev::Key::from_str(s).ok())
+                .collect::<HashSet<_>>()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Spawn one std::thread per detected keyboard that polls `fetch_events` and
 /// stamps the current epoch-ms into `last_keypress_ms` on any press/repeat.
+/// Also tracks held keys to detect when any whisper-typer hotkey combo is
+/// fully pressed: while held, `hotkey_held` flips to true; on the transition
+/// back to released, `last_hotkey_release_ms` is stamped so the audio
+/// callback can extend the gate by `HOTKEY_GRACE_MS` after release.
 /// Auto-rediscovers if all watchers exit (device disconnect or transient
 /// kernel hiccup). Permission needs the user in the `input` group, same as
 /// whisper-typer's hotkey monitor.
-fn spawn_keystroke_watcher(last_keypress_ms: Arc<AtomicU64>) {
-    use evdev::{Device, EventType, Key};
+fn spawn_keystroke_watcher(
+    last_keypress_ms: Arc<AtomicU64>,
+    combos: Arc<Vec<HashSet<evdev::Key>>>,
+    hotkey_held: Arc<AtomicBool>,
+    last_hotkey_release_ms: Arc<AtomicU64>,
+) {
+    use evdev::{Device, EventType, InputEventKind, Key};
+    let pressed: Arc<Mutex<HashSet<Key>>> = Arc::new(Mutex::new(HashSet::new()));
     std::thread::spawn(move || loop {
         let keyboards: Vec<Device> = evdev::enumerate()
             .filter_map(|(_, dev)| {
@@ -664,21 +740,60 @@ fn spawn_keystroke_watcher(last_keypress_ms: Arc<AtomicU64>) {
         let mut handles = Vec::new();
         for mut dev in keyboards {
             let last = last_keypress_ms.clone();
+            let combos = combos.clone();
+            let pressed = pressed.clone();
+            let hotkey_held = hotkey_held.clone();
+            let last_release = last_hotkey_release_ms.clone();
             handles.push(std::thread::spawn(move || loop {
                 match dev.fetch_events() {
                     Ok(events) => {
-                        let mut had_event = false;
+                        let mut had_press = false;
+                        let mut combo_changed = false;
                         for ev in events {
-                            // value 1 = press, 2 = autorepeat. Releases (0)
-                            // also indicate user activity but we focus on
-                            // press/repeat which align with the audio click.
-                            if ev.event_type() == EventType::KEY
-                                && (ev.value() == 1 || ev.value() == 2)
-                            {
-                                had_event = true;
+                            if ev.event_type() != EventType::KEY {
+                                continue;
+                            }
+                            let key = match ev.kind() {
+                                InputEventKind::Key(k) => k,
+                                _ => continue,
+                            };
+                            match ev.value() {
+                                1 => {
+                                    had_press = true;
+                                    if let Ok(mut p) = pressed.lock() {
+                                        if p.insert(key) {
+                                            combo_changed = true;
+                                        }
+                                    }
+                                }
+                                2 => {
+                                    had_press = true;
+                                }
+                                0 => {
+                                    if let Ok(mut p) = pressed.lock() {
+                                        if p.remove(&key) {
+                                            combo_changed = true;
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        if had_event {
+                        if combo_changed {
+                            let now_active = pressed
+                                .lock()
+                                .map(|p| combos.iter().any(|c| c.is_subset(&p)))
+                                .unwrap_or(false);
+                            let was_active = hotkey_held.swap(now_active, Ordering::Relaxed);
+                            if was_active && !now_active {
+                                let now_ms = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0);
+                                last_release.store(now_ms, Ordering::Relaxed);
+                            }
+                        }
+                        if had_press {
                             let now_ms = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .map(|d| d.as_millis() as u64)
@@ -698,6 +813,12 @@ fn spawn_keystroke_watcher(last_keypress_ms: Arc<AtomicU64>) {
         for h in handles {
             let _ = h.join();
         }
+        // All device threads exited (disconnect, suspend) — clear held state
+        // so a stale combo doesn't latch suppression after re-enumeration.
+        if let Ok(mut p) = pressed.lock() {
+            p.clear();
+        }
+        hotkey_held.store(false, Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(2));
     });
 }
@@ -716,6 +837,9 @@ fn start_capture(
     last_keypress_ms: Arc<AtomicU64>,
     keystroke_suppressions: Arc<AtomicU64>,
     low_voiced_drops: Arc<AtomicU64>,
+    hotkey_held: Arc<AtomicBool>,
+    last_hotkey_release_ms: Arc<AtomicU64>,
+    dictation_skipped: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = host
@@ -874,8 +998,39 @@ fn start_capture(
                     voiced
                 };
 
+                // Whisper-typer hotkey gate: while the user holds any
+                // configured combo (or for HOTKEY_GRACE_MS after release),
+                // suppress recording entirely. The held audio is captured
+                // and transcribed by whisper-typer-rs; its result is merged
+                // back into this journal via spawn_dictation_tailer. Letting
+                // both pipelines transcribe the same audio produces duplicate
+                // [filtered]/[dictated] pairs and contends for the GPU.
+                let last_release = last_hotkey_release_ms.load(Ordering::Relaxed);
+                let in_dictation_window = hotkey_held.load(Ordering::Relaxed)
+                    || (last_release > 0
+                        && now_ms.saturating_sub(last_release) < HOTKEY_GRACE_MS);
+                let voiced = if in_dictation_window {
+                    if voiced {
+                        dictation_skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if in_speech {
+                        utterance.clear();
+                        silence_run_samples = 0;
+                        voiced_samples_in_utt = 0;
+                        in_speech = false;
+                    }
+                    pre_roll.clear();
+                    speech_hold_frames = 0;
+                    voiced_streak = 0;
+                    false
+                } else {
+                    voiced
+                };
+
                 if let Ok(mut s) = status.lock() {
-                    *s = if voiced {
+                    *s = if in_dictation_window {
+                        "WhisperTyper".to_string()
+                    } else if voiced {
                         "Recording".to_string()
                     } else if in_keystroke_window {
                         "Typing".to_string()
@@ -1317,7 +1472,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last_keypress_ms = Arc::new(AtomicU64::new(0));
     let keystroke_suppressions = Arc::new(AtomicU64::new(0));
     let low_voiced_drops = Arc::new(AtomicU64::new(0));
-    spawn_keystroke_watcher(last_keypress_ms.clone());
+    let whisper_combos = Arc::new(load_whisper_combos());
+    let hotkey_held = Arc::new(AtomicBool::new(false));
+    let last_hotkey_release_ms = Arc::new(AtomicU64::new(0));
+    let dictation_skipped = Arc::new(AtomicU64::new(0));
+    let combo_count = whisper_combos.len();
+    spawn_keystroke_watcher(
+        last_keypress_ms.clone(),
+        whisper_combos.clone(),
+        hotkey_held.clone(),
+        last_hotkey_release_ms.clone(),
+    );
     let _stream = start_capture(
         audio_tx,
         level.clone(),
@@ -1332,6 +1497,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_keypress_ms.clone(),
         keystroke_suppressions.clone(),
         low_voiced_drops.clone(),
+        hotkey_held.clone(),
+        last_hotkey_release_ms.clone(),
+        dictation_skipped.clone(),
     )?;
     spawn_transcriber(
         audio_rx,
@@ -1370,8 +1538,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let max_voiced_ms = longest_voiced_ms.load(Ordering::Relaxed);
         let ks_suppressions = keystroke_suppressions.load(Ordering::Relaxed);
         let lv_drops = low_voiced_drops.load(Ordering::Relaxed);
+        let dict_skipped = dictation_skipped.load(Ordering::Relaxed);
+        let dict_active = hotkey_held.load(Ordering::Relaxed);
         terminal.draw(|f| {
-            let status_height = if debug_label.is_some() { 10 } else { 9 };
+            let status_height = if debug_label.is_some() { 11 } else { 10 };
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(status_height), Constraint::Min(1)])
@@ -1416,6 +1586,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Flicker: {total_transitions} ({transitions_per_min:.1}/min) | voiced: {cur_voiced_ms}ms (max {max_voiced_ms}ms) | gated: {ks_suppressions} | dropped low-voiced: {lv_drops}"
                 ))
                 .style(Style::default().fg(Color::Yellow)),
+                Line::from(format!(
+                    "Whisper-typer gate: {} combos watched | dictation skipped: {dict_skipped}{}",
+                    combo_count,
+                    if dict_active { " | ACTIVE" } else { "" }
+                ))
+                .style(Style::default().fg(if dict_active { Color::Magenta } else { Color::Cyan })),
             ]);
             let p1 = Paragraph::new(header).block(Block::default().borders(Borders::ALL).title("Status"));
             f.render_widget(p1, chunks[0]);

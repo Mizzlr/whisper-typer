@@ -1,30 +1,42 @@
 //! Whisper ASR transcription using whisper-rs (whisper.cpp bindings).
 //!
-//! Loads a GGML model once at startup, then transcribes f32 audio
-//! samples (16kHz mono) to text on demand.
+//! Two-plane architecture (2026-05-03):
+//! - **Dictation plane** (`transcribe`): used by service.rs for hotkey-driven
+//!   dictation. Owns its own permanent `WhisperState` allocated once at
+//!   startup, reused across calls. Behind a Mutex but in practice
+//!   uncontended (one caller).
+//! - **API plane** (`transcribe_segments`): used by the `/transcribe` HTTP
+//!   handler that voice-journal hits. Owns a separate permanent
+//!   `WhisperState`. Multiple concurrent HTTP requests serialize through
+//!   the plane's Mutex.
+//!
+//! Two independent states + the shared `WhisperContext` (model weights)
+//! means voice-journal's batch transcribe calls never block whisper-typer's
+//! low-latency hotkey path. GPU memory becomes deterministic at startup
+//! (~1.5 GB model + 2 × ~0.37 GB state = ~2.24 GB) instead of churning
+//! ~370 MB allocations per call as the previous design did.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::info;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 use crate::config::WhisperConfig;
 
-/// Thread-safe wrapper around WhisperContext.
-/// WhisperContext is Send+Sync, so we wrap it in Arc for sharing.
 #[derive(Clone)]
 pub struct WhisperTranscriber {
-    ctx: Arc<WhisperContext>,
+    dictation_state: Arc<Mutex<WhisperState>>,
+    api_state: Arc<Mutex<WhisperState>>,
 }
 
-/// Result of a transcription with timing info.
 pub struct TranscribeResult {
     pub text: String,
     pub latency_ms: f64,
 }
 
-/// One timestamped segment, as emitted by `transcribe_segments`.
 #[derive(Debug, Clone)]
 pub struct TranscribeSegment {
     pub text: String,
@@ -33,7 +45,6 @@ pub struct TranscribeSegment {
 }
 
 impl WhisperTranscriber {
-    /// Load the Whisper GGML model.
     pub fn load(config: &WhisperConfig) -> Result<Self, String> {
         let model_path = Self::find_model(&config.model)?;
 
@@ -44,65 +55,79 @@ impl WhisperTranscriber {
         let ctx = WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
             .map_err(|e| format!("Failed to load Whisper model: {e}"))?;
 
-        let load_ms = t0.elapsed().as_millis();
-        info!("Whisper model loaded in {load_ms}ms");
+        info!("Whisper model loaded in {}ms", t0.elapsed().as_millis());
+
+        // Allocate the dictation plane's state. Whisper-typer's hotkey path
+        // owns this one — it must never wait on an API caller.
+        info!("Allocating dictation plane WhisperState...");
+        let warm_t0 = Instant::now();
+        let mut dictation_state = ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create dictation state: {e}"))?;
+        Self::prewarm_state(&mut dictation_state, true)?;
+        info!(
+            "Dictation plane ready in {:.1}s",
+            warm_t0.elapsed().as_secs_f64()
+        );
+
+        // Allocate the API plane's state. Voice-journal and any other caller
+        // of /transcribe share this one; concurrent calls serialize via the
+        // plane's Mutex.
+        info!("Allocating API plane WhisperState...");
+        let warm_t0 = Instant::now();
+        let mut api_state = ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create API state: {e}"))?;
+        Self::prewarm_state(&mut api_state, false)?;
+        info!(
+            "API plane ready in {:.1}s",
+            warm_t0.elapsed().as_secs_f64()
+        );
+
+        // Drop our owning reference — both states already hold internal
+        // pointers into the context's CUDA buffers, and the WhisperContext
+        // outlives the states by way of the C++ wrapper's reference counting.
+        // (whisper-rs 0.15.1's WhisperState has no lifetime parameter.)
+        drop(ctx);
 
         Ok(Self {
-            ctx: Arc::new(ctx),
+            dictation_state: Arc::new(Mutex::new(dictation_state)),
+            api_state: Arc::new(Mutex::new(api_state)),
         })
     }
 
-    /// Pre-warm CUDA state by running a dummy inference.
-    ///
-    /// `WhisperContext::new_with_params` only loads model weights (fast).
-    /// The heavy CUDA buffer allocation (`whisper_init_state`) is deferred
-    /// to the first `create_state()` call. Without pre-warming, this 10+
-    /// minute GPU init storm happens on the first hotkey press, which can
-    /// starve the evdev hotkey monitor and make it unresponsive.
-    pub fn warm_up(&self) -> Result<(), String> {
-        info!("Pre-warming Whisper CUDA state (this may take several minutes)...");
-        let t0 = Instant::now();
-
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| format!("CUDA warm-up create_state failed: {e}"))?;
-
-        // Run a tiny inference to fully initialize all compute buffers
-        let dummy_audio = vec![0.0f32; 16000]; // 1 second of silence
+    fn prewarm_state(state: &mut WhisperState, single_segment: bool) -> Result<(), String> {
+        let dummy = vec![0.0f32; 16000];
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some("en"));
-        params.set_single_segment(true);
+        params.set_single_segment(single_segment);
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-
         state
-            .full(params, &dummy_audio)
-            .map_err(|e| format!("CUDA warm-up inference failed: {e}"))?;
+            .full(params, &dummy)
+            .map(|_| ())
+            .map_err(|e| format!("Pre-warm inference failed: {e}"))
+    }
 
-        let elapsed = t0.elapsed();
-        info!(
-            "Whisper CUDA state pre-warmed in {:.1}s",
-            elapsed.as_secs_f64()
-        );
+    /// Backwards-compatible no-op. Pre-warming now happens inside `load()`.
+    pub fn warm_up(&self) -> Result<(), String> {
         Ok(())
     }
 
-    /// Transcribe audio samples (f32, 16kHz, mono) to text.
-    /// If `initial_prompt` is provided, it biases Whisper toward recognizing those terms.
+    /// Transcribe audio samples (f32, 16kHz, mono) on the dictation plane.
+    /// Used by the hotkey-driven path; never contends with API callers.
     pub fn transcribe(
         &self,
         samples: &[f32],
         initial_prompt: Option<&str>,
     ) -> Result<TranscribeResult, String> {
-        let t0 = Instant::now();
-
         let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| format!("Failed to create whisper state: {e}"))?;
+            .dictation_state
+            .lock()
+            .map_err(|_| "dictation state lock poisoned".to_string())?;
+        let t0 = Instant::now();
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some("en"));
@@ -121,7 +146,6 @@ impl WhisperTranscriber {
             .full(params, samples)
             .map_err(|e| format!("Whisper inference failed: {e}"))?;
 
-        // Collect all segments into a single string
         let n_segments = state.full_n_segments();
         let mut text = String::new();
         for i in 0..n_segments {
@@ -160,14 +184,16 @@ impl WhisperTranscriber {
         Ok(TranscribeResult { text, latency_ms })
     }
 
-    /// Long-form transcription with native segment timestamps. Used by the
-    /// `/transcribe` HTTP endpoint that the voice-journal GUI calls.
+    /// Long-form transcription with native segment timestamps on the API
+    /// plane. Used by the `/transcribe` HTTP endpoint that voice-journal
+    /// calls. Concurrent HTTP requests serialize via the plane's Mutex —
+    /// they never block the dictation plane.
     pub fn transcribe_segments(&self, samples: &[f32]) -> Result<Vec<TranscribeSegment>, String> {
-        let t0 = Instant::now();
         let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| format!("Failed to create whisper state: {e}"))?;
+            .api_state
+            .lock()
+            .map_err(|_| "API state lock poisoned".to_string())?;
+        let t0 = Instant::now();
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some("en"));
@@ -217,13 +243,11 @@ impl WhisperTranscriber {
 
     /// Find the GGML model file.
     fn find_model(model_name: &str) -> Result<PathBuf, String> {
-        // Check if it's a direct path to an existing file
         let direct = PathBuf::from(model_name);
         if direct.exists() && direct.extension().is_some() {
             return Ok(direct);
         }
 
-        // Common GGML model filenames to search for
         let filenames = [
             format!("ggml-{}.bin", model_name.replace('/', "-")),
             "ggml-distil-large-v3.bin".to_string(),
@@ -232,7 +256,6 @@ impl WhisperTranscriber {
             "ggml-base.bin".to_string(),
         ];
 
-        // Search locations
         let search_dirs: Vec<PathBuf> = [
             std::env::current_dir().ok(),
             std::env::current_dir().ok().map(|d| d.join("models")),

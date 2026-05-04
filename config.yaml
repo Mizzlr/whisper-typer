@@ -25,7 +25,7 @@ whisper:
 
 ollama:
   enabled: true
-  model: "gemma4:e2b"
+  model: "granite4.1:3b"
   host: "http://127.0.0.1:11434"
   keep_alive: 3600          # Keep model loaded for 1 hour after each request
   skip_threshold: 5

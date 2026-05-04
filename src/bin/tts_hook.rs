@@ -16,6 +16,46 @@ use serde::{Deserialize, Serialize};
 
 const TTS_API: &str = "http://127.0.0.1:8767";
 
+// --- Ollama-backed task labeling ---
+//
+// Used to convert a free-form user prompt into a 2-4 word task label that's
+// spoken aloud after "task done". The previous deterministic
+// `extract_short_label` (now retained as fallback) just took the first six
+// words after a fixed list of fillers, which produced gems like
+// '"Is there something that we have"' or '"<task-notification"'. Granite is
+// fast enough (warm steady-state ~150ms on RTX 3060) that we can call it
+// synchronously from `handle_user_prompt_submit` without delaying the user
+// noticeably; the result is cached per-session so the Stop hook only reads.
+
+const OLLAMA_HOST: &str = "http://127.0.0.1:11434";
+const LABEL_MODEL: &str = "granite4.1:3b";
+/// Hard cap on the Ollama call. If exceeded, we fall back to the deterministic
+/// label extractor; we never block the prompt-submit hook for longer than this.
+const LABEL_TIMEOUT_SECS: u64 = 8;
+const LABEL_KEEP_ALIVE: &str = "1h";
+const LABEL_SYSTEM_PROMPT: &str = concat!(
+    "You generate 2-4 word task labels for a TTS announcement system. ",
+    "The label is spoken aloud right before the phrase \"task done\" — so it ",
+    "must be short, action-focused, and natural to hear out loud.\n\n",
+    "Rules:\n",
+    "- Output ONLY the label. No punctuation, no quotes, no commentary.\n",
+    "- Lowercase.\n",
+    "- 2-4 words max.\n",
+    "- Action-oriented when possible (e.g., \"bundle landing check\" not \"bundle\").\n",
+    "- Strip XML tags, image markers, and conversational fillers from the input.\n",
+    "- Preserve domain terms verbatim: MEV, slot, bundle, validator, helius, jito, ",
+    "solana, ARB, sig, backrun, searcher, ClickHouse, Astralane.\n\n",
+    "Examples:\n",
+    "\"Can you check whether the bundle landed in slot 287 million?\" -> bundle landing check\n",
+    "\"What's the current working directory?\" -> cwd check\n",
+    "\"Make sure the entire April coverage is intact\" -> april coverage check\n",
+    "\"[Image #80] [Image #81] explain this chart\" -> chart explanation\n",
+    "\"<task-notification>build the dashboard</task-notification>\" -> dashboard build\n",
+    "\"Yes, exactly. Yes, exactly.\" -> confirmation\n",
+    "\"docs/strategy_synthesis.md please review\" -> strategy doc review\n",
+    "\"if you distill the strategy down to its essence, what is it?\" -> strategy distillation",
+);
+
 // --- Event JSON from Claude Code ---
 
 #[derive(Deserialize)]
@@ -229,6 +269,95 @@ fn read_last_prompt(session_id: &str) -> Option<String> {
     fs::read_to_string(last_prompt_file_for(session_id)).ok()
 }
 
+// --- Per-session LLM-generated label store ---
+
+fn last_label_file_for(session_id: &str) -> PathBuf {
+    let short_id = &session_id[..session_id.len().min(8)];
+    history_dir().join(format!(".last-prompt-label-{short_id}"))
+}
+
+fn save_last_label(session_id: &str, label: &str) {
+    if session_id.is_empty() || label.trim().is_empty() {
+        return;
+    }
+    let _ = fs::create_dir_all(history_dir());
+    let _ = fs::write(last_label_file_for(session_id), label);
+}
+
+fn read_last_label(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    fs::read_to_string(last_label_file_for(session_id))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Coerce arbitrary LLM output into a clean, speakable task label.
+/// Returns None for empty/junk responses.
+fn sanitize_label(raw: &str) -> Option<String> {
+    const MAX_LABEL_LEN: usize = 40;
+    let cleaned = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_lowercase();
+    let words: Vec<&str> = cleaned.split_whitespace().take(5).collect();
+    if words.is_empty() {
+        return None;
+    }
+    let mut label = words.join(" ");
+    if label.len() > MAX_LABEL_LEN {
+        let cut = label[..MAX_LABEL_LEN]
+            .rfind(' ')
+            .unwrap_or(MAX_LABEL_LEN);
+        label.truncate(cut);
+    }
+    let trimmed = label
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .to_string();
+    if trimmed.len() < 2 {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Ask Ollama for a 2-4 word label describing the user's intent. Returns
+/// None on timeout, network error, or empty/garbled output — caller falls
+/// back to the deterministic extractor.
+async fn generate_label_via_ollama(client: &Client, prompt: &str) -> Option<String> {
+    let truncated: String = prompt.chars().take(2000).collect();
+    if truncated.trim().is_empty() {
+        return None;
+    }
+    let body = serde_json::json!({
+        "model": LABEL_MODEL,
+        "messages": [
+            {"role": "system", "content": LABEL_SYSTEM_PROMPT},
+            {"role": "user", "content": truncated},
+        ],
+        "stream": false,
+        "options": {"temperature": 0, "num_predict": 16},
+        "keep_alive": LABEL_KEEP_ALIVE,
+    });
+    let send_fut = client
+        .post(format!("{OLLAMA_HOST}/api/chat"))
+        .json(&body)
+        .send();
+    let resp = match tokio::time::timeout(Duration::from_secs(LABEL_TIMEOUT_SECS), send_fut).await {
+        Ok(Ok(r)) => r,
+        _ => return None,
+    };
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let content = json.pointer("/message/content")?.as_str()?;
+    sanitize_label(content)
+}
+
 /// Pull a short, speakable label out of a free-form user prompt. Strips
 /// leading filler ("okay", "by the way", "so", ...) and returns the first
 /// few content words capped at MAX_LABEL_LEN. Returns None if nothing
@@ -301,9 +430,13 @@ fn extract_short_label(prompt: &str) -> Option<String> {
 /// if available. Falls back to the prior fixed phrasing when no prompt is
 /// known (fresh session, prompt file pruned, etc.).
 fn task_done_text(session_id: &str, project: &str, is_focus: bool) -> String {
-    let label = read_last_prompt(session_id)
-        .as_deref()
-        .and_then(extract_short_label);
+    // Prefer the LLM-generated label written at UserPromptSubmit time; fall
+    // back to the deterministic first-words extractor on the raw prompt.
+    let label = read_last_label(session_id).or_else(|| {
+        read_last_prompt(session_id)
+            .as_deref()
+            .and_then(extract_short_label)
+    });
     match (label, is_focus) {
         (Some(l), true) => format!("\"{l}\" task done."),
         (Some(l), false) => format!("\"{l}\" {project} done."),
@@ -681,8 +814,16 @@ async fn handle_user_prompt_submit(
     }
 
     // Save the prompt so the next Stop event can quote a short label from it.
+    // Then synchronously ask Ollama for a polished 2-4 word label and cache it
+    // alongside the raw prompt; the Stop hook prefers the LLM label and falls
+    // back to the deterministic extractor if Ollama timed out or wasn't reached.
     if let Some(prompt) = event.prompt.as_deref() {
         save_last_prompt(session_id, prompt);
+        if !session_id.is_empty() {
+            if let Some(label) = generate_label_via_ollama(client, prompt).await {
+                save_last_label(session_id, &label);
+            }
+        }
     }
 
     // Notify TTS API: interrupt focus speech + re-queue deferred non-focus items
