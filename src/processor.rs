@@ -16,11 +16,13 @@ use tracing::{debug, info, warn};
 
 use crate::config::OllamaConfig;
 
-const PROMPT_TEMPLATE: &str = r#"Fix this speech transcription. Correct:
-- Grammar and punctuation
-- Misspelled names
-- Technical terms
-- Every sentence must end with a full stop or question mark
+const PROMPT_TEMPLATE: &str = r#"Fix punctuation and capitalization in this speech transcription. Do not remove, rephrase, or add words.
+
+Rules:
+- Preserve EVERY word exactly as spoken, even filler words and repetitions
+- Only add or fix: punctuation, capitalization
+- Fix obvious homophones (their/there, its/it's)
+- Keep domain terms and names verbatim
 
 Output ONLY the corrected text, nothing else.
 
@@ -63,8 +65,8 @@ impl OllamaProcessor {
             "think": false,
             "keep_alive": self.config.keep_alive,
             "options": {
-                "temperature": 0.1,
-                "num_predict": 500
+                "temperature": 0,
+                "num_predict": 1024
             }
         });
 
