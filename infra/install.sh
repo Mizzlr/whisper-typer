@@ -57,17 +57,26 @@ install -m 0755 "$REPO_DIR/target/release/tts-hook"         "$HOME/.local/bin/tt
 install -m 0755 "$REPO_DIR/target/release/voice-journal"    "$HOME/.local/bin/voice-journal"
 echo -e "${GREEN}  Installed to ~/.local/bin/${NC}"
 
-# 5. systemd user service. Substitute __REPO_DIR__ in the unit template
+# 5. systemd user services. Substitute __REPO_DIR__ in unit templates
 # with the actual repo path so the same template works for any user/location.
-echo -e "${YELLOW}[5/5] systemd user service...${NC}"
+echo -e "${YELLOW}[5/5] systemd user services...${NC}"
 mkdir -p "$HOME/.config/systemd/user"
+
 UNIT_DEST="$HOME/.config/systemd/user/whisper-typer-rs.service"
 sed "s|__REPO_DIR__|$REPO_DIR|g" \
     "$INFRA_DIR/systemd/whisper-typer.service" > "$UNIT_DEST"
 chmod 0644 "$UNIT_DEST"
+echo -e "${GREEN}  whisper-typer-rs.service → $UNIT_DEST${NC}"
+
+VJ_DEST="$HOME/.config/systemd/user/voice-journal.service"
+sed "s|__REPO_DIR__|$REPO_DIR|g" \
+    "$INFRA_DIR/systemd/voice-journal.service" > "$VJ_DEST"
+chmod 0644 "$VJ_DEST"
+echo -e "${GREEN}  voice-journal.service     → $VJ_DEST${NC}"
+
 systemctl --user daemon-reload
-systemctl --user enable whisper-typer-rs.service
-echo -e "${GREEN}  Service installed at $UNIT_DEST${NC}"
+systemctl --user enable whisper-typer-rs.service voice-journal.service
+echo -e "${GREEN}  Both services enabled${NC}"
 
 echo
 echo "=== Setup Complete ==="

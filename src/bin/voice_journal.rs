@@ -90,7 +90,7 @@ enum VadMode {
 // regression cases at ~150–250ms steady-state latency.
 const OLLAMA_HOST: &str = "http://127.0.0.1:11434";
 const OLLAMA_MODEL: &str = "granite4.1:3b";
-const OLLAMA_TIMEOUT_SEC: u64 = 8;
+const OLLAMA_TIMEOUT_SEC: u64 = 30;
 const OLLAMA_KEEP_ALIVE_SEC: u64 = 3600;
 
 const LLM_SYSTEM_PROMPT: &str = concat!(

@@ -1,19 +1,22 @@
 [Unit]
 Description=Whisper Typer RS - Speech to Text Dictation (Rust)
 Documentation=https://github.com/Mizzlr/whisper-typer
-After=graphical-session.target
+After=graphical-session.target pipewire.service
 Conflicts=whisper-typer.service code-speaker.service
 
 [Service]
 Type=simple
+# Free GPU memory before allocating Whisper state buffers.
+ExecStartPre=-/usr/local/bin/ollama stop granite4.1:3b
 ExecStart=__REPO_DIR__/target/release/whisper-typer-rs
 WorkingDirectory=__REPO_DIR__
 Restart=on-failure
 RestartSec=5
 
-# ONNX Runtime providers (ort dlopens libonnxruntime_providers_*.so from target/release)
+# Environment for audio
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
-Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release
+# ONNX Runtime CUDA providers; cuDNN 9 from Python venv (nvidia-cudnn-cu12 pip package)
+Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib
 
 StandardOutput=journal
 StandardError=journal

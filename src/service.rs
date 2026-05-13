@@ -242,8 +242,18 @@ impl DictationService {
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Open audio stream (always-on for low latency)
-        self.recorder.open_stream()?;
+        // Open audio stream; retry because PipeWire/WirePlumber may not finish
+        // routing before this service starts, even with After=pipewire.service.
+        for attempt in 1u32..=12 {
+            match self.recorder.open_stream() {
+                Ok(()) => break,
+                Err(e) if attempt < 12 => {
+                    warn!("Audio device not ready (attempt {attempt}/12): {e}. Retrying in 5s...");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
 
         // Create hotkey channel
         let (hotkey_tx, mut hotkey_rx) = mpsc::channel::<HotkeyEvent>(16);

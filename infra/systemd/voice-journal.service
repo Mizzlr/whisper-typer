@@ -1,0 +1,24 @@
+[Unit]
+Description=Voice Journal — Continuous background transcription TUI
+After=whisper-typer-rs.service
+Wants=whisper-typer-rs.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Kill any leftover tmux session from a prior run (tolerate if none exists)
+ExecStartPre=-/usr/bin/tmux kill-session -t voice-journal
+ExecStart=/usr/bin/tmux new-session -d -s voice-journal -x 220 -y 50 '__REPO_DIR__/target/release/voice-journal'
+ExecStop=-/usr/bin/tmux kill-session -t voice-journal
+WorkingDirectory=__REPO_DIR__
+
+# Environment for audio + ONNX CUDA (Silero VAD uses ort)
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib
+Environment=TERM=xterm-256color
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
