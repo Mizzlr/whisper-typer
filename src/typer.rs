@@ -108,11 +108,11 @@ impl TextTyper {
         // X11 connection; at 256 connections xdotool can't open a display at all.
         let _ = Command::new("pkill").args(["-x", "xclip"]).status();
 
-        // Set clipboard with xclip. -loops 1 makes the background owner process
-        // exit after serving exactly one SelectionRequest (the xdotool paste below),
-        // instead of living forever and accumulating X11 connections.
+        // Set clipboard with xclip. pkill above caps us at one live xclip at a
+        // time, so we don't need -loops 1 here (which would cause GNOME's clipboard
+        // manager to consume the single loop before xdotool gets to paste).
         let mut child = Command::new("xclip")
-            .args(["-selection", "clipboard", "-loops", "1"])
+            .args(["-selection", "clipboard"])
             .stdin(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn xclip: {e}"))?;
