@@ -2,6 +2,7 @@
 Description=Whisper Typer RS - Speech to Text Dictation (Rust)
 Documentation=https://github.com/Mizzlr/whisper-typer
 After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
 Conflicts=whisper-typer.service code-speaker.service
 
 [Service]
@@ -16,7 +17,7 @@ RestartSec=5
 # Environment for audio
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 # ONNX Runtime CUDA providers; cuDNN 9 from Python venv (nvidia-cudnn-cu12 pip package)
-Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib
+Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/ollama/mlx_cuda_v13
 
 StandardOutput=journal
 StandardError=journal
@@ -26,4 +27,4 @@ MemoryHigh=10G
 MemoryMax=14G
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

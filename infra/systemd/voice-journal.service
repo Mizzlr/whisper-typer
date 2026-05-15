@@ -1,7 +1,8 @@
 [Unit]
 Description=Voice Journal — Continuous background transcription TUI
-After=whisper-typer-rs.service
+After=graphical-session.target whisper-typer-rs.service
 Wants=whisper-typer-rs.service
+PartOf=graphical-session.target
 
 [Service]
 Type=oneshot
@@ -14,11 +15,11 @@ WorkingDirectory=__REPO_DIR__
 
 # Environment for audio + ONNX CUDA (Silero VAD uses ort)
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
-Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib
+Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/ollama/mlx_cuda_v13
 Environment=TERM=xterm-256color
 
 StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
