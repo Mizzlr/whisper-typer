@@ -6,6 +6,7 @@
 use crate::config::HotkeyConfig;
 use evdev::{Device, EventType, InputEventKind, Key};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -61,18 +62,13 @@ impl HotkeyMonitor {
         }
     }
 
-    /// Find all keyboard input devices.
-    pub fn find_keyboards() -> Vec<Device> {
+    /// Find all keyboard input devices, returning their /dev/input path alongside.
+    pub fn find_keyboards() -> Vec<(PathBuf, Device)> {
         evdev::enumerate()
-            .filter_map(|(_path, device)| {
+            .filter_map(|(path, device)| {
                 let keys = device.supported_keys()?;
                 if keys.contains(Key::KEY_A) && keys.contains(Key::KEY_ENTER) {
-                    info!(
-                        "Found keyboard: {} at {:?}",
-                        device.name().unwrap_or("unknown"),
-                        device.physical_path()
-                    );
-                    Some(device)
+                    Some((path, device))
                 } else {
                     None
                 }
@@ -148,45 +144,62 @@ impl HotkeyMonitor {
         }
     }
 
-    /// Start monitoring all keyboards with auto-reconnect.
+    /// Start monitoring all keyboards with hotplug-aware reconnect.
     ///
-    /// If all device monitors exit (disconnect, evdev stream failure, etc.),
-    /// the watchdog re-enumerates keyboards and reconnects after a brief delay.
-    /// This prevents permanent hotkey loss after transient system stress.
+    /// Polls /dev/input every 2s for new keyboard devices and spawns a
+    /// per-device monitor task for anything not already tracked. Tolerates
+    /// partial disconnects (e.g. one keyboard goes away while another stays
+    /// connected) — the previous all-or-nothing watchdog could leave the
+    /// system stuck monitoring only the surviving keyboards forever.
     pub async fn run(self) {
+        let tracked: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut warned_empty = false;
+
         loop {
-            let keyboards = Self::find_keyboards();
-            if keyboards.is_empty() {
-                warn!("No keyboards found (are you in the 'input' group?). Retrying in 5s...");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            }
+            interval.tick().await;
 
-            info!("Monitoring {} keyboard(s)", keyboards.len());
+            let mut spawned = 0;
+            for (path, device) in Self::find_keyboards() {
+                {
+                    let t = tracked.lock().unwrap();
+                    if t.contains(&path) {
+                        continue;
+                    }
+                }
 
-            let mut handles = Vec::new();
-            for device in keyboards {
+                let name = device.name().unwrap_or("unknown").to_string();
+                info!("Found keyboard: {name} at {path:?}");
+
+                tracked.lock().unwrap().insert(path.clone());
+
                 let combos = self.combos.clone();
                 let state = Arc::clone(&self.state);
                 let tx = self.tx.clone();
-                handles.push(tokio::spawn(Self::monitor_device(
-                    device, combos, state, tx,
-                )));
+                let tracked_for_task = Arc::clone(&tracked);
+                let task_path = path.clone();
+
+                tokio::spawn(async move {
+                    Self::monitor_device(device, combos, state.clone(), tx).await;
+                    tracked_for_task.lock().unwrap().remove(&task_path);
+                    // Clear cross-device pressed state — a key held during
+                    // disconnect would otherwise stay "pressed" forever.
+                    let mut s = state.lock().unwrap();
+                    s.pressed_keys.clear();
+                    s.hotkey_active = false;
+                });
+                spawned += 1;
             }
 
-            // Wait for all monitors to exit
-            for handle in handles {
-                let _ = handle.await;
+            let active = tracked.lock().unwrap().len();
+            if spawned > 0 {
+                info!("Monitoring {active} keyboard(s) ({spawned} new)");
+                warned_empty = false;
+            } else if active == 0 && !warned_empty {
+                warn!("No keyboards found (are you in the 'input' group?). Polling...");
+                warned_empty = true;
             }
-
-            // All device monitors exited — reset state and reconnect
-            {
-                let mut state = self.state.lock().unwrap();
-                state.pressed_keys.clear();
-                state.hotkey_active = false;
-            }
-            warn!("All keyboard monitors exited — reconnecting in 2s...");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
 }
