@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Local;
+use regex::{Captures, Regex};
 use serde_json::json;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
@@ -149,6 +150,133 @@ fn strip_trailing_hallucination(text: &str) -> &str {
     trimmed
 }
 
+#[derive(Clone, Default)]
+struct VoiceCorrections {
+    replacements: Vec<VoiceReplacement>,
+    protectors: Vec<Regex>,
+}
+
+#[derive(Clone)]
+struct VoiceReplacement {
+    pattern: Regex,
+    replacement: String,
+}
+
+impl VoiceCorrections {
+    fn load(config: &Config) -> Self {
+        if !config.corrections.enabled {
+            return Self::default();
+        }
+
+        let path = expand_home_path(&config.corrections.path);
+        let Ok(contents) = fs::read_to_string(&path) else {
+            debug!(
+                "Voice typing corrections file not loaded: {}",
+                path.display()
+            );
+            return Self::default();
+        };
+
+        let mut corrections = Self::default();
+        for (idx, raw_line) in contents.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let parts = line.splitn(3, '\t').collect::<Vec<_>>();
+            match parts.as_slice() {
+                ["protect", pattern] => match Regex::new(pattern) {
+                    Ok(regex) => corrections.protectors.push(regex),
+                    Err(e) => warn!(
+                        "Invalid voice correction protector at {}:{}: {e}",
+                        path.display(),
+                        idx + 1
+                    ),
+                },
+                ["replace", pattern, replacement] => {
+                    match Regex::new(pattern) {
+                        Ok(regex) => corrections.replacements.push(VoiceReplacement {
+                            pattern: regex,
+                            replacement: (*replacement).to_string(),
+                        }),
+                        Err(e) => warn!(
+                            "Invalid voice correction replacement at {}:{}: {e}",
+                            path.display(),
+                            idx + 1
+                        ),
+                    }
+                }
+                [pattern, replacement] => match Regex::new(pattern) {
+                    Ok(regex) => corrections.replacements.push(VoiceReplacement {
+                        pattern: regex,
+                        replacement: (*replacement).to_string(),
+                    }),
+                    Err(e) => warn!(
+                        "Invalid voice correction replacement at {}:{}: {e}",
+                        path.display(),
+                        idx + 1
+                    ),
+                },
+                _ => warn!(
+                    "Invalid voice correction row at {}:{}: expected 'replace<TAB>regex<TAB>replacement' or 'protect<TAB>regex'",
+                    path.display(),
+                    idx + 1
+                ),
+            }
+        }
+
+        info!(
+            "Loaded {} voice typing correction(s), {} protection rule(s)",
+            corrections.replacements.len(),
+            corrections.protectors.len()
+        );
+        corrections
+    }
+
+    fn apply(&self, text: &str) -> String {
+        let mut corrected = text.to_string();
+        for replacement in &self.replacements {
+            let protected_spans = self.protected_spans(&corrected);
+            corrected = replacement
+                .pattern
+                .replace_all(&corrected, |caps: &Captures<'_>| {
+                    let m = caps.get(0).expect("whole match");
+                    if protected_spans
+                        .iter()
+                        .any(|(start, end)| spans_overlap(m.start(), m.end(), *start, *end))
+                    {
+                        m.as_str().to_string()
+                    } else {
+                        replacement.replacement.clone()
+                    }
+                })
+                .into_owned();
+        }
+        corrected
+    }
+
+    fn protected_spans(&self, text: &str) -> Vec<(usize, usize)> {
+        self.protectors
+            .iter()
+            .flat_map(|regex| regex.find_iter(text).map(|m| (m.start(), m.end())))
+            .collect()
+    }
+}
+
+fn expand_home_path(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn spans_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
+    a_start < b_end && b_start < a_end
+}
+
 pub struct DictationService {
     config: Config,
     state: ServiceState,
@@ -160,6 +288,7 @@ pub struct DictationService {
     recent_transcriptions: Vec<String>,
     voice_gate: VoiceGate,
     tts_cancel_client: reqwest::Client,
+    voice_corrections: VoiceCorrections,
 }
 
 impl DictationService {
@@ -172,6 +301,7 @@ impl DictationService {
         let processor = OllamaProcessor::new(config.ollama.clone());
         let typer = TextTyper::new(&config.typer);
         let voice_gate = VoiceGate::new();
+        let voice_corrections = VoiceCorrections::load(&config);
 
         // Short-timeout client for fire-and-forget TTS cancel calls
         let tts_cancel_client = reqwest::Client::builder()
@@ -190,6 +320,7 @@ impl DictationService {
             recent_transcriptions: Vec::new(),
             voice_gate,
             tts_cancel_client,
+            voice_corrections,
         };
         svc.write_mcp_state();
         svc
@@ -456,15 +587,25 @@ impl DictationService {
         }
 
         // Strip trailing hallucination phrases — common speech artifacts when user ends dictation
-        let raw_clean = strip_trailing_hallucination(&raw_text);
-        let processed_clean = processed_text.as_deref().map(strip_trailing_hallucination);
+        let raw_clean = self
+            .voice_corrections
+            .apply(strip_trailing_hallucination(&raw_text));
+        let processed_clean = processed_text
+            .as_deref()
+            .map(strip_trailing_hallucination)
+            .map(|text| self.voice_corrections.apply(text));
 
         // Build final output
         let final_text = match self.output_mode {
             OutputMode::Whisper => format!("{raw_clean} "),
-            OutputMode::Ollama => format!("{} ", processed_clean.unwrap_or(raw_clean)),
+            OutputMode::Ollama => {
+                format!("{} ", processed_clean.as_deref().unwrap_or(&raw_clean))
+            }
             OutputMode::Both => {
-                format!("{} [{raw_clean}] ", processed_clean.unwrap_or(raw_clean))
+                format!(
+                    "{} [{raw_clean}] ",
+                    processed_clean.as_deref().unwrap_or(&raw_clean)
+                )
             }
         };
 
@@ -521,5 +662,48 @@ impl DictationService {
         self.voice_gate.end_voice_input();
         info!("State: → IDLE");
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::{VoiceCorrections, VoiceReplacement};
+    use regex::Regex;
+
+    #[test]
+    fn applies_replacements() {
+        let corrections = VoiceCorrections {
+            replacements: vec![VoiceReplacement {
+                pattern: Regex::new(r"(?i)\btea\s+two\b").unwrap(),
+                replacement: "T2".into(),
+            }],
+            protectors: vec![],
+        };
+
+        assert_eq!(
+            corrections.apply("Compare tea two against baseline."),
+            "Compare T2 against baseline."
+        );
+    }
+
+    #[test]
+    fn skips_replacements_inside_protected_spans() {
+        let corrections = VoiceCorrections {
+            replacements: vec![VoiceReplacement {
+                pattern: Regex::new(r"(?i)\bthing\b").unwrap(),
+                replacement: "term".into(),
+            }],
+            protectors: vec![Regex::new(r"(?i)\bliteral thing\b").unwrap()],
+        };
+
+        assert_eq!(
+            corrections.apply("Fix thing but keep literal thing."),
+            "Fix term but keep literal thing."
+        );
+    }
+
+    #[test]
+    fn expands_home_paths() {
+        let expanded = super::expand_home_path("~/.config/whisper-typer/corrections.tsv");
+        assert!(expanded.is_absolute());
+    }
 }

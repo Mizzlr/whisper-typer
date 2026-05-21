@@ -34,6 +34,10 @@ ollama:
 typer:
   backend: "xdotool"      # xdotool for X11 (respects keyboard layout)
 
+corrections:
+  enabled: true
+  path: "~/.config/whisper-typer/corrections.tsv"  # Local typo corrections, not committed
+
 feedback:
   notifications: true
   sounds: false

@@ -186,6 +186,22 @@ impl Default for McpConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CorrectionsConfig {
+    pub enabled: bool,
+    pub path: String,
+}
+
+impl Default for CorrectionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: "~/.config/whisper-typer/corrections.tsv".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -199,6 +215,7 @@ pub struct Config {
     pub silence: SilenceConfig,
     pub tts: TTSConfig,
     pub mcp: McpConfig,
+    pub corrections: CorrectionsConfig,
 }
 
 impl Config {
