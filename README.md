@@ -156,7 +156,7 @@ Per-session state files live under `~/.tts-hook-history/`:
 
 ## Voice Journal
 
-`voice-journal` is a separate TUI binary tuned for long dictation sessions. It captures audio, runs VAD, sends each utterance to the running service's `/transcribe` endpoint (port 8767, reuses the loaded Whisper model — no second model load), and runs each transcribed chunk through a two-stage hallucination filter. Debug capture is available with `voice-journal --debug` or `WHISPER_VOICE_JOURNAL_DEBUG=1 voice-journal`; it writes sidecars next to the journal: `journal_YYYY-MM-DD_HHMMSS.mic.wav` for the raw mic stream and `journal_YYYY-MM-DD_HHMMSS.vad.csv` for RMS, Silero probability, threshold, voiced decision, capture state, and utterance events.
+`voice-journal` is a separate recorder tuned for long dictation sessions. It captures audio, runs VAD, sends each utterance to the running service's `/transcribe` endpoint (port 8767, reuses the loaded Whisper model — no second model load), and runs each transcribed chunk through a two-stage hallucination filter. Running `voice-journal` manually opens the TUI; the systemd service runs `voice-journal --headless` as a normal long-lived background process. Debug capture is available with `voice-journal --debug` or `WHISPER_VOICE_JOURNAL_DEBUG=1 voice-journal`; it writes sidecars next to the journal: `journal_YYYY-MM-DD_HHMMSS.mic.wav` for the raw mic stream and `journal_YYYY-MM-DD_HHMMSS.vad.csv` for RMS, Silero probability, threshold, voiced decision, capture state, and utterance events.
 
 **VAD (voice activity detection)**
 

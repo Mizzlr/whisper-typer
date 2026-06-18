@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::history::{self, TranscriptionRecord};
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
-use crate::processor::OllamaProcessor;
+use crate::processor::{is_pathological_stutter, OllamaProcessor};
 use crate::recorder::AudioRecorder;
 use crate::transcriber::WhisperTranscriber;
 use crate::typer::TextTyper;
@@ -595,16 +595,23 @@ impl DictationService {
             .map(strip_trailing_hallucination)
             .map(|text| self.voice_corrections.apply(text));
 
+        let selected_text = processed_clean.as_deref().unwrap_or(&raw_clean);
+        if is_pathological_stutter(selected_text) {
+            warn!("Dropping dictation with repeated stutter text: '{selected_text}'");
+            self.transition_to_idle();
+            return;
+        }
+
         // Build final output
         let final_text = match self.output_mode {
             OutputMode::Whisper => format!("{raw_clean} "),
             OutputMode::Ollama => {
-                format!("{} ", processed_clean.as_deref().unwrap_or(&raw_clean))
+                format!("{selected_text} ")
             }
             OutputMode::Both => {
                 format!(
                     "{} [{raw_clean}] ",
-                    processed_clean.as_deref().unwrap_or(&raw_clean)
+                    selected_text
                 )
             }
         };

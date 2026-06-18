@@ -5,13 +5,11 @@ Wants=whisper-typer-rs.service
 PartOf=graphical-session.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-# Kill any leftover tmux session from a prior run (tolerate if none exists)
-ExecStartPre=-/usr/bin/tmux kill-session -t voice-journal
-ExecStart=/usr/bin/tmux new-session -d -s voice-journal -x 220 -y 50 '__REPO_DIR__/target/release/voice-journal'
-ExecStop=-/usr/bin/tmux kill-session -t voice-journal
+Type=simple
+ExecStart=__REPO_DIR__/target/release/voice-journal --headless
 WorkingDirectory=__REPO_DIR__
+Restart=on-failure
+RestartSec=5
 
 # Environment for audio + ONNX CUDA (Silero VAD uses ort)
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus

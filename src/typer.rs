@@ -3,7 +3,7 @@
 //! Sets clipboard with arboard, then simulates Ctrl+Shift+V with enigo.
 //! Falls back to xdotool + xclip if enigo fails.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -104,16 +104,19 @@ impl TextTyper {
     }
 
     fn type_with_xdotool(&self, text: &str) -> Result<(), String> {
-        // Kill any orphaned xclip from a prior failed paste — each one holds an
-        // X11 connection; at 256 connections xdotool can't open a display at all.
-        let _ = Command::new("pkill").args(["-x", "xclip"]).status();
+        Self::clear_xclip_owners();
 
-        // Set clipboard with xclip. pkill above caps us at one live xclip at a
-        // time, so we don't need -loops 1 here (which would cause GNOME's clipboard
-        // manager to consume the single loop before xdotool gets to paste).
+        // xclip forks a selection owner process after stdin closes. Use the
+        // default (unlimited) loop count so the owner PERSISTS and keeps serving
+        // the clipboard until the next dictation's clear_xclip_owners() replaces
+        // it. A finite -loops N is fatal here: our wait_for_clipboard_text()
+        // verification reads the selection several times, exhausting the loops,
+        // so xclip exits and the clipboard goes empty before xdotool can paste
+        // (and stays empty, breaking later manual paste into other apps). The
+        // pkill guard in clear_xclip_owners() still caps us at one live xclip.
         let mut child = Command::new("xclip")
             .args(["-selection", "clipboard"])
-            .stdin(std::process::Stdio::piped())
+            .stdin(Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn xclip: {e}"))?;
 
@@ -126,8 +129,7 @@ impl TextTyper {
         }
         child.wait().map_err(|e| format!("xclip failed: {e}"))?;
 
-        // Small delay for clipboard sync
-        thread::sleep(Duration::from_millis(10));
+        Self::wait_for_clipboard_text(text)?;
 
         // Paste with xdotool
         let status = Command::new("xdotool")
@@ -141,5 +143,45 @@ impl TextTyper {
 
         debug!("Typed via xdotool clipboard paste");
         Ok(())
+    }
+
+    fn clear_xclip_owners() {
+        let _ = Command::new("pkill").args(["-x", "xclip"]).status();
+
+        for _ in 0..20 {
+            let has_xclip = Command::new("pgrep")
+                .args(["-x", "xclip"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+
+            if !has_xclip {
+                return;
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        warn!("Timed out waiting for old xclip clipboard owner to exit");
+    }
+
+    fn wait_for_clipboard_text(text: &str) -> Result<(), String> {
+        for _ in 0..20 {
+            match Command::new("xclip")
+                .args(["-selection", "clipboard", "-out"])
+                .output()
+            {
+                Ok(output) if output.status.success() && output.stdout == text.as_bytes() => {
+                    return Ok(());
+                }
+                Ok(_) | Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        Err("Timed out waiting for clipboard to contain new text".to_string())
     }
 }

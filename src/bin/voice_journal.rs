@@ -4,7 +4,7 @@ use std::io::{self, BufWriter, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -127,7 +127,10 @@ const FEW_SHOT: &[(&str, &str)] = &[
         "Astraline, the Quintan, Aston, Ackoned down. Astralane, the Quantone.",
         "[HALLUCINATION]",
     ),
-    ("Astralane, Quantone. Astralane, Quantone.", "[HALLUCINATION]"),
+    (
+        "Astralane, Quantone. Astralane, Quantone.",
+        "[HALLUCINATION]",
+    ),
     (
         "I'm here. I'm here. I'm here. I'm here. Come here. Come here.",
         "[HALLUCINATION]",
@@ -260,7 +263,10 @@ fn open_or_bootstrap(path: &Path, header: &str) -> io::Result<File> {
 }
 
 fn journal_header() -> String {
-    format!("# Voice Journal\n\nStarted: {}\n\n", Local::now().to_rfc3339())
+    format!(
+        "# Voice Journal\n\nStarted: {}\n\n",
+        Local::now().to_rfc3339()
+    )
 }
 
 fn unfiltered_header() -> String {
@@ -358,8 +364,23 @@ fn debug_paths_for_session(journal_path: &PathBuf) -> io::Result<(PathBuf, PathB
 }
 
 fn debug_enabled() -> bool {
-    let cli_enabled = std::env::args().skip(1).any(|arg| arg == "--debug" || arg == "-d");
+    let cli_enabled = std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--debug" || arg == "-d");
     let env_enabled = std::env::var("WHISPER_VOICE_JOURNAL_DEBUG")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    cli_enabled || env_enabled
+}
+
+fn headless_enabled() -> bool {
+    let cli_enabled = std::env::args().skip(1).any(|arg| arg == "--headless");
+    let env_enabled = std::env::var("WHISPER_VOICE_JOURNAL_HEADLESS")
         .map(|value| {
             matches!(
                 value.to_ascii_lowercase().as_str(),
@@ -586,10 +607,12 @@ impl OllamaFilter {
             .build()
         {
             Ok(c) => c,
-            Err(_) => return Self {
-                enabled: false,
-                client: reqwest::blocking::Client::new(),
-            },
+            Err(_) => {
+                return Self {
+                    enabled: false,
+                    client: reqwest::blocking::Client::new(),
+                }
+            }
         };
         let url = format!("{OLLAMA_HOST}/api/tags");
         let enabled = client
@@ -636,9 +659,8 @@ impl OllamaFilter {
         let data: serde_json::Value = resp.json().ok()?;
         let content = data["message"]["content"].as_str()?.trim();
         let lc = content.to_lowercase();
-        let is_hall = content.is_empty()
-            || lc == "[hallucination]"
-            || lc.starts_with("[hallucination]");
+        let is_hall =
+            content.is_empty() || lc == "[hallucination]" || lc.starts_with("[hallucination]");
         Some(is_hall)
     }
 }
@@ -921,8 +943,7 @@ fn start_capture(
                         frame_buf.extend_from_slice(data);
                         let mut callback_voiced = false;
                         while frame_buf.len() >= vad::FRAME_SAMPLES {
-                            let frame: Vec<f32> =
-                                frame_buf.drain(..vad::FRAME_SAMPLES).collect();
+                            let frame: Vec<f32> = frame_buf.drain(..vad::FRAME_SAMPLES).collect();
                             match detector.predict(&frame) {
                                 Ok(p) => {
                                     callback_silero_prob = Some(
@@ -1007,8 +1028,7 @@ fn start_capture(
                 // [filtered]/[dictated] pairs and contends for the GPU.
                 let last_release = last_hotkey_release_ms.load(Ordering::Relaxed);
                 let in_dictation_window = hotkey_held.load(Ordering::Relaxed)
-                    || (last_release > 0
-                        && now_ms.saturating_sub(last_release) < HOTKEY_GRACE_MS);
+                    || (last_release > 0 && now_ms.saturating_sub(last_release) < HOTKEY_GRACE_MS);
                 let voiced = if in_dictation_window {
                     if voiced {
                         dictation_skipped.fetch_add(1, Ordering::Relaxed);
@@ -1043,8 +1063,7 @@ fn start_capture(
                     transitions.fetch_add(1, Ordering::Relaxed);
                 }
                 if voiced {
-                    voiced_run_samples = voiced_run_samples
-                        .saturating_add(data.len() as u64);
+                    voiced_run_samples = voiced_run_samples.saturating_add(data.len() as u64);
                 } else {
                     if prev_voiced && voiced_run_samples > 0 {
                         let run_ms = voiced_run_samples * 1000 / SAMPLE_RATE as u64;
@@ -1065,8 +1084,7 @@ fn start_capture(
                     utterance.extend_from_slice(data);
                     if voiced {
                         silence_run_samples = 0;
-                        voiced_samples_in_utt =
-                            voiced_samples_in_utt.saturating_add(data.len());
+                        voiced_samples_in_utt = voiced_samples_in_utt.saturating_add(data.len());
                     } else {
                         silence_run_samples = silence_run_samples.saturating_add(data.len());
                     }
@@ -1228,8 +1246,7 @@ fn spawn_dictation_tailer(line_tx: Sender<String>) {
             if !new_lines.is_empty() {
                 let (journal_path, unfiltered_path) = output_paths_for_today();
                 let mut journal = open_or_bootstrap(&journal_path, &journal_header()).ok();
-                let mut unfiltered =
-                    open_or_bootstrap(&unfiltered_path, &unfiltered_header()).ok();
+                let mut unfiltered = open_or_bootstrap(&unfiltered_path, &unfiltered_header()).ok();
                 for raw in new_lines {
                     let entry: DictationEntry = match serde_json::from_str(&raw) {
                         Ok(e) => e,
@@ -1422,8 +1439,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let out = output_file_for_session()?;
         let (debug_wav, debug_csv) = debug_paths_for_session(&out)?;
         let recorder = Arc::new(Mutex::new(VadDebugRecorder::create(
-            &debug_wav,
-            &debug_csv,
+            &debug_wav, &debug_csv,
         )?));
         (
             Some(recorder),
@@ -1509,6 +1525,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         llm_filter,
     );
     spawn_dictation_tailer(line_tx);
+
+    if headless_enabled() {
+        eprintln!("Voice Journal running headless");
+        loop {
+            match line_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("voice journal output channel disconnected".into());
+                }
+            }
+        }
+    }
 
     enable_raw_mode()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;

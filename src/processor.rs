@@ -30,8 +30,29 @@ Text: {text}
 
 Corrected:"#;
 
+const RETRY_PROMPT_TEMPLATE: &str = r#"Retry the correction from the ORIGINAL transcription below.
+
+Your previous answer had repeated stutter words or phrases. Do not introduce any repeated words or phrases that are not present in the original.
+
+Rules:
+- Preserve EVERY original word exactly as spoken
+- Only add or fix: punctuation, capitalization
+- Fix obvious homophones (their/there, its/it's)
+- Keep domain terms and names verbatim
+- Output ONLY the corrected text, nothing else
+
+Original transcription: {text}
+
+Corrected:"#;
+
 const AUDIO_PROMPT: &str =
     "Transcribe this audio word for word. Output ONLY the transcription, nothing else.";
+
+const AUDIO_RETRY_PROMPT: &str = concat!(
+    "Transcribe this audio word for word. Your previous answer had repeated stutter words ",
+    "or phrases. Do not introduce repeated words or phrases. Output ONLY the transcription, ",
+    "nothing else."
+);
 
 pub struct OllamaProcessor {
     config: OllamaConfig,
@@ -58,6 +79,29 @@ impl OllamaProcessor {
         let prompt = PROMPT_TEMPLATE.replace("{text}", text);
         debug!("Sending to Ollama model '{}': {}", self.config.model, text);
 
+        let Some(result) = self.generate(&prompt, "Ollama request").await else {
+            return text.to_string();
+        };
+
+        if ollama_output_has_stutter(text, &result) {
+            warn!("Ollama output had repeated stutter text; retrying once");
+            let retry_prompt = RETRY_PROMPT_TEMPLATE.replace("{text}", text);
+            let Some(retry) = self.generate(&retry_prompt, "Ollama retry request").await else {
+                return text.to_string();
+            };
+
+            if ollama_output_has_stutter(text, &retry) {
+                warn!("Ollama retry still had repeated stutter text, using original text");
+                text.to_string()
+            } else {
+                retry
+            }
+        } else {
+            result
+        }
+    }
+
+    async fn generate(&self, prompt: &str, label: &str) -> Option<String> {
         let body = json!({
             "model": self.config.model,
             "prompt": prompt,
@@ -76,28 +120,28 @@ impl OllamaProcessor {
             Ok(resp) => {
                 if !resp.status().is_success() {
                     warn!("Ollama returned status {}", resp.status());
-                    return text.to_string();
+                    return None;
                 }
                 match resp.json::<serde_json::Value>().await {
                     Ok(data) => {
                         let result = data["response"].as_str().unwrap_or("").trim().to_string();
                         if result.is_empty() {
-                            warn!("Ollama returned empty response, using original text");
-                            text.to_string()
+                            warn!("Ollama returned empty response");
+                            None
                         } else {
                             debug!("Ollama output: '{result}'");
-                            result
+                            Some(result)
                         }
                     }
                     Err(e) => {
                         warn!("Failed to parse Ollama response: {e}");
-                        text.to_string()
+                        None
                     }
                 }
             }
             Err(e) => {
-                self.log_request_error(&e, "Ollama request");
-                text.to_string()
+                self.log_request_error(&e, label);
+                None
             }
         }
     }
@@ -122,9 +166,35 @@ impl OllamaProcessor {
             self.config.model
         );
 
-        let prompt = AUDIO_PROMPT.to_string();
-
         // Use /api/chat with multimodal message (audio sent via images field)
+        let Some(result) = self
+            .chat_audio(&audio_b64, AUDIO_PROMPT, "Ollama audio request")
+            .await
+        else {
+            return None;
+        };
+
+        if is_pathological_stutter(&result) {
+            warn!("Ollama audio output had repeated stutter text; retrying once");
+            let Some(retry) = self
+                .chat_audio(&audio_b64, AUDIO_RETRY_PROMPT, "Ollama audio retry request")
+                .await
+            else {
+                return None;
+            };
+
+            if is_pathological_stutter(&retry) {
+                warn!("Ollama audio retry still had repeated stutter text; dropping utterance");
+                None
+            } else {
+                Some(retry)
+            }
+        } else {
+            Some(result)
+        }
+    }
+
+    async fn chat_audio(&self, audio_b64: &str, prompt: &str, label: &str) -> Option<String> {
         let body = json!({
             "model": self.config.model,
             "messages": [{
@@ -171,7 +241,7 @@ impl OllamaProcessor {
                 }
             }
             Err(e) => {
-                self.log_request_error(&e, "Ollama audio request");
+                self.log_request_error(&e, label);
                 None
             }
         }
@@ -186,6 +256,102 @@ impl OllamaProcessor {
             warn!("{label} failed: {e}");
         }
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RepetitionStats {
+    max_word_run: usize,
+    max_phrase_repeats: usize,
+}
+
+fn ollama_output_has_stutter(original: &str, candidate: &str) -> bool {
+    let candidate_stats = repetition_stats(candidate);
+    if stats_are_pathological(&candidate_stats) {
+        return true;
+    }
+
+    let original_stats = repetition_stats(original);
+    (candidate_stats.max_word_run >= 3
+        && candidate_stats.max_word_run > original_stats.max_word_run)
+        || (candidate_stats.max_phrase_repeats >= 3
+            && candidate_stats.max_phrase_repeats > original_stats.max_phrase_repeats)
+}
+
+pub(crate) fn is_pathological_stutter(text: &str) -> bool {
+    stats_are_pathological(&repetition_stats(text))
+}
+
+fn stats_are_pathological(stats: &RepetitionStats) -> bool {
+    stats.max_word_run >= 6 || stats.max_phrase_repeats >= 4
+}
+
+fn repetition_stats(text: &str) -> RepetitionStats {
+    let tokens = normalized_tokens(text);
+    RepetitionStats {
+        max_word_run: max_word_run(&tokens),
+        max_phrase_repeats: max_phrase_repeats(&tokens),
+    }
+}
+
+fn normalized_tokens(text: &str) -> Vec<String> {
+    let mut normalized = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_alphanumeric() || ch == '\'' {
+            normalized.extend(ch.to_lowercase());
+        } else {
+            normalized.push(' ');
+        }
+    }
+
+    normalized
+        .split_whitespace()
+        .map(|token| token.trim_matches('\''))
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn max_word_run(tokens: &[String]) -> usize {
+    let mut max_run = 0;
+    let mut current_run = 0;
+    let mut previous = "";
+
+    for token in tokens {
+        if token == previous {
+            current_run += 1;
+        } else {
+            previous = token;
+            current_run = 1;
+        }
+        max_run = max_run.max(current_run);
+    }
+
+    max_run
+}
+
+fn max_phrase_repeats(tokens: &[String]) -> usize {
+    let mut max_repeats = 0;
+
+    for phrase_len in 2..=4 {
+        if tokens.len() < phrase_len * 2 {
+            continue;
+        }
+
+        for start in 0..=tokens.len() - phrase_len * 2 {
+            let phrase = &tokens[start..start + phrase_len];
+            let mut repeats = 1;
+            let mut next = start + phrase_len;
+
+            while next + phrase_len <= tokens.len() && tokens[next..next + phrase_len] == *phrase {
+                repeats += 1;
+                next += phrase_len;
+            }
+
+            max_repeats = max_repeats.max(repeats);
+        }
+    }
+
+    max_repeats
 }
 
 /// Encode f32 PCM samples as 16-bit WAV in memory.
@@ -207,4 +373,48 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         writer.finalize().expect("WAV finalize failed");
     }
     buf.into_inner()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_pathological_stutter, ollama_output_has_stutter, repetition_stats, RepetitionStats,
+    };
+
+    #[test]
+    fn detects_dash_and_comma_word_stutter() {
+        assert!(is_pathological_stutter(
+            "The source-the-the-the-the-the-the algorithm broke."
+        ));
+        assert!(is_pathological_stutter(
+            "So the, the, the, the, the, the thing failed."
+        ));
+    }
+
+    #[test]
+    fn detects_ollama_added_short_stutter_without_rejecting_original_repetition() {
+        assert!(ollama_output_has_stutter(
+            "The flat table is query perspective.",
+            "The flat table is query perspective perspective perspective."
+        ));
+        assert!(!ollama_output_has_stutter(
+            "The flat table is query perspective perspective perspective.",
+            "The flat table is query perspective perspective perspective."
+        ));
+    }
+
+    #[test]
+    fn detects_repeated_phrase_stutter() {
+        assert_eq!(
+            repetition_stats("source accounting and all that and all that and all that"),
+            RepetitionStats {
+                max_word_run: 1,
+                max_phrase_repeats: 3,
+            }
+        );
+        assert!(ollama_output_has_stutter(
+            "source accounting and all that",
+            "source accounting and all that and all that and all that"
+        ));
+    }
 }
