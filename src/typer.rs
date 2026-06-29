@@ -10,6 +10,8 @@ use tracing::{debug, info, warn};
 
 use crate::config::TyperConfig;
 
+const LIVE_XCLIP_STATES: &str = "R,S,D,T,t,W,I";
+
 pub struct TextTyper {
     backend: TypingBackend,
 }
@@ -149,22 +151,22 @@ impl TextTyper {
         let _ = Command::new("pkill").args(["-x", "xclip"]).status();
 
         for _ in 0..20 {
-            let has_xclip = Command::new("pgrep")
-                .args(["-x", "xclip"])
+            let has_live_xclip = Command::new("pgrep")
+                .args(["-x", "-r", LIVE_XCLIP_STATES, "xclip"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
                 .map(|status| status.success())
                 .unwrap_or(false);
 
-            if !has_xclip {
+            if !has_live_xclip {
                 return;
             }
 
             thread::sleep(Duration::from_millis(10));
         }
 
-        warn!("Timed out waiting for old xclip clipboard owner to exit");
+        warn!("Timed out waiting for old live xclip clipboard owner to exit");
     }
 
     fn wait_for_clipboard_text(text: &str) -> Result<(), String> {
@@ -183,5 +185,22 @@ impl TextTyper {
         }
 
         Err("Timed out waiting for clipboard to contain new text".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LIVE_XCLIP_STATES;
+
+    #[test]
+    fn xclip_cleanup_ignores_zombie_processes() {
+        assert!(!LIVE_XCLIP_STATES.split(',').any(|state| state == "Z"));
+    }
+
+    #[test]
+    fn xclip_cleanup_still_waits_for_running_or_sleeping_processes() {
+        let states: Vec<&str> = LIVE_XCLIP_STATES.split(',').collect();
+        assert!(states.contains(&"R"));
+        assert!(states.contains(&"S"));
     }
 }
