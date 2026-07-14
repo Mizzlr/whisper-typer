@@ -16,13 +16,16 @@ use tracing::{debug, info, warn};
 
 use crate::config::OllamaConfig;
 
-const PROMPT_TEMPLATE: &str = r#"Fix punctuation and capitalization in this speech transcription. Do not remove, rephrase, or add words.
+const PROMPT_TEMPLATE: &str = r#"Fix punctuation, capitalization, and obvious speech-recognition grammar errors in this transcription. The speaker is dictating instructions to the recipient.
 
 Rules:
-- Preserve EVERY word exactly as spoken, even filler words and repetitions
-- Only add or fix: punctuation, capitalization
+- Preserve every word unless a minimal change is required to fix an obvious recognition or grammar error
+- Never polish, summarize, or make optional stylistic rewrites
+- Treat action requests as commands to the recipient, never as actions the speaker will perform
+- If an accidental "I" is the subject of an action request, remove it to restore the outward command: "now I generate the PDF" -> "now generate the PDF"; "then I send the invoice" -> "then send the invoice"
+- Preserve genuine first-person context, including the speaker's intent, opinion, approval, or situation: "I want", "I think", "I agree", "I approve", "from my side", and "let me"
 - Fix obvious homophones (their/there, its/it's)
-- Keep domain terms and names verbatim
+- Preserve meaning, facts, numbers, domain terms, and names. Do not invent information
 
 Output ONLY the corrected text, nothing else.
 
@@ -35,10 +38,13 @@ const RETRY_PROMPT_TEMPLATE: &str = r#"Retry the correction from the ORIGINAL tr
 Your previous answer had repeated stutter words or phrases. Do not introduce any repeated words or phrases that are not present in the original.
 
 Rules:
-- Preserve EVERY original word exactly as spoken
-- Only add or fix: punctuation, capitalization
+- Preserve every word unless a minimal change is required to fix an obvious recognition or grammar error
+- Never polish, summarize, or make optional stylistic rewrites
+- Treat action requests as commands to the recipient, never as actions the speaker will perform
+- If an accidental "I" is the subject of an action request, remove it to restore the outward command: "now I generate the PDF" -> "now generate the PDF"; "then I send the invoice" -> "then send the invoice"
+- Preserve genuine first-person context, including the speaker's intent, opinion, approval, or situation: "I want", "I think", "I agree", "I approve", "from my side", and "let me"
 - Fix obvious homophones (their/there, its/it's)
-- Keep domain terms and names verbatim
+- Preserve meaning, facts, numbers, domain terms, and names. Do not invent information
 - Output ONLY the corrected text, nothing else
 
 Original transcription: {text}
