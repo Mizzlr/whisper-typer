@@ -20,25 +20,38 @@ This repo builds four binaries from one Rust package:
 | `voice-journal` | TUI for personal voice journaling. Captures audio, runs VAD, transcribes via the running service's `/transcribe` endpoint, applies regex + LLM hallucination filtering, appends to `~/voice-journal/journal_YYYY-MM-DD.md`. |
 | `whisper-benchmark` | Reports p50/p95 latency and correction fallback counts from recent local history. |
 
-## Architecture
+## Runtime architecture
 
 ```
-                      ┌──────────────────┐
-   Hotkey  ─evdev──▶  │                  │
-   (Win+Alt etc.)     │  whisper-typer-rs│ ──▶ Whisper (CUDA, distil-large-v3)
-                      │   state machine  │
-   Claude Code ──┐    │   IDLE→REC→PROC  │ ──▶ Ollama /api/generate (granite4.1:3b)
-   (MCP HTTP)    │    │                  │
-                 ├──▶ │  ┌─────────────┐ │ ──▶ Typer (xdotool+xclip / enigo)
-   Voice Journal │    │  │ MCP server  │ │
-   (HTTP)        │    │  │ port 8766   │ │
-                 │    │  └─────────────┘ │
-                 │    │  ┌─────────────┐ │
-   Claude Code ──┘    │  │ TTS API     │ │ ──▶ Kokoro ONNX → rodio playback
-   (tts-hook bin)     │  │ port 8767   │ │
-                      │  └─────────────┘ │
-                      └──────────────────┘
+ Global hotkey (evdev)
+          │ press/release
+          ▼
+ ┌────────────────────── whisper-typer-rs ──────────────────────┐
+ │ recorder → Whisper ASR → corrections → output-mode selection │
+ │                                      │                       │
+ │                                      ▼                       │
+ │                         focused-window paste                 │
+ │                         (xdotool+xclip / enigo)               │
+ │                                                              │
+ │ MCP server :8766                 Local HTTP API :8767         │
+ │ runtime controls + reports       TTS queue + /transcribe      │
+ └──────────────┬───────────────────────────────┬────────────────┘
+                │                               │
+     Claude Code / MCP             ┌────────────┴─────────────┐
+                                   │                          │
+                           tts-hook binary            voice-journal
+                                   │                  bounded queue
+                                   ▼                          │
+                         Kokoro → rodio              daily Markdown
 ```
+
+The service loads one Whisper model and shares it with the dictation loop and
+the loopback `/transcribe` endpoint. `voice-journal` therefore does not load a
+second Whisper model. MCP tools use shared `RuntimeSettings`; TTS-related MCP
+tools proxy to the local API on port 8767. Both listeners bind to loopback.
+
+See [the architecture notes](docs/ARCHITECTURE.md) for reliability boundaries,
+runtime data locations, and the components that require manual desktop testing.
 
 ## Requirements
 
@@ -49,8 +62,9 @@ This repo builds four binaries from one Rust package:
   `libxdo-dev`, and `pkg-config` on Debian/Ubuntu)
 - Optional but recommended: NVIDIA CUDA and cuDNN for low-latency Whisper
 
-Whisper, Kokoro, and Silero model files are not committed to this repository.
-Review the paths in `config.example.yaml` before installing.
+Whisper, Kokoro, and Silero model weights are not committed to this repository.
+Kokoro tokenizer metadata is tracked under `models/`; review the remaining
+paths in `config.example.yaml` before installing.
 
 ## Installation
 
@@ -229,42 +243,72 @@ Flicker: 268 (15.6/min) | voiced: 0ms (max 3413ms) | gated: 3000 | dropped low-v
 
 When the `whisper-typer-rs` service is running, voice-journal tails its history file at `~/.whisper-typer-history/YYYY-MM-DD.jsonl` and injects each new dictation into both the live TUI (cyan `[dictated]` line) and the journal + unfiltered files. This means dictations performed via the global hotkey appear in the same daily journal alongside ambient capture — single source of truth for "what was said today." The integration is one-way (read-only on whisper-typer's side) and falls back silently if the file or service isn't present.
 
-## Layout
+## Repository structure
+
+The Rust package groups implementation files by responsibility while preserving
+the original public module names through re-exports in `lib.rs`. That keeps the
+organization visible on GitHub without forcing binaries or integrations to
+change imports.
 
 ```
-src/
-├── lib.rs                   # shared modules for all binaries
-├── main.rs                  # service entry point
-├── service.rs               # state machine, voice gate
-├── hotkey.rs                # evdev monitoring
-├── recorder.rs              # cpal audio capture
-├── transcriber.rs           # whisper-rs ASR
-├── processor.rs             # Ollama grammar correction
-├── typer.rs                 # arboard + enigo paste
-├── mcp_server.rs            # rmcp HTTP server (port 8766)
-├── history.rs               # JSONL transcription history
-├── config.rs                # YAML loader
-├── runtime_settings.rs      # live MCP/service settings + atomic persistence
-├── code_speaker/            # native Kokoro TTS
-│   ├── mod.rs
-│   ├── tts.rs               # ONNX inference + rodio playback
-│   └── api.rs               # axum HTTP API (port 8767)
-└── bin/
-    ├── tts_hook.rs          # Claude Code lifecycle listener
-    ├── voice_journal.rs     # voice journal TUI
-    └── benchmark.rs         # history latency summary
-
-infra/
-├── install.sh               # one-shot setup script
-├── systemd/
-│   ├── whisper-typer.service
-│   └── voice-journal.service
-└── udev/
-    └── 99-uinput.rules
-
-models/                      # Whisper, Kokoro, Silero-VAD model files (gitignored)
-config.yaml                  # runtime configuration
+whisper-typer/
+├── src/
+│   ├── main.rs                 # daemon startup and component wiring
+│   ├── lib.rs                  # shared module exports for all binaries
+│   ├── config.rs               # YAML loading, defaults, validation
+│   ├── dictation/
+│   │   ├── mod.rs              # dictation module boundary
+│   │   ├── service.rs          # state machine and voice gate
+│   │   ├── hotkey.rs           # evdev monitoring and reconnects
+│   │   ├── recorder.rs         # cpal microphone capture
+│   │   └── typer.rs            # focused-window clipboard delivery
+│   ├── speech/
+│   │   ├── mod.rs              # speech module boundary
+│   │   ├── transcriber.rs      # shared whisper-rs model and inference
+│   │   ├── vad.rs              # voice-activity helpers
+│   │   └── processor.rs        # correction and safety validation
+│   ├── interfaces/
+│   │   ├── mod.rs              # integration module boundary
+│   │   └── mcp_server.rs       # MCP controls and reports on port 8766
+│   ├── persistence/
+│   │   ├── mod.rs              # persistence module boundary
+│   │   ├── runtime_settings.rs # live controls and atomic persistence
+│   │   └── history.rs          # transcription JSONL and reports
+│   ├── code_speaker/
+│   │   ├── mod.rs              # TTS module exports
+│   │   ├── tts.rs              # Kokoro ONNX inference and playback
+│   │   ├── api.rs              # TTS + transcription API on port 8767
+│   │   └── history.rs          # spoken-event history and reports
+│   └── bin/
+│       ├── tts_hook.rs         # Claude Code lifecycle hook client
+│       ├── voice_journal.rs    # journal TUI/headless recorder
+│       └── benchmark.rs        # local latency summary
+├── infra/
+│   ├── install.sh              # build, deploy, udev, and user services
+│   ├── hooks/tts-hook.sh       # older shell-hook implementation
+│   ├── systemd/                # daemon and journal unit templates
+│   └── udev/99-uinput.rules    # input-device permissions
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── MODEL_RECOMMENDATIONS.md
+│   └── reports/                # dated engineering evaluations
+├── models/tokenizer.json       # tracked Kokoro tokenizer metadata
+├── config.example.yaml         # portable configuration template
+├── config.yaml                 # deployment configuration for this checkout
+├── .mcp.json                   # local MCP connection example
+├── .github/workflows/ci.yml    # tests and strict Clippy
+├── Cargo.toml / Cargo.lock
+├── CONTRIBUTING.md / SECURITY.md / LICENSE
+└── README.md
 ```
+
+Generated model weights, `target/`, local virtual environments, histories, and
+journals are intentionally outside version control.
+
+The reorganization is intentionally structural: public paths such as
+`whisper_typer_rs::history` remain available. The hotkey and typer files were
+moved intact because their press/release and xclip-owner behavior is sensitive
+to functional changes.
 
 ## Common operations
 

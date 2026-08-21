@@ -4,10 +4,11 @@ The service is split into four layers:
 
 1. `main.rs` loads and validates configuration, initializes models, and starts
    HTTP services.
-2. `service.rs` owns the dictation state machine and chooses the text output.
-3. `transcriber.rs` and `processor.rs` perform speech recognition and optional
-   conservative grammar correction.
-4. `typer.rs` delivers final text to the focused application.
+2. `dictation/service.rs` owns the dictation state machine and chooses the text
+   output.
+3. `speech/transcriber.rs` and `speech/processor.rs` perform speech recognition
+   and optional conservative grammar correction.
+4. `dictation/typer.rs` delivers final text to the focused application.
 
 Runtime MCP controls and the dictation loop share `RuntimeSettings`; changing a
 mode takes effect on the next utterance and is atomically persisted. Grammar
@@ -46,6 +47,7 @@ main service's loaded Whisper model through the loopback transcription API.
 ## Change-sensitive paths
 
 Hotkey press/release monitoring and focused-window text delivery are the most
-operationally sensitive components. Changes to `hotkey.rs` or `typer.rs` need
-manual desktop testing in addition to unit and compile checks. The system must
-always keep raw Whisper text as a fallback when optional processing fails.
+operationally sensitive components. Changes to `dictation/hotkey.rs` or
+`dictation/typer.rs` need manual desktop testing in addition to unit and compile
+checks. The system must always keep raw Whisper text as a fallback when optional
+processing fails.
