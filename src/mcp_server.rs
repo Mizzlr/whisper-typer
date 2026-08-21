@@ -6,9 +6,8 @@
 //! - code_speaker_speak, code_speaker_set_voice, code_speaker_enable/disable
 //! - code_speaker_voices, code_speaker_report
 
-use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
@@ -22,48 +21,7 @@ use tracing::{info, warn};
 
 use crate::code_speaker::history as tts_history;
 use crate::history;
-
-/// State file path (shared with service.rs).
-fn state_file() -> PathBuf {
-    dirs::home_dir()
-        .expect("No home directory")
-        .join(".cache/whisper-typer/state.json")
-}
-
-fn read_state() -> serde_json::Value {
-    let path = state_file();
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|contents| serde_json::from_str(&contents).ok())
-        .unwrap_or_else(|| {
-            json!({
-                "output_mode": "ollama_only",
-                "ollama_enabled": true,
-                "recent_transcriptions": []
-            })
-        })
-}
-
-fn write_state(state: &serde_json::Value) {
-    let path = state_file();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Err(e) = fs::write(&path, serde_json::to_string_pretty(state).unwrap()) {
-        warn!("Failed to write MCP state: {e}");
-    }
-}
-
-fn update_state(updates: serde_json::Value) -> serde_json::Value {
-    let mut state = read_state();
-    if let (Some(state_obj), Some(updates_obj)) = (state.as_object_mut(), updates.as_object()) {
-        for (k, v) in updates_obj {
-            state_obj.insert(k.clone(), v.clone());
-        }
-    }
-    write_state(&state);
-    state
-}
+use crate::runtime_settings::{OutputMode, RuntimeSettings};
 
 /// Format the "list" response shared by whisper_get_daily_report and code_speaker_report.
 fn available_dates_text() -> String {
@@ -136,12 +94,13 @@ pub struct ReportRequest {
 pub struct WhisperTyperMcp {
     tts_port: u16,
     http_client: reqwest::Client,
+    runtime_settings: Arc<RuntimeSettings>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl WhisperTyperMcp {
-    pub fn new(tts_port: u16) -> Self {
+    pub fn new(tts_port: u16, runtime_settings: Arc<RuntimeSettings>) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -150,6 +109,7 @@ impl WhisperTyperMcp {
         Self {
             tts_port,
             http_client,
+            runtime_settings,
             tool_router: Self::tool_router(),
         }
     }
@@ -161,12 +121,12 @@ impl WhisperTyperMcp {
         &self,
         Parameters(req): Parameters<SetModeRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let mode_internal = match req.mode.as_str() {
-            "whisper" => "whisper_only",
-            "both" => "both",
-            _ => "ollama_only",
+        let Some(mode) = OutputMode::parse(&req.mode) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Invalid mode; expected ollama, whisper, or both",
+            )]));
         };
-        update_state(json!({ "output_mode": mode_internal }));
+        self.runtime_settings.set_mode(mode);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Output mode set to: {}",
             req.mode
@@ -175,7 +135,7 @@ impl WhisperTyperMcp {
 
     #[tool(description = "Enable Ollama processing for grammar/spelling correction.")]
     async fn whisper_enable_ollama(&self) -> Result<CallToolResult, McpError> {
-        update_state(json!({ "ollama_enabled": true, "output_mode": "ollama_only" }));
+        self.runtime_settings.set_ollama_enabled(true);
         Ok(CallToolResult::success(vec![Content::text(
             "Ollama enabled. Mode set to: ollama",
         )]))
@@ -183,7 +143,7 @@ impl WhisperTyperMcp {
 
     #[tool(description = "Disable Ollama processing, use raw Whisper output only.")]
     async fn whisper_disable_ollama(&self) -> Result<CallToolResult, McpError> {
-        update_state(json!({ "ollama_enabled": false, "output_mode": "whisper_only" }));
+        self.runtime_settings.set_ollama_enabled(false);
         Ok(CallToolResult::success(vec![Content::text(
             "Ollama disabled. Mode set to: whisper",
         )]))
@@ -191,16 +151,10 @@ impl WhisperTyperMcp {
 
     #[tool(description = "Get current WhisperTyper status and configuration.")]
     async fn whisper_get_status(&self) -> Result<CallToolResult, McpError> {
-        let state = read_state();
-        let mode = state["output_mode"]
-            .as_str()
-            .unwrap_or("unknown")
-            .replace('_', " ");
-        let ollama = state["ollama_enabled"].as_bool().unwrap_or(false);
-        let recent_count = state["recent_transcriptions"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
+        let state = self.runtime_settings.snapshot();
+        let mode = state.output_mode.as_str().replace('_', " ");
+        let ollama = state.ollama_enabled;
+        let recent_count = state.recent_transcriptions.len();
 
         let status = format!(
             "WhisperTyper Status:\n- Output Mode: {}\n- Ollama Enabled: {}\n- Recent Transcriptions: {}",
@@ -216,18 +170,15 @@ impl WhisperTyperMcp {
         &self,
         Parameters(req): Parameters<GetRecentRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let state = read_state();
+        let state = self.runtime_settings.snapshot();
         let count = req.count.unwrap_or(5);
-        let recent: Vec<&str> = state["recent_transcriptions"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .rev()
-                    .take(count)
-                    .filter_map(|v| v.as_str())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let recent: Vec<&str> = state
+            .recent_transcriptions
+            .iter()
+            .rev()
+            .take(count)
+            .map(String::as_str)
+            .collect();
 
         if recent.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -391,7 +342,6 @@ impl WhisperTyperMcp {
         let report = format!("{stt_report}\n\n---\n\n{tts_report}");
         Ok(CallToolResult::success(vec![Content::text(report)]))
     }
-
 }
 
 #[tool_handler]
@@ -408,11 +358,11 @@ impl ServerHandler for WhisperTyperMcp {
 }
 
 /// Start the MCP Streamable HTTP server on the given port (runs in background).
-pub async fn start_mcp_server(port: u16, tts_port: u16) {
+pub async fn start_mcp_server(port: u16, tts_port: u16, runtime_settings: Arc<RuntimeSettings>) {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
 
     let service = StreamableHttpService::new(
-        move || Ok(WhisperTyperMcp::new(tts_port)),
+        move || Ok(WhisperTyperMcp::new(tts_port, runtime_settings.clone())),
         LocalSessionManager::default().into(),
         Default::default(),
     );

@@ -37,6 +37,16 @@ pub struct TranscriptionRecord {
     pub output_mode: String,
     pub whisper_latency_ms: i64,
     pub ollama_latency_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_accepted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_fallback_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_load_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_prompt_eval_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_eval_ms: Option<i64>,
     pub typing_latency_ms: i64,
     pub total_latency_ms: i64,
     pub audio_duration_s: f64,
@@ -88,13 +98,15 @@ pub fn load_records(date: &str) -> Vec<TranscriptionRecord> {
         .lines()
         .map_while(Result::ok)
         .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| match serde_json::from_str::<TranscriptionRecord>(line.trim()) {
-            Ok(record) => Some(record),
-            Err(e) => {
-                debug!("Skipping malformed history line: {e}");
-                None
-            }
-        })
+        .filter_map(
+            |line| match serde_json::from_str::<TranscriptionRecord>(line.trim()) {
+                Ok(record) => Some(record),
+                Err(e) => {
+                    debug!("Skipping malformed history line: {e}");
+                    None
+                }
+            },
+        )
         .collect()
 }
 

@@ -9,10 +9,13 @@ Conflicts=whisper-typer.service code-speaker.service
 Type=simple
 # Free GPU memory before allocating Whisper state buffers.
 ExecStartPre=-/usr/local/bin/ollama stop granite4.1:3b
-ExecStart=__REPO_DIR__/target/release/whisper-typer-rs
+ExecStart=%h/.local/bin/whisper-typer-rs
 WorkingDirectory=__REPO_DIR__
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
 
 # Environment for audio
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus

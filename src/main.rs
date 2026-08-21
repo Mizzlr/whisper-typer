@@ -1,21 +1,11 @@
 //! whisper-typer-rs: Speech-to-text dictation service for Linux.
 
-mod code_speaker;
-mod config;
-mod history;
-mod hotkey;
-mod mcp_server;
-mod processor;
-mod recorder;
-mod service;
-mod transcriber;
-mod typer;
-
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use whisper_typer_rs::{code_speaker, config, mcp_server, runtime_settings, service, transcriber};
 
 #[derive(Parser, Debug)]
 #[command(name = "whisper-typer-rs", about = "Speech-to-text dictation service")]
@@ -25,8 +15,8 @@ struct Args {
     config: Option<PathBuf>,
 
     /// Output mode: ollama, whisper, or both
-    #[arg(short, long, default_value = "ollama")]
-    mode: String,
+    #[arg(short, long)]
+    mode: Option<String>,
 
     /// Disable Ollama processing (same as --mode whisper)
     #[arg(long)]
@@ -52,16 +42,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("whisper-typer-rs starting");
 
     // Load config
-    let config = config::Config::load(args.config.as_deref());
+    let config = config::Config::load(args.config.as_deref())?;
     info!("Config loaded: {:?}", config.hotkey);
 
     // Determine output mode
+    let explicit_mode = args
+        .mode
+        .as_deref()
+        .map(|mode| {
+            runtime_settings::OutputMode::parse(mode).ok_or_else(|| {
+                format!("invalid output mode {mode:?}; expected ollama, whisper, or both")
+            })
+        })
+        .transpose()?;
     let output_mode = if args.no_ollama {
-        service::OutputMode::Whisper
+        runtime_settings::OutputMode::Whisper
     } else {
-        service::OutputMode::from_str(&args.mode)
+        explicit_mode.unwrap_or(runtime_settings::OutputMode::Ollama)
     };
     info!("Output mode: {:?}", output_mode);
+
+    let runtime_settings = Arc::new(runtime_settings::RuntimeSettings::load(
+        output_mode,
+        config.ollama.enabled && !args.no_ollama,
+        explicit_mode.is_none() && !args.no_ollama,
+    ));
 
     // Load Whisper model and pre-warm CUDA state.
     // Pre-warming forces whisper_init_state() to allocate GPU buffers NOW,
@@ -82,13 +87,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // keeps a handle for the /transcribe HTTP endpoint while the original
     // moves into DictationService.
     let transcriber_for_http = transcriber.clone();
-    let mut service = service::DictationService::new(config.clone(), transcriber, output_mode);
+    let mut service =
+        service::DictationService::new(config.clone(), transcriber, runtime_settings.clone());
 
     // Start MCP server (background task)
     if config.mcp.enabled {
         let mcp_port = config.mcp.port;
         let tts_port = config.tts.api_port;
-        mcp_server::start_mcp_server(mcp_port, tts_port).await;
+        mcp_server::start_mcp_server(mcp_port, tts_port, runtime_settings).await;
     }
 
     // Start native TTS server (replaces Python code-speaker.service)

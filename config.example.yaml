@@ -1,0 +1,47 @@
+hotkey:
+  combo: [KEY_LEFTMETA, KEY_LEFTALT]
+  alt_combos: []
+
+audio:
+  sample_rate: 16000
+  device_index: null
+  channels: 1
+  chunk_size: 1024
+
+recording:
+  max_duration: 120
+
+whisper:
+  model: "models/ggml-distil-large-v3.bin"
+  device: "cuda"
+
+ollama:
+  enabled: true
+  model: "granite4.1:3b"
+  host: "http://127.0.0.1:11434"
+  keep_alive: 3600
+  skip_threshold: 5
+
+typer:
+  backend: "xdotool"
+
+corrections:
+  enabled: true
+  path: "~/.config/whisper-typer/corrections.tsv"
+
+silence:
+  threshold: 0.01
+  duration: 1.5
+  min_speech_duration: 0.5
+  max_recording_duration: 120
+
+tts:
+  enabled: true
+  voice: "af_bella"
+  speed: 1.0
+  api_port: 8767
+  model_path: ""
+
+mcp:
+  enabled: true
+  port: 8766

@@ -29,7 +29,7 @@ ollama:
   host: "http://127.0.0.1:11434"
   keep_alive: 3600          # Keep model loaded for 1 hour after each request
   skip_threshold: 5
-  audio_mode: false             # Multimodal audio→text via Ollama (skips Whisper). Note: when this fails, the utterance is DROPPED — there is no automatic fallback to Whisper. Keep false unless you have a reason; Whisper + e2b correction is more reliable.
+  audio_mode: false             # Deprecated compatibility key; Whisper is always used for ASR.
 
 typer:
   backend: "xdotool"      # xdotool for X11 (respects keyboard layout)
@@ -38,17 +38,17 @@ corrections:
   enabled: true
   path: "~/.config/whisper-typer/corrections.tsv"  # Local typo corrections, not committed
 
-feedback:
-  notifications: true
+feedback:                       # Deprecated compatibility block; currently ignored.
+  notifications: false
   sounds: false
 
-# Wake-word activation (say "Alexa" to start recording)
+# Deprecated compatibility block; wake-word activation is not implemented.
 wakeword:
-  enabled: true            # Wake-word is enabled
+  enabled: false
   model: "alexa"           # Options: hey_jarvis, alexa, hey_mycroft
   threshold: 0.5           # Detection sensitivity (0.1-0.9)
 
-# Silence detection for auto-stop (used with wake-word)
+# Silence detection for recording auto-stop
 silence:
   threshold: 0.01          # RMS energy threshold
   duration: 1.5            # Seconds of silence to stop
@@ -58,7 +58,7 @@ silence:
 # Code Speaker TTS (Kokoro) for Claude Code events
 tts:
   enabled: true            # Native Rust Kokoro TTS
-  voice: "am_michael"      # Kokoro voice (af_heart, bf_emma, am_adam, etc.)
+  voice: "af_bella"        # Kokoro voice (af_heart, bf_emma, am_adam, etc.)
   speed: 1.0               # Speech speed multiplier
   api_port: 8767           # HTTP API port for hook integration
   model_path: ""           # Path to models/kokoro-v1.0.onnx (empty = auto-detect)

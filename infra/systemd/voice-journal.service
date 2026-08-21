@@ -6,10 +6,13 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=__REPO_DIR__/target/release/voice-journal --headless
+ExecStart=%h/.local/bin/voice-journal --headless
 WorkingDirectory=__REPO_DIR__
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
 
 # Environment for audio + ONNX CUDA (Silero VAD uses ort)
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus

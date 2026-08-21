@@ -14,53 +14,17 @@ use std::time::Instant;
 
 use chrono::Local;
 use regex::{Captures, Regex};
-use serde_json::json;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::history::{self, TranscriptionRecord};
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
-use crate::processor::{is_pathological_stutter, OllamaProcessor};
+use crate::processor::{is_pathological_stutter, CorrectionMetadata, OllamaProcessor};
 use crate::recorder::AudioRecorder;
+use crate::runtime_settings::{OutputMode, RuntimeSettings};
 use crate::transcriber::WhisperTranscriber;
 use crate::typer::TextTyper;
-
-/// MCP state file path.
-fn state_file() -> PathBuf {
-    dirs::home_dir()
-        .expect("No home directory")
-        .join(".cache/whisper-typer/state.json")
-}
-
-/// Output mode: what gets typed into the active window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputMode {
-    /// Only Ollama-corrected text
-    Ollama,
-    /// Only raw Whisper transcription
-    Whisper,
-    /// Corrected text + [raw] in brackets
-    Both,
-}
-
-impl OutputMode {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "whisper" => Self::Whisper,
-            "both" => Self::Both,
-            _ => Self::Ollama,
-        }
-    }
-
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Ollama => "ollama_only",
-            Self::Whisper => "whisper_only",
-            Self::Both => "both",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
@@ -115,6 +79,12 @@ impl VoiceGate {
         self.is_idle.store(true, Ordering::Relaxed);
         self.idle_notify.notify_waiters();
         debug!("Voice gate: opened (TTS may play)");
+    }
+}
+
+impl Default for VoiceGate {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -284,15 +254,18 @@ pub struct DictationService {
     transcriber: WhisperTranscriber,
     processor: OllamaProcessor,
     typer: TextTyper,
-    output_mode: OutputMode,
-    recent_transcriptions: Vec<String>,
+    runtime_settings: Arc<RuntimeSettings>,
     voice_gate: VoiceGate,
     tts_cancel_client: reqwest::Client,
     voice_corrections: VoiceCorrections,
 }
 
 impl DictationService {
-    pub fn new(config: Config, transcriber: WhisperTranscriber, output_mode: OutputMode) -> Self {
+    pub fn new(
+        config: Config,
+        transcriber: WhisperTranscriber,
+        runtime_settings: Arc<RuntimeSettings>,
+    ) -> Self {
         let recorder = AudioRecorder::new(
             config.audio.clone(),
             config.recording.clone(),
@@ -309,21 +282,18 @@ impl DictationService {
             .build()
             .expect("Failed to create TTS cancel client");
 
-        let svc = Self {
+        Self {
             config,
             state: ServiceState::Idle,
             recorder,
             transcriber,
             processor,
             typer,
-            output_mode,
-            recent_transcriptions: Vec::new(),
+            runtime_settings,
             voice_gate,
             tts_cancel_client,
             voice_corrections,
-        };
-        svc.write_mcp_state();
-        svc
+        }
     }
 
     /// Get a clone of the voice gate for sharing with TTS components.
@@ -331,32 +301,9 @@ impl DictationService {
         self.voice_gate.clone()
     }
 
-    /// Write current state to MCP state file for external control.
-    fn write_mcp_state(&self) {
-        let path = state_file();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-
-        let state = json!({
-            "output_mode": self.output_mode.as_str(),
-            "ollama_enabled": self.config.ollama.enabled,
-            "recent_transcriptions": self.recent_transcriptions,
-        });
-
-        if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&state).unwrap()) {
-            warn!("Failed to write MCP state: {e}");
-        }
-    }
-
     /// Add a transcription to the recent list and update state file.
-    fn add_transcription(&mut self, text: &str) {
-        self.recent_transcriptions.push(text.to_string());
-        let len = self.recent_transcriptions.len();
-        if len > 20 {
-            self.recent_transcriptions.drain(..len - 20);
-        }
-        self.write_mcp_state();
+    fn add_transcription(&self, text: &str) {
+        self.runtime_settings.add_transcription(text);
     }
 
     /// Cancel any active TTS playback via HTTP (fire-and-forget).
@@ -397,7 +344,7 @@ impl DictationService {
 
         info!(
             "Service ready — press hotkey to start recording (mode: {:?})",
-            self.output_mode
+            self.runtime_settings.snapshot().output_mode
         );
 
         // Auto-stop poll interval
@@ -475,56 +422,39 @@ impl DictationService {
             samples.len()
         );
 
-        // --- Audio mode: bypass Whisper, send audio directly to Ollama ---
+        let runtime = self.runtime_settings.snapshot();
+        let output_mode = runtime.output_mode;
+
         let (raw_text, t_whisper, t_ollama, processed_text, ollama_text);
-
-        if self.config.ollama.audio_mode && self.config.ollama.enabled {
-            t_whisper = 0.0;
-            let t_ollama_start = Instant::now();
-
-            let sample_rate = self.recorder.sample_rate();
-            match self.processor.process_audio(&samples, sample_rate).await
-            {
-                Some(text) => {
-                    info!("Ollama audio transcribed: \"{}\"", text);
-                    raw_text = text.clone();
-                    processed_text = Some(text.clone());
-                    ollama_text = Some(text);
-                }
-                None => {
-                    warn!("Ollama audio mode failed; dropping utterance (Whisper fallback not implemented for this path)");
-                    self.transition_to_idle();
-                    return;
-                }
-            }
-            t_ollama = t_ollama_start.elapsed().as_secs_f64() * 1000.0;
-        } else {
-            // --- Standard Whisper transcription path ---
+        let mut correction_metadata: Option<CorrectionMetadata> = None;
+        // The deprecated Ollama audio mode intentionally follows this reliable
+        // Whisper path. No utterance may be dropped merely because an
+        // experimental multimodal request failed.
+        {
             let t_whisper_start = Instant::now();
             let transcriber = self.transcriber.clone();
-            raw_text = match tokio::task::spawn_blocking(move || {
-                transcriber.transcribe(&samples, None)
-            })
-            .await
-            {
-                Ok(Ok(result)) => {
-                    info!(
-                        "Transcription ({:.0}ms): \"{}\"",
-                        result.latency_ms, result.text
-                    );
-                    result.text
-                }
-                Ok(Err(e)) => {
-                    warn!("Transcription failed: {e}");
-                    self.transition_to_idle();
-                    return;
-                }
-                Err(e) => {
-                    warn!("Transcription task panicked: {e}");
-                    self.transition_to_idle();
-                    return;
-                }
-            };
+            raw_text =
+                match tokio::task::spawn_blocking(move || transcriber.transcribe(&samples, None))
+                    .await
+                {
+                    Ok(Ok(result)) => {
+                        info!(
+                            "Transcription ({:.0}ms): \"{}\"",
+                            result.latency_ms, result.text
+                        );
+                        result.text
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Transcription failed: {e}");
+                        self.transition_to_idle();
+                        return;
+                    }
+                    Err(e) => {
+                        warn!("Transcription task panicked: {e}");
+                        self.transition_to_idle();
+                        return;
+                    }
+                };
             t_whisper = t_whisper_start.elapsed().as_secs_f64() * 1000.0;
 
             if raw_text.is_empty() {
@@ -569,15 +499,21 @@ impl DictationService {
             let t_ollama_start = Instant::now();
             let word_count = raw_text.split_whitespace().count();
             let skip_threshold = self.config.ollama.skip_threshold;
-            let (pt, ot) = match self.output_mode {
+            let (pt, ot) = match output_mode {
                 OutputMode::Whisper => (None, None),
+                _ if !runtime.ollama_enabled => (Some(raw_text.clone()), None),
                 _ if skip_threshold > 0 && word_count <= skip_threshold => {
                     info!("Skipped Ollama ({word_count} words <= {skip_threshold} threshold)");
                     (Some(raw_text.clone()), None)
                 }
                 OutputMode::Ollama | OutputMode::Both => {
-                    let corrected = self.processor.process(&raw_text).await;
-                    info!("Ollama corrected: \"{}\"", corrected);
+                    let correction = self.processor.process(&raw_text).await;
+                    info!(
+                        "Ollama correction accepted={}: \"{}\"",
+                        correction.metadata.accepted, correction.text
+                    );
+                    let corrected = correction.text;
+                    correction_metadata = Some(correction.metadata);
                     (Some(corrected.clone()), Some(corrected))
                 }
             };
@@ -603,16 +539,13 @@ impl DictationService {
         }
 
         // Build final output
-        let final_text = match self.output_mode {
+        let final_text = match output_mode {
             OutputMode::Whisper => format!("{raw_clean} "),
             OutputMode::Ollama => {
                 format!("{selected_text} ")
             }
             OutputMode::Both => {
-                format!(
-                    "{} [{raw_clean}] ",
-                    selected_text
-                )
+                format!("{} [{raw_clean}] ", selected_text)
             }
         };
 
@@ -641,15 +574,26 @@ impl DictationService {
         let record = TranscriptionRecord {
             timestamp: Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
             whisper_text: raw_text,
-            ollama_text: if t_ollama > 0.0 { ollama_text } else { None },
+            ollama_text,
             final_text: final_text.clone(),
-            output_mode: self.output_mode.as_str().to_string(),
+            output_mode: output_mode.as_str().to_string(),
             whisper_latency_ms: t_whisper as i64,
-            ollama_latency_ms: if t_ollama > 0.0 {
-                Some(t_ollama as i64)
-            } else {
-                None
-            },
+            ollama_latency_ms: correction_metadata.as_ref().map(|_| t_ollama as i64),
+            correction_accepted: correction_metadata
+                .as_ref()
+                .map(|metadata| metadata.accepted),
+            correction_fallback_reason: correction_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.fallback_reason.clone()),
+            ollama_load_ms: correction_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.load_ms),
+            ollama_prompt_eval_ms: correction_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.prompt_eval_ms),
+            ollama_eval_ms: correction_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.eval_ms),
             typing_latency_ms: t_type as i64,
             total_latency_ms: t_total as i64,
             audio_duration_s: (audio_duration * 100.0).round() / 100.0,

@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,9 +24,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
 
-#[path = "../vad.rs"]
-mod vad;
-use vad::SileroVad;
+use whisper_typer_rs::vad::{self, SileroVad};
 
 const TRANSCRIBE_URL: &str = "http://127.0.0.1:8767/transcribe";
 const SAMPLE_RATE: u32 = 16_000;
@@ -192,14 +190,14 @@ fn wav_bytes(samples: &[f32]) -> Result<Vec<u8>, String> {
     Ok(cur.into_inner())
 }
 
-fn transcribe(samples: &[f32]) -> Result<String, String> {
+fn transcribe(client: &reqwest::blocking::Client, samples: &[f32]) -> Result<String, String> {
     let wav = wav_bytes(samples)?;
     let part = reqwest::blocking::multipart::Part::bytes(wav)
         .file_name("chunk.wav")
         .mime_str("audio/wav")
         .map_err(|e| e.to_string())?;
     let form = reqwest::blocking::multipart::Form::new().part("audio", part);
-    let resp = reqwest::blocking::Client::new()
+    let resp = client
         .post(TRANSCRIBE_URL)
         .multipart(form)
         .send()
@@ -348,7 +346,7 @@ impl RotatingJournalWriter {
     }
 }
 
-fn debug_paths_for_session(journal_path: &PathBuf) -> io::Result<(PathBuf, PathBuf)> {
+fn debug_paths_for_session(journal_path: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let parent = journal_path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "journal path has no parent"))?;
@@ -477,7 +475,7 @@ impl VadDebugRecorder {
             row.event
         )?;
         self.callback_index = self.callback_index.saturating_add(1);
-        if self.callback_index % 50 == 0 {
+        if self.callback_index.is_multiple_of(50) {
             let _ = self.csv.flush();
             let _ = self.wav.flush();
         }
@@ -728,9 +726,9 @@ fn load_whisper_combos() -> Vec<HashSet<evdev::Key>> {
 /// fully pressed: while held, `hotkey_held` flips to true; on the transition
 /// back to released, `last_hotkey_release_ms` is stamped so the audio
 /// callback can extend the gate by `HOTKEY_GRACE_MS` after release.
-/// Auto-rediscovers if all watchers exit (device disconnect or transient
-/// kernel hiccup). Permission needs the user in the `input` group, same as
-/// whisper-typer's hotkey monitor.
+/// Discovers new devices continuously and reattaches an individual watcher
+/// after a disconnect or transient kernel hiccup. Permission needs the user
+/// in the `input` group, same as whisper-typer's hotkey monitor.
 fn spawn_keystroke_watcher(
     last_keypress_ms: Arc<AtomicU64>,
     combos: Arc<Vec<HashSet<evdev::Key>>>,
@@ -738,121 +736,135 @@ fn spawn_keystroke_watcher(
     last_hotkey_release_ms: Arc<AtomicU64>,
 ) {
     use evdev::{Device, EventType, InputEventKind, Key};
-    let pressed: Arc<Mutex<HashSet<Key>>> = Arc::new(Mutex::new(HashSet::new()));
+    let pressed: Arc<Mutex<HashMap<PathBuf, HashSet<Key>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let tracked: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
     std::thread::spawn(move || loop {
-        let keyboards: Vec<Device> = evdev::enumerate()
-            .filter_map(|(_, dev)| {
+        let keyboards: Vec<(PathBuf, Device)> = evdev::enumerate()
+            .filter_map(|(path, dev)| {
                 let keys = dev.supported_keys()?;
                 if keys.contains(Key::KEY_A) && keys.contains(Key::KEY_ENTER) {
-                    Some(dev)
+                    Some((path, dev))
                 } else {
                     None
                 }
             })
             .collect();
 
-        if keyboards.is_empty() {
-            // Silent retry — we can't print here without corrupting the TUI's
-            // ratatui output. The user can tell the watcher is alive by
-            // watching the `keystroke suppressed` counter in the TUI.
-            std::thread::sleep(Duration::from_secs(5));
-            continue;
-        }
-
-        let mut handles = Vec::new();
-        for mut dev in keyboards {
+        for (path, mut dev) in keyboards {
+            let newly_tracked = tracked
+                .lock()
+                .map(|mut paths| paths.insert(path.clone()))
+                .unwrap_or(false);
+            if !newly_tracked {
+                continue;
+            }
             let last = last_keypress_ms.clone();
             let combos = combos.clone();
             let pressed = pressed.clone();
+            let tracked = tracked.clone();
             let hotkey_held = hotkey_held.clone();
             let last_release = last_hotkey_release_ms.clone();
-            handles.push(std::thread::spawn(move || loop {
-                match dev.fetch_events() {
-                    Ok(events) => {
-                        let mut had_press = false;
-                        let mut combo_changed = false;
-                        for ev in events {
-                            if ev.event_type() != EventType::KEY {
-                                continue;
-                            }
-                            let key = match ev.kind() {
-                                InputEventKind::Key(k) => k,
-                                _ => continue,
-                            };
-                            match ev.value() {
-                                1 => {
-                                    had_press = true;
-                                    if let Ok(mut p) = pressed.lock() {
-                                        if p.insert(key) {
-                                            combo_changed = true;
+            std::thread::spawn(move || {
+                loop {
+                    match dev.fetch_events() {
+                        Ok(events) => {
+                            let mut had_press = false;
+                            let mut combo_changed = false;
+                            for ev in events {
+                                if ev.event_type() != EventType::KEY {
+                                    continue;
+                                }
+                                let key = match ev.kind() {
+                                    InputEventKind::Key(k) => k,
+                                    _ => continue,
+                                };
+                                match ev.value() {
+                                    1 => {
+                                        had_press = true;
+                                        if let Ok(mut devices) = pressed.lock() {
+                                            if devices.entry(path.clone()).or_default().insert(key)
+                                            {
+                                                combo_changed = true;
+                                            }
                                         }
                                     }
-                                }
-                                2 => {
-                                    had_press = true;
-                                }
-                                0 => {
-                                    if let Ok(mut p) = pressed.lock() {
-                                        if p.remove(&key) {
-                                            combo_changed = true;
+                                    2 => {
+                                        had_press = true;
+                                    }
+                                    0 => {
+                                        if let Ok(mut devices) = pressed.lock() {
+                                            if devices.entry(path.clone()).or_default().remove(&key)
+                                            {
+                                                combo_changed = true;
+                                            }
                                         }
                                     }
+                                    _ => {}
                                 }
-                                _ => {}
+                            }
+                            if combo_changed {
+                                let now_active = pressed
+                                    .lock()
+                                    .map(|devices| {
+                                        let all_pressed = devices
+                                            .values()
+                                            .flat_map(|keys| keys.iter().copied())
+                                            .collect::<HashSet<_>>();
+                                        combos.iter().any(|combo| combo.is_subset(&all_pressed))
+                                    })
+                                    .unwrap_or(false);
+                                let was_active = hotkey_held.swap(now_active, Ordering::Relaxed);
+                                if was_active && !now_active {
+                                    last_release.store(epoch_ms(), Ordering::Relaxed);
+                                }
+                            }
+                            if had_press {
+                                last.store(epoch_ms(), Ordering::Relaxed);
+                            } else {
+                                std::thread::sleep(Duration::from_millis(8));
                             }
                         }
-                        if combo_changed {
-                            let now_active = pressed
-                                .lock()
-                                .map(|p| combos.iter().any(|c| c.is_subset(&p)))
-                                .unwrap_or(false);
-                            let was_active = hotkey_held.swap(now_active, Ordering::Relaxed);
-                            if was_active && !now_active {
-                                let now_ms = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .map(|d| d.as_millis() as u64)
-                                    .unwrap_or(0);
-                                last_release.store(now_ms, Ordering::Relaxed);
-                            }
-                        }
-                        if had_press {
-                            let now_ms = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_millis() as u64)
-                                .unwrap_or(0);
-                            last.store(now_ms, Ordering::Relaxed);
-                        } else {
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(8));
                         }
+                        Err(_) => break,
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(8));
-                    }
-                    Err(_) => break,
                 }
-            }));
+
+                if let Ok(mut devices) = pressed.lock() {
+                    devices.remove(&path);
+                    let all_pressed = devices
+                        .values()
+                        .flat_map(|keys| keys.iter().copied())
+                        .collect::<HashSet<_>>();
+                    let now_active = combos.iter().any(|combo| combo.is_subset(&all_pressed));
+                    let was_active = hotkey_held.swap(now_active, Ordering::Relaxed);
+                    if was_active && !now_active {
+                        last_release.store(epoch_ms(), Ordering::Relaxed);
+                    }
+                }
+                if let Ok(mut paths) = tracked.lock() {
+                    paths.remove(&path);
+                }
+            });
         }
-        for h in handles {
-            let _ = h.join();
-        }
-        // All device threads exited (disconnect, suspend) — clear held state
-        // so a stale combo doesn't latch suppression after re-enumeration.
-        if let Ok(mut p) = pressed.lock() {
-            p.clear();
-        }
-        hotkey_held.store(false, Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(2));
     });
 }
 
-fn start_capture(
-    tx: Sender<Vec<f32>>,
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Clone)]
+struct CaptureTelemetry {
     level: Arc<Mutex<f32>>,
     silero_prob: Arc<Mutex<Option<f32>>>,
-    debug_recorder: Option<Arc<Mutex<VadDebugRecorder>>>,
     status: Arc<Mutex<String>>,
     paused: Arc<AtomicBool>,
-    vad_mode: VadMode,
     transitions: Arc<AtomicU64>,
     longest_voiced_ms: Arc<AtomicU64>,
     voiced_run_ms: Arc<AtomicU64>,
@@ -862,7 +874,31 @@ fn start_capture(
     hotkey_held: Arc<AtomicBool>,
     last_hotkey_release_ms: Arc<AtomicU64>,
     dictation_skipped: Arc<AtomicU64>,
+    backpressure_drops: Arc<AtomicU64>,
+}
+
+fn start_capture(
+    tx: SyncSender<Vec<f32>>,
+    debug_recorder: Option<Arc<Mutex<VadDebugRecorder>>>,
+    vad_mode: VadMode,
+    telemetry: CaptureTelemetry,
 ) -> Result<cpal::Stream, String> {
+    let CaptureTelemetry {
+        level,
+        silero_prob,
+        status,
+        paused,
+        transitions,
+        longest_voiced_ms,
+        voiced_run_ms,
+        last_keypress_ms,
+        keystroke_suppressions,
+        low_voiced_drops,
+        hotkey_held,
+        last_hotkey_release_ms,
+        dictation_skipped,
+        backpressure_drops,
+    } = telemetry;
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -1101,7 +1137,11 @@ fn start_capture(
                             } else {
                                 "chunk_sent_silence"
                             };
-                            let _ = tx.send(send_chunk);
+                            if let Err(error) = tx.try_send(send_chunk) {
+                                if matches!(error, TrySendError::Full(_)) {
+                                    backpressure_drops.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         } else {
                             utterance.clear();
                             event = if !has_min_voiced {
@@ -1287,8 +1327,21 @@ fn spawn_transcriber(
     llm_filter: Arc<OllamaFilter>,
 ) {
     std::thread::spawn(move || {
+        let client = match reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(35))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = tx.send(format!(
+                    "[error] failed to create transcription client: {error}"
+                ));
+                return;
+            }
+        };
         for chunk in rx {
-            match transcribe(&chunk) {
+            match transcribe(&client, &chunk) {
                 Ok(text) if !text.trim().is_empty() => {
                     let trimmed = text.trim();
                     let ts = Local::now().format("%H:%M:%S");
@@ -1476,7 +1529,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
+    let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<f32>>(3);
     let (line_tx, line_rx) = mpsc::channel::<String>();
     let level = Arc::new(Mutex::new(0.0f32));
     let silero_prob = Arc::new(Mutex::new(None::<f32>));
@@ -1492,6 +1545,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hotkey_held = Arc::new(AtomicBool::new(false));
     let last_hotkey_release_ms = Arc::new(AtomicU64::new(0));
     let dictation_skipped = Arc::new(AtomicU64::new(0));
+    let backpressure_drops = Arc::new(AtomicU64::new(0));
     let combo_count = whisper_combos.len();
     spawn_keystroke_watcher(
         last_keypress_ms.clone(),
@@ -1501,21 +1555,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let _stream = start_capture(
         audio_tx,
-        level.clone(),
-        silero_prob.clone(),
         debug_recorder,
-        status.clone(),
-        paused.clone(),
         vad_mode,
-        transitions.clone(),
-        longest_voiced_ms.clone(),
-        voiced_run_ms.clone(),
-        last_keypress_ms.clone(),
-        keystroke_suppressions.clone(),
-        low_voiced_drops.clone(),
-        hotkey_held.clone(),
-        last_hotkey_release_ms.clone(),
-        dictation_skipped.clone(),
+        CaptureTelemetry {
+            level: level.clone(),
+            silero_prob: silero_prob.clone(),
+            status: status.clone(),
+            paused: paused.clone(),
+            transitions: transitions.clone(),
+            longest_voiced_ms: longest_voiced_ms.clone(),
+            voiced_run_ms: voiced_run_ms.clone(),
+            last_keypress_ms: last_keypress_ms.clone(),
+            keystroke_suppressions: keystroke_suppressions.clone(),
+            low_voiced_drops: low_voiced_drops.clone(),
+            hotkey_held: hotkey_held.clone(),
+            last_hotkey_release_ms: last_hotkey_release_ms.clone(),
+            dictation_skipped: dictation_skipped.clone(),
+            backpressure_drops: backpressure_drops.clone(),
+        },
     )?;
     spawn_transcriber(
         audio_rx,
@@ -1567,6 +1624,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ks_suppressions = keystroke_suppressions.load(Ordering::Relaxed);
         let lv_drops = low_voiced_drops.load(Ordering::Relaxed);
         let dict_skipped = dictation_skipped.load(Ordering::Relaxed);
+        let queue_drops = backpressure_drops.load(Ordering::Relaxed);
         let dict_active = hotkey_held.load(Ordering::Relaxed);
         terminal.draw(|f| {
             let status_height = if debug_label.is_some() { 11 } else { 10 };
@@ -1611,7 +1669,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .style(Style::default().fg(Color::Green)),
                 Line::from(format!(
-                    "Flicker: {total_transitions} ({transitions_per_min:.1}/min) | voiced: {cur_voiced_ms}ms (max {max_voiced_ms}ms) | gated: {ks_suppressions} | dropped low-voiced: {lv_drops}"
+                    "Flicker: {total_transitions} ({transitions_per_min:.1}/min) | voiced: {cur_voiced_ms}ms (max {max_voiced_ms}ms) | gated: {ks_suppressions} | dropped low-voiced: {lv_drops} | queue drops: {queue_drops}"
                 ))
                 .style(Style::default().fg(Color::Yellow)),
                 Line::from(format!(

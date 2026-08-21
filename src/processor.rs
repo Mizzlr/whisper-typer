@@ -3,20 +3,13 @@
 //! Sends transcribed text to Ollama's /api/generate endpoint for
 //! grammar/spelling fixes. Falls back gracefully if Ollama is unavailable.
 //!
-//! Also supports direct audio-to-text mode via Ollama's multimodal chat API,
-//! bypassing Whisper entirely (requires an audio-capable model like gemma4).
-
-use std::io::Cursor;
-
-use base64::Engine;
-use hound::{SampleFormat, WavSpec, WavWriter};
 use reqwest::Client;
 use serde_json::json;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::config::OllamaConfig;
 
-const PROMPT_TEMPLATE: &str = r#"Fix punctuation, capitalization, and obvious speech-recognition grammar errors in this transcription. The speaker is dictating instructions to the recipient.
+const PROMPT_TEMPLATE: &str = r#"Fix punctuation, capitalization, and obvious speech-recognition grammar errors in the user-provided transcription. The speaker is dictating instructions to the recipient.
 
 Rules:
 - Preserve every word unless a minimal change is required to fix an obvious recognition or grammar error
@@ -27,13 +20,9 @@ Rules:
 - Fix obvious homophones (their/there, its/it's)
 - Preserve meaning, facts, numbers, domain terms, and names. Do not invent information
 
-Output ONLY the corrected text, nothing else.
+Return a JSON object with exactly one string field named corrected_text."#;
 
-Text: {text}
-
-Corrected:"#;
-
-const RETRY_PROMPT_TEMPLATE: &str = r#"Retry the correction from the ORIGINAL transcription below.
+const RETRY_PROMPT_TEMPLATE: &str = r#"Retry correction of the user-provided ORIGINAL transcription.
 
 Your previous answer had repeated stutter words or phrases. Do not introduce any repeated words or phrases that are not present in the original.
 
@@ -45,24 +34,46 @@ Rules:
 - Preserve genuine first-person context, including the speaker's intent, opinion, approval, or situation: "I want", "I think", "I agree", "I approve", "from my side", and "let me"
 - Fix obvious homophones (their/there, its/it's)
 - Preserve meaning, facts, numbers, domain terms, and names. Do not invent information
-- Output ONLY the corrected text, nothing else
+- Return a JSON object with exactly one string field named corrected_text"#;
 
-Original transcription: {text}
-
-Corrected:"#;
-
-const AUDIO_PROMPT: &str =
-    "Transcribe this audio word for word. Output ONLY the transcription, nothing else.";
-
-const AUDIO_RETRY_PROMPT: &str = concat!(
-    "Transcribe this audio word for word. Your previous answer had repeated stutter words ",
-    "or phrases. Do not introduce repeated words or phrases. Output ONLY the transcription, ",
-    "nothing else."
-);
+const PROTECTED_TERMS: &[&str] = &[
+    "Astralane",
+    "ClickHouse",
+    "Pingora",
+    "Hermes",
+    "Dagster",
+    "Helius",
+    "Jito",
+    "Solscan",
+    "Solana",
+    "MEV",
+    "Rust",
+    "Python",
+];
 
 pub struct OllamaProcessor {
     config: OllamaConfig,
     client: Client,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CorrectionMetadata {
+    pub accepted: bool,
+    pub fallback_reason: Option<String>,
+    pub load_ms: Option<i64>,
+    pub prompt_eval_ms: Option<i64>,
+    pub eval_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CorrectionResult {
+    pub text: String,
+    pub metadata: CorrectionMetadata,
+}
+
+struct GeneratedCorrection {
+    text: String,
+    metadata: CorrectionMetadata,
 }
 
 impl OllamaProcessor {
@@ -77,46 +88,76 @@ impl OllamaProcessor {
 
     /// Process text through Ollama for grammar correction.
     /// Returns the original text if Ollama is disabled or unavailable.
-    pub async fn process(&self, text: &str) -> String {
+    pub async fn process(&self, text: &str) -> CorrectionResult {
         if !self.config.enabled || text.trim().is_empty() {
-            return text.to_string();
+            return CorrectionResult {
+                text: text.to_string(),
+                metadata: CorrectionMetadata {
+                    fallback_reason: Some("disabled_or_empty".into()),
+                    ..CorrectionMetadata::default()
+                },
+            };
         }
 
-        let prompt = PROMPT_TEMPLATE.replace("{text}", text);
         debug!("Sending to Ollama model '{}': {}", self.config.model, text);
 
-        let Some(result) = self.generate(&prompt, "Ollama request").await else {
-            return text.to_string();
+        let Some(result) = self.generate(PROMPT_TEMPLATE, text, "Ollama request").await else {
+            return fallback_result(text, "request_failed", None);
         };
 
-        if ollama_output_has_stutter(text, &result) {
-            warn!("Ollama output had repeated stutter text; retrying once");
-            let retry_prompt = RETRY_PROMPT_TEMPLATE.replace("{text}", text);
-            let Some(retry) = self.generate(&retry_prompt, "Ollama retry request").await else {
-                return text.to_string();
-            };
+        match validate_correction(text, &result.text) {
+            Ok(()) => CorrectionResult {
+                text: result.text,
+                metadata: CorrectionMetadata {
+                    accepted: true,
+                    ..result.metadata
+                },
+            },
+            Err(reason) => {
+                warn!("Rejected Ollama correction ({reason}); retrying once");
+                let Some(retry) = self
+                    .generate(RETRY_PROMPT_TEMPLATE, text, "Ollama retry request")
+                    .await
+                else {
+                    return fallback_result(text, "retry_request_failed", Some(result.metadata));
+                };
 
-            if ollama_output_has_stutter(text, &retry) {
-                warn!("Ollama retry still had repeated stutter text, using original text");
-                text.to_string()
-            } else {
-                retry
+                match validate_correction(text, &retry.text) {
+                    Ok(()) => CorrectionResult {
+                        text: retry.text,
+                        metadata: CorrectionMetadata {
+                            accepted: true,
+                            ..retry.metadata
+                        },
+                    },
+                    Err(retry_reason) => {
+                        warn!(
+                            "Rejected Ollama retry ({retry_reason}); using original transcription"
+                        );
+                        fallback_result(text, retry_reason, Some(retry.metadata))
+                    }
+                }
             }
-        } else {
-            result
         }
     }
 
-    async fn generate(&self, prompt: &str, label: &str) -> Option<String> {
+    async fn generate(
+        &self,
+        system: &str,
+        transcription: &str,
+        label: &str,
+    ) -> Option<GeneratedCorrection> {
         let body = json!({
             "model": self.config.model,
-            "prompt": prompt,
+            "system": system,
+            "prompt": transcription,
             "stream": false,
             "think": false,
+            "format": correction_schema(),
             "keep_alive": self.config.keep_alive,
             "options": {
                 "temperature": 0,
-                "num_predict": 1024
+                "num_predict": 512
             }
         });
 
@@ -130,118 +171,27 @@ impl OllamaProcessor {
                 }
                 match resp.json::<serde_json::Value>().await {
                     Ok(data) => {
-                        let result = data["response"].as_str().unwrap_or("").trim().to_string();
-                        if result.is_empty() {
+                        let raw = data["response"].as_str().unwrap_or("").trim();
+                        let result = serde_json::from_str::<serde_json::Value>(raw)
+                            .ok()
+                            .and_then(|value| value["corrected_text"].as_str().map(str::to_owned));
+                        let Some(result) = result.filter(|value| !value.trim().is_empty()) else {
                             warn!("Ollama returned empty response");
-                            None
-                        } else {
-                            debug!("Ollama output: '{result}'");
-                            Some(result)
-                        }
+                            return None;
+                        };
+                        debug!("Ollama output: '{result}'");
+                        Some(GeneratedCorrection {
+                            text: result,
+                            metadata: CorrectionMetadata {
+                                load_ms: nanos_to_ms(data["load_duration"].as_i64()),
+                                prompt_eval_ms: nanos_to_ms(data["prompt_eval_duration"].as_i64()),
+                                eval_ms: nanos_to_ms(data["eval_duration"].as_i64()),
+                                ..CorrectionMetadata::default()
+                            },
+                        })
                     }
                     Err(e) => {
                         warn!("Failed to parse Ollama response: {e}");
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                self.log_request_error(&e, label);
-                None
-            }
-        }
-    }
-
-    /// Send audio directly to Ollama for transcription + correction in a single pass.
-    /// Bypasses Whisper entirely. Requires an audio-capable model (e.g. gemma4).
-    /// Returns None on failure so the caller can fall back to the Whisper path.
-    pub async fn process_audio(&self, samples: &[f32], sample_rate: u32) -> Option<String> {
-        if !self.config.enabled || samples.is_empty() {
-            return None;
-        }
-
-        // Encode PCM f32 samples as WAV in memory
-        let wav_bytes = encode_wav(samples, sample_rate);
-        let audio_b64 = base64::engine::general_purpose::STANDARD.encode(&wav_bytes);
-
-        let audio_duration = samples.len() as f64 / sample_rate as f64;
-        info!(
-            "Audio mode: sending {:.1}s ({} bytes WAV) to Ollama model '{}'",
-            audio_duration,
-            wav_bytes.len(),
-            self.config.model
-        );
-
-        // Use /api/chat with multimodal message (audio sent via images field)
-        let Some(result) = self
-            .chat_audio(&audio_b64, AUDIO_PROMPT, "Ollama audio request")
-            .await
-        else {
-            return None;
-        };
-
-        if is_pathological_stutter(&result) {
-            warn!("Ollama audio output had repeated stutter text; retrying once");
-            let Some(retry) = self
-                .chat_audio(&audio_b64, AUDIO_RETRY_PROMPT, "Ollama audio retry request")
-                .await
-            else {
-                return None;
-            };
-
-            if is_pathological_stutter(&retry) {
-                warn!("Ollama audio retry still had repeated stutter text; dropping utterance");
-                None
-            } else {
-                Some(retry)
-            }
-        } else {
-            Some(result)
-        }
-    }
-
-    async fn chat_audio(&self, audio_b64: &str, prompt: &str, label: &str) -> Option<String> {
-        let body = json!({
-            "model": self.config.model,
-            "messages": [{
-                "role": "user",
-                "content": prompt,
-                "images": [audio_b64]
-            }],
-            "stream": false,
-            "think": false,
-            "keep_alive": self.config.keep_alive,
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 500
-            }
-        });
-
-        let url = format!("{}/api/chat", self.config.host);
-
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    warn!("Ollama audio mode returned status {}", resp.status());
-                    return None;
-                }
-                match resp.json::<serde_json::Value>().await {
-                    Ok(data) => {
-                        let result = data["message"]["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if result.is_empty() {
-                            warn!("Ollama audio mode returned empty response");
-                            None
-                        } else {
-                            debug!("Ollama audio output: '{result}'");
-                            Some(result)
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse Ollama audio response: {e}");
                         None
                     }
                 }
@@ -262,6 +212,121 @@ impl OllamaProcessor {
             warn!("{label} failed: {e}");
         }
     }
+}
+
+fn correction_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "corrected_text": { "type": "string" }
+        },
+        "required": ["corrected_text"],
+        "additionalProperties": false
+    })
+}
+
+fn nanos_to_ms(nanos: Option<i64>) -> Option<i64> {
+    nanos.map(|value| value / 1_000_000)
+}
+
+fn fallback_result(
+    original: &str,
+    reason: &str,
+    metadata: Option<CorrectionMetadata>,
+) -> CorrectionResult {
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.accepted = false;
+    metadata.fallback_reason = Some(reason.to_string());
+    CorrectionResult {
+        text: original.to_string(),
+        metadata,
+    }
+}
+
+fn validate_correction(original: &str, candidate: &str) -> Result<(), &'static str> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return Err("empty_correction");
+    }
+    if candidate.contains("```")
+        || candidate
+            .to_ascii_lowercase()
+            .starts_with("corrected_text:")
+    {
+        return Err("wrapped_or_explained_output");
+    }
+    if ollama_output_has_stutter(original, candidate) {
+        return Err("introduced_stutter");
+    }
+
+    let original_words = original.split_whitespace().count();
+    let candidate_words = candidate.split_whitespace().count();
+    if original_words >= 4 {
+        let minimum = (original_words / 2).max(1);
+        let maximum = original_words.saturating_mul(3) / 2 + 3;
+        if candidate_words < minimum || candidate_words > maximum {
+            return Err("large_length_change");
+        }
+    }
+
+    if significant_tokens(original, |token| {
+        token.chars().any(|ch| ch.is_ascii_digit())
+    }) != significant_tokens(candidate, |token| {
+        token.chars().any(|ch| ch.is_ascii_digit())
+    }) {
+        return Err("changed_numeric_fact");
+    }
+    if significant_tokens(original, |token| {
+        token.starts_with("http://") || token.starts_with("https://")
+    }) != significant_tokens(candidate, |token| {
+        token.starts_with("http://") || token.starts_with("https://")
+    }) {
+        return Err("changed_url");
+    }
+
+    let original_tokens = normalized_tokens(original);
+    let candidate_tokens = normalized_tokens(candidate);
+    if PROTECTED_TERMS.iter().any(|term| {
+        let term = term.to_ascii_lowercase();
+        original_tokens.contains(&term) && !candidate_tokens.contains(&term)
+    }) {
+        return Err("removed_protected_term");
+    }
+
+    Ok(())
+}
+
+fn significant_tokens<F>(text: &str, predicate: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut tokens = text
+        .split_whitespace()
+        .map(|token| {
+            token.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    '.' | ','
+                        | ';'
+                        | ':'
+                        | '!'
+                        | '?'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '\''
+                        | '"'
+                )
+            })
+        })
+        .filter(|token| predicate(token))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    tokens.sort();
+    tokens
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -360,31 +425,11 @@ fn max_phrase_repeats(tokens: &[String]) -> usize {
     max_repeats
 }
 
-/// Encode f32 PCM samples as 16-bit WAV in memory.
-fn encode_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-    let mut buf = Cursor::new(Vec::new());
-    {
-        let mut writer = WavWriter::new(&mut buf, spec).expect("WAV writer creation failed");
-        for &s in samples {
-            let clamped = s.clamp(-1.0, 1.0);
-            let val = (clamped * 32767.0) as i16;
-            writer.write_sample(val).expect("WAV write failed");
-        }
-        writer.finalize().expect("WAV finalize failed");
-    }
-    buf.into_inner()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        is_pathological_stutter, ollama_output_has_stutter, repetition_stats, RepetitionStats,
+        is_pathological_stutter, ollama_output_has_stutter, repetition_stats, validate_correction,
+        RepetitionStats,
     };
 
     #[test]
@@ -422,5 +467,29 @@ mod tests {
             "source accounting and all that",
             "source accounting and all that and all that and all that"
         ));
+    }
+
+    #[test]
+    fn correction_validation_preserves_facts_and_domain_terms() {
+        assert!(validate_correction(
+            "Send 28 SOL to Jito at https://example.com.",
+            "Send 29 SOL to Jito at https://example.com."
+        )
+        .is_err());
+        assert!(validate_correction(
+            "Check the ClickHouse table now.",
+            "Check the database table now."
+        )
+        .is_err());
+        assert!(validate_correction(
+            "send 28 SOL to Jito at https://example.com.",
+            "Send 28 SOL to Jito at https://example.com."
+        )
+        .is_ok());
+        assert!(validate_correction("Send 28 now.", "Send 28, now!").is_ok());
+        assert!(validate_correction("I trust this result.", "I trust this result!").is_ok());
+        assert!(
+            validate_correction("Open https://example.com now.", "Open the website now.").is_err()
+        );
     }
 }

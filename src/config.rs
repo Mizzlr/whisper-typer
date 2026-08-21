@@ -4,8 +4,20 @@
 //! the Python whisper-typer config.yaml format exactly.
 
 use serde::Deserialize;
+use std::fmt;
 use std::path::{Path, PathBuf};
-use tracing::info;
+use tracing::{info, warn};
+
+#[derive(Debug)]
+pub struct ConfigError(String);
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -67,7 +79,7 @@ pub struct WhisperConfig {
 impl Default for WhisperConfig {
     fn default() -> Self {
         Self {
-            model: "distil-whisper/distil-large-v3".into(),
+            model: "models/ggml-distil-large-v3.bin".into(),
             device: "cuda".into(),
         }
     }
@@ -89,7 +101,7 @@ impl Default for OllamaConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: "llama3.2:3b".into(),
+            model: "granite4.1:3b".into(),
             host: "http://localhost:11434".into(),
             keep_alive: 3600,
             skip_threshold: 0,
@@ -107,23 +119,32 @@ pub struct TyperConfig {
 impl Default for TyperConfig {
     fn default() -> Self {
         Self {
-            backend: "ydotool".into(),
+            backend: "xdotool".into(),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct FeedbackConfig {
     pub notifications: bool,
     pub sounds: bool,
 }
 
-impl Default for FeedbackConfig {
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WakewordConfig {
+    pub enabled: bool,
+    pub model: String,
+    pub threshold: f32,
+}
+
+impl Default for WakewordConfig {
     fn default() -> Self {
         Self {
-            notifications: true,
-            sounds: false,
+            enabled: false,
+            model: "alexa".into(),
+            threshold: 0.5,
         }
     }
 }
@@ -212,6 +233,7 @@ pub struct Config {
     pub ollama: OllamaConfig,
     pub typer: TyperConfig,
     pub feedback: FeedbackConfig,
+    pub wakeword: WakewordConfig,
     pub silence: SilenceConfig,
     pub tts: TTSConfig,
     pub mcp: McpConfig,
@@ -222,13 +244,15 @@ impl Config {
     /// Load configuration from YAML file.
     ///
     /// Searches standard locations if no path is provided:
-    /// 1. ./config.yaml
-    /// 2. ~/.config/whisper-input/config.yaml
-    /// 3. /etc/whisper-input/config.yaml
-    pub fn load(path: Option<&Path>) -> Self {
+    /// 1. An explicitly supplied `--config` path
+    /// 2. `./config.yaml`
+    /// 3. `~/.config/whisper-typer/config.yaml`
+    /// 4. Legacy whisper-input locations
+    pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
         let resolved = path.map(PathBuf::from).or_else(|| {
             let candidates = [
                 std::env::current_dir().ok().map(|d| d.join("config.yaml")),
+                dirs::home_dir().map(|h| h.join(".config/whisper-typer/config.yaml")),
                 dirs::home_dir().map(|h| h.join(".config/whisper-input/config.yaml")),
                 Some(PathBuf::from("/etc/whisper-input/config.yaml")),
             ];
@@ -237,30 +261,109 @@ impl Config {
 
         let Some(config_path) = resolved else {
             info!("No config file found, using defaults");
-            return Self::default();
+            return Ok(Self::default());
         };
 
-        match std::fs::read_to_string(&config_path) {
-            Ok(contents) => match serde_yml::from_str(&contents) {
-                Ok(config) => {
-                    info!("Loaded config from {}", config_path.display());
-                    config
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to parse {}: {e}, using defaults",
-                        config_path.display()
-                    );
-                    Self::default()
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to read {}: {e}, using defaults",
-                    config_path.display()
-                );
-                Self::default()
-            }
+        let contents = std::fs::read_to_string(&config_path).map_err(|error| {
+            ConfigError(format!(
+                "Failed to read configuration {}: {error}",
+                config_path.display()
+            ))
+        })?;
+        let config: Self = serde_yml::from_str(&contents).map_err(|error| {
+            ConfigError(format!(
+                "Failed to parse configuration {}: {error}",
+                config_path.display()
+            ))
+        })?;
+        config.validate()?;
+        config.log_deprecations();
+        info!("Loaded config from {}", config_path.display());
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.audio.sample_rate != 16_000 {
+            return Err(ConfigError(format!(
+                "audio.sample_rate must be 16000, got {}",
+                self.audio.sample_rate
+            )));
         }
+        if self.audio.channels != 1 {
+            return Err(ConfigError(format!(
+                "audio.channels must be 1, got {}",
+                self.audio.channels
+            )));
+        }
+        if self.audio.chunk_size == 0 {
+            return Err(ConfigError(
+                "audio.chunk_size must be greater than zero".into(),
+            ));
+        }
+        if self.recording.max_duration <= 0.0 || self.silence.max_recording_duration <= 0.0 {
+            return Err(ConfigError(
+                "recording durations must be greater than zero".into(),
+            ));
+        }
+        if self.silence.threshold < 0.0 || self.silence.duration < 0.0 {
+            return Err(ConfigError(
+                "silence threshold and duration cannot be negative".into(),
+            ));
+        }
+        if self.silence.min_speech_duration < 0.0 {
+            return Err(ConfigError(
+                "silence.min_speech_duration cannot be negative".into(),
+            ));
+        }
+        if self.tts.speed <= 0.0 {
+            return Err(ConfigError("tts.speed must be greater than zero".into()));
+        }
+        if self.mcp.enabled && self.tts.enabled && self.mcp.port == self.tts.api_port {
+            return Err(ConfigError(
+                "mcp.port and tts.api_port must be different".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn log_deprecations(&self) {
+        if self.ollama.audio_mode {
+            warn!("ollama.audio_mode is deprecated and will use the reliable Whisper path");
+        }
+        if self.wakeword.enabled {
+            warn!("wakeword configuration is deprecated and is not active in the Rust service");
+        }
+        if self.feedback.notifications || self.feedback.sounds {
+            warn!("feedback configuration is deprecated and currently has no effect");
+        }
+        if self.typer.backend != "xdotool" && self.typer.backend != "enigo" {
+            warn!(
+                "Unknown typer backend '{}'; the existing enigo fallback behavior will apply",
+                self.typer.backend
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use std::path::Path;
+
+    #[test]
+    fn rejects_audio_rates_that_whisper_cannot_consume() {
+        let mut config = Config::default();
+        config.audio.sample_rate = 48_000;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_default_configuration() {
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn repository_configuration_is_valid() {
+        Config::load(Some(Path::new("config.yaml"))).expect("valid repository config");
     }
 }

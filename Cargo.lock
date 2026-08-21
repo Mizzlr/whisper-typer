@@ -4322,7 +4322,6 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "axum",
- "base64",
  "chrono",
  "clap",
  "cpal 0.15.3",

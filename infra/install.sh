@@ -47,7 +47,7 @@ fi
 echo -e "${YELLOW}[3/5] Building Rust binaries (release)...${NC}"
 cd "$REPO_DIR"
 cargo build --release
-echo -e "${GREEN}  Built: whisper-typer-rs, tts-hook, voice-journal${NC}"
+echo -e "${GREEN}  Built: whisper-typer-rs, tts-hook, voice-journal, whisper-benchmark${NC}"
 
 # 4. Deploy binaries to ~/.local/bin (so Claude Code hooks can find tts-hook)
 echo -e "${YELLOW}[4/5] Deploying binaries to ~/.local/bin/...${NC}"
@@ -55,6 +55,7 @@ mkdir -p "$HOME/.local/bin"
 install -m 0755 "$REPO_DIR/target/release/whisper-typer-rs" "$HOME/.local/bin/whisper-typer-rs"
 install -m 0755 "$REPO_DIR/target/release/tts-hook"         "$HOME/.local/bin/tts-hook"
 install -m 0755 "$REPO_DIR/target/release/voice-journal"    "$HOME/.local/bin/voice-journal"
+install -m 0755 "$REPO_DIR/target/release/whisper-benchmark" "$HOME/.local/bin/whisper-benchmark"
 echo -e "${GREEN}  Installed to ~/.local/bin/${NC}"
 
 # 5. systemd user services. Substitute __REPO_DIR__ in unit templates
@@ -83,7 +84,7 @@ echo "=== Setup Complete ==="
 echo
 echo -e "${YELLOW}Next steps:${NC}"
 echo "  1. Log out and back in (for input group to take effect)"
-echo "  2. Pull the Ollama model:  ollama pull gemma4:e2b"
+echo "  2. Pull the Ollama model:  ollama pull granite4.1:3b"
 echo "  3. Drop model files into models/ (see README.md):"
 echo "       - ggml-distil-large-v3.bin (Whisper)"
 echo "       - kokoro-v1.0.onnx + voices-v1.0.bin (TTS)"
