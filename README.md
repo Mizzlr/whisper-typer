@@ -1,18 +1,24 @@
 # WhisperTyper RS
 
-Speech-to-text dictation, voice journaling, and Claude-Code voice feedback for Linux. Pure Rust.
+[![CI](https://github.com/Mizzlr/whisper-typer/actions/workflows/ci.yml/badge.svg)](https://github.com/Mizzlr/whisper-typer/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Local-first speech-to-text dictation, voice journaling, and Claude Code voice
+feedback for Linux. The application code is Rust; Whisper, Ollama, and the
+model files remain separate local dependencies.
 
 Press a hotkey, speak, and your words are transcribed (Whisper, CUDA) and pasted into the focused application — optionally grammar-corrected by a local LLM (Ollama). A separate TUI app records and filters a daily voice journal. Claude Code lifecycle events get spoken aloud through Kokoro TTS.
 
 ## What's in this repo
 
-This repo builds three binaries from one Rust workspace:
+This repo builds four binaries from one Rust package:
 
 | Binary | Purpose |
 |---|---|
 | `whisper-typer-rs` | Background dictation service: hotkey → Whisper → Ollama → paste. Hosts the MCP HTTP server (port 8766) and the Kokoro TTS HTTP API (port 8767). |
 | `tts-hook` | Standalone binary invoked by Claude Code on lifecycle events (SessionStart, Stop, Notification, PermissionRequest, UserPromptSubmit). Speaks short status phrases via the TTS API. |
 | `voice-journal` | TUI for personal voice journaling. Captures audio, runs VAD, transcribes via the running service's `/transcribe` endpoint, applies regex + LLM hallucination filtering, appends to `~/voice-journal/journal_YYYY-MM-DD.md`. |
+| `whisper-benchmark` | Reports p50/p95 latency and correction fallback counts from recent local history. |
 
 ## Architecture
 
@@ -21,9 +27,9 @@ This repo builds three binaries from one Rust workspace:
    Hotkey  ─evdev──▶  │                  │
    (Win+Alt etc.)     │  whisper-typer-rs│ ──▶ Whisper (CUDA, distil-large-v3)
                       │   state machine  │
-   Claude Code ──┐    │   IDLE→REC→PROC  │ ──▶ Ollama /api/generate (gemma4:e2b)
+   Claude Code ──┐    │   IDLE→REC→PROC  │ ──▶ Ollama /api/generate (granite4.1:3b)
    (MCP HTTP)    │    │                  │
-                 ├──▶ │  ┌─────────────┐ │ ──▶ Typer (xdotool / arboard paste)
+                 ├──▶ │  ┌─────────────┐ │ ──▶ Typer (xdotool+xclip / enigo)
    Voice Journal │    │  │ MCP server  │ │
    (HTTP)        │    │  │ port 8766   │ │
                  │    │  └─────────────┘ │
@@ -34,6 +40,18 @@ This repo builds three binaries from one Rust workspace:
                       └──────────────────┘
 ```
 
+## Requirements
+
+- Linux with PipeWire or ALSA audio
+- A recent stable Rust toolchain
+- `ollama`, `xdotool`, and `xclip`
+- ALSA and X11 development headers (`libasound2-dev`, `libx11-dev`,
+  `libxdo-dev`, and `pkg-config` on Debian/Ubuntu)
+- Optional but recommended: NVIDIA CUDA and cuDNN for low-latency Whisper
+
+Whisper, Kokoro, and Silero model files are not committed to this repository.
+Review the paths in `config.example.yaml` before installing.
+
 ## Installation
 
 ```bash
@@ -42,14 +60,17 @@ cd whisper-typer
 ./infra/install.sh
 ```
 
-`install.sh` does five things: adds you to the `input` group, installs the udev rule for `/dev/uinput`, runs `cargo build --release`, copies the three binaries to `~/.local/bin/`, and installs the systemd user service as `whisper-typer-rs.service`.
+`install.sh` does five things: adds you to the `input` group, installs the udev rule for `/dev/uinput`, runs `cargo build --release`, copies the four binaries to `~/.local/bin/`, and installs the systemd user services.
 
-You'll need to:
+After the script completes:
+
 - Log out and back in (for `input` group to take effect)
-- `ollama pull gemma4:e2b` (default LLM)
-- Place Whisper and Kokoro models under `models/` (paths are `models/ggml-distil-large-v3.bin` and `models/kokoro-v1.0.onnx` by default — see `config.yaml`)
-
-System packages: a recent Rust toolchain, CUDA + cuDNN if you want GPU Whisper, `xdotool` and `xclip` for X11 paste, ALSA dev headers (`libasound2-dev`) for `cpal`.
+- `ollama pull granite4.1:3b` (default local correction model)
+- Place `ggml-distil-large-v3.bin`, `kokoro-v1.0.onnx`,
+  `voices-v1.0.bin`, and `tokenizer.json` under `models/`
+- Optionally place `silero_vad.onnx` under `models/` for Voice Journal VAD
+- Start both services with
+  `systemctl --user start whisper-typer-rs voice-journal`
 
 ## Running
 
@@ -81,14 +102,23 @@ Configured in `config.yaml`. Defaults:
 
 Press and hold to record, release to transcribe. Wake-word activation (`alexa` / `hey_jarvis`) is configurable but not currently implemented in the Rust path — the config is parsed and ignored.
 
+The hotkey and focused-window paste paths are deliberately conservative because
+they sit directly in the text-input path. Grammar correction is advisory: if
+Ollama times out, produces malformed JSON, repeats text, removes a URL or
+number, changes a protected project name, or rewrites too aggressively, the
+service types the original Whisper transcription instead.
+
 ## Configuration
 
-`config.yaml` (repo root) controls hotkeys, audio capture, Whisper model, Ollama, typer backend, silence detection, and Kokoro TTS:
+Copy `config.example.yaml` when starting a new setup. Configuration is loaded
+from an explicit `--config` path, the repo's `config.yaml`, or
+`~/.config/whisper-typer/config.yaml`, in that order. Malformed or unsafe values
+fail startup with a clear error instead of silently using defaults.
 
 ```yaml
 ollama:
   enabled: true
-  model: "gemma4:e2b"            # gemma4:e2b for grammar correction
+  model: "granite4.1:3b"
   host: "http://127.0.0.1:11434"
   keep_alive: 3600
   skip_threshold: 5              # skip Ollama on utterances ≤ N words
@@ -99,7 +129,7 @@ whisper:
 
 tts:
   enabled: true                  # native Kokoro TTS
-  voice: "am_michael"            # any af_*, am_*, bf_*, bm_* preset
+  voice: "af_bella"              # any af_*, am_*, bf_*, bm_* preset
   speed: 1.0
   api_port: 8767
 ```
@@ -174,18 +204,21 @@ The detection chain has four stacked gates, each addressing a different false-po
 The status panel shows live VAD diagnostics so you can see whether speech is being captured cleanly or chopped. Format:
 
 ```
-Flicker: 268 (15.6/min) | voiced: 0ms (max 3413ms) | gated: 3000 | dropped low-voiced: 0
+Flicker: 268 (15.6/min) | voiced: 0ms (max 3413ms) | gated: 3000 | dropped low-voiced: 0 | queue drops: 0
 ```
 
 - `transitions/min` should stay low during silence/typing and spike only when you speak.
 - `max voiced run` should reach into the seconds during real sentences. If it stays below ~500ms, the stay threshold is too high.
 - `gated` counts callbacks the keystroke gate suppressed. Climbs while you type without speaking.
 - `dropped low-voiced` counts utterances skipped before Whisper was called.
+- `queue drops` counts completed utterances discarded because the bounded
+  transcription queue was already full. A non-zero value means the downstream
+  transcription/filter path could not keep up.
 
 **Hallucination filter (two stages, post-Whisper)**
 
 1. **Regex pass** — fast, deterministic. Rules live in `~/voice-journal/hallucinations.txt`. Catches known echo patterns, podcast bleed, named-entity garble.
-2. **LLM pass** — Ollama (gemma4:e2b) chat API with few-shot prompt. Catches novel hallucinations the regex doesn't know about. Runs in ~0.4s per chunk on a warm model. Auto-disables if Ollama is unreachable; can be force-disabled via `WHISPER_VOICE_JOURNAL_LLM=0`.
+2. **LLM pass** — Ollama (`granite4.1:3b`) chat API with a few-shot prompt. Catches novel hallucinations the regex doesn't know about. Auto-disables if Ollama is unreachable; can be force-disabled via `WHISPER_VOICE_JOURNAL_LLM=0`.
 
 **Output files**
 
@@ -200,6 +233,7 @@ When the `whisper-typer-rs` service is running, voice-journal tails its history 
 
 ```
 src/
+├── lib.rs                   # shared modules for all binaries
 ├── main.rs                  # service entry point
 ├── service.rs               # state machine, voice gate
 ├── hotkey.rs                # evdev monitoring
@@ -210,18 +244,21 @@ src/
 ├── mcp_server.rs            # rmcp HTTP server (port 8766)
 ├── history.rs               # JSONL transcription history
 ├── config.rs                # YAML loader
+├── runtime_settings.rs      # live MCP/service settings + atomic persistence
 ├── code_speaker/            # native Kokoro TTS
 │   ├── mod.rs
 │   ├── tts.rs               # ONNX inference + rodio playback
 │   └── api.rs               # axum HTTP API (port 8767)
 └── bin/
     ├── tts_hook.rs          # Claude Code lifecycle listener
-    └── voice_journal.rs     # voice journal TUI
+    ├── voice_journal.rs     # voice journal TUI
+    └── benchmark.rs         # history latency summary
 
 infra/
 ├── install.sh               # one-shot setup script
 ├── systemd/
-│   └── whisper-typer.service
+│   ├── whisper-typer.service
+│   └── voice-journal.service
 └── udev/
     └── 99-uinput.rules
 
@@ -234,8 +271,8 @@ config.yaml                  # runtime configuration
 ```bash
 # Rebuild + redeploy after pulling
 cargo build --release
-install -m 0755 target/release/{whisper-typer-rs,tts-hook,voice-journal} ~/.local/bin/
-systemctl --user restart whisper-typer-rs
+install -m 0755 target/release/{whisper-typer-rs,tts-hook,voice-journal,whisper-benchmark} ~/.local/bin/
+systemctl --user restart whisper-typer-rs voice-journal
 
 # Check service health
 systemctl --user status whisper-typer-rs
@@ -244,13 +281,31 @@ curl -s http://localhost:8767/status                        # TTS probe
 
 # Tail TTS hook events
 tail -f ~/.cache/whisper-typer/tts-hook.log
+
+# Summarize the latest seven history days
+whisper-benchmark 7
+
+# Public-repository verification
+cargo test --all-targets --no-default-features
+cargo clippy --all-targets --no-default-features -- -D warnings
 ```
 
 ## Known issues
 
 - **MCP HTTP 410 after `/clear`**: rmcp Streamable HTTP sessions expire when Claude Code reconnects. Workaround: `systemctl --user restart whisper-typer-rs`.
-- **Wake word**: `wakeword:` block in `config.yaml` is parsed but no Rust module currently implements activation. Carryover from the Python era.
+- **Deprecated compatibility keys**: `wakeword`, `feedback`, and
+  `ollama.audio_mode` remain parse-compatible for existing configurations but
+  are inactive and emit startup warnings.
 - **Verbose `whisper_init_state` startup**: 7 lines of GPU buffer allocation per service start. Cosmetic, not an error.
+
+## Privacy and maintenance
+
+Audio processing is local by default. Transcription history under
+`~/.whisper-typer-history/`, voice journals under `~/voice-journal/`, and TTS
+hook history may contain sensitive text; retention and deletion are currently
+user-managed. Do not publish these files with bug reports. See `SECURITY.md`
+for the full data-handling notes and `docs/MODEL_RECOMMENDATIONS.md` before
+adding any hosted model backend.
 
 ## License
 
