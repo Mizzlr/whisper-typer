@@ -10,10 +10,14 @@ appeared because the independent history tailer continued copying
 `whisper-typer-rs` results into the daily journal.
 
 The microphone source was live, unmuted, and producing signal. A live stack
-trace showed the ambient transcriber waiting for VAD chunks. The capture path
-could leave its hotkey suppression latch active indefinitely when an evdev
-key-release transition was missed; because the main process did not exit,
-systemd could not detect or recover the partial failure.
+trace showed the ambient transcriber waiting for VAD chunks. The first repair
+closed a real stale-state risk in the hotkey suppression latch, but an
+end-to-end retest showed that this was not the primary failure.
+
+Non-content capture telemetry then established the root cause: the webcam
+microphone produced normal speech around 0.012-0.025 RMS, Silero scored it near
+0.001, and the RMS rescue threshold was 0.050. Both detectors therefore
+rejected real far-field speech before an utterance could reach Whisper.
 
 ## Fix
 
@@ -21,6 +25,10 @@ The keyboard supervisor now reconciles its event-derived state every two
 seconds with the kernel's current key bitmap. It also removes state belonging
 to disconnected devices. This clears stale hotkey suppression while retaining
 support for hotkey combinations spanning multiple keyboards.
+
+The RMS rescue threshold is now aligned with the recorder's established 0.012
+RMS speech threshold. A once-per-minute, non-content health line reports VAD
+state and counters so future partial failures are visible in service logs.
 
 ## Verification
 
@@ -32,3 +40,7 @@ support for hotkey combinations spanning multiple keyboards.
 - `voice-journal.service` restarted successfully and loaded Silero VAD.
 - The deployed capture stream was live, uncorked, and unmuted, with current-day
   journal and unfiltered files open for append.
+- Post-fix telemetry observed repeated recording transitions and a longest
+  voiced run of 4.458 seconds.
+- An accepted ambient entry was appended at 18:09:07 IST, proving the complete
+  microphone-to-VAD-to-Whisper-to-journal path.

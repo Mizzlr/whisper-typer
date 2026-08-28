@@ -36,7 +36,11 @@ const SILERO_VAD_THRESHOLD: f32 = 0.5;
 /// between 0.4 and 0.6 during normal speech repeatedly cross a single
 /// threshold and chop the utterance into many short fragments.
 const SILERO_STAY_THRESHOLD: f32 = 0.35;
-const SILERO_RMS_RESCUE_THRESHOLD: f32 = 0.05;
+// The webcam microphone's normal far-field speech is around 0.012-0.025 RMS.
+// Keep this aligned with the proven RMS-only threshold so real speech can
+// rescue a false-negative Silero score; downstream duration and hallucination
+// gates still reject short noise transients.
+const SILERO_RMS_RESCUE_THRESHOLD: f32 = VAD_RMS_THRESHOLD;
 const SILERO_SPEECH_HOLD_FRAMES: u8 = 8;
 /// Require this many consecutive ≥enter-threshold frames before starting an
 /// utterance. Filters out single-frame transients (keystrokes, taps) that
@@ -1610,12 +1614,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if headless_enabled() {
         eprintln!("Voice Journal running headless");
+        let mut last_health_log = Instant::now();
         loop {
             match line_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err("voice journal output channel disconnected".into());
                 }
+            }
+            if last_health_log.elapsed() >= Duration::from_secs(60) {
+                let current_level = level.lock().map(|value| *value).unwrap_or_default();
+                let current_prob = silero_prob.lock().ok().and_then(|value| *value);
+                let current_status = status
+                    .lock()
+                    .map(|value| value.clone())
+                    .unwrap_or_else(|_| "Unavailable".to_string());
+                eprintln!(
+                    "health status={current_status} rms={current_level:.4} silero_prob={} hotkey_held={} transitions={} longest_voiced_ms={} keystroke_suppressions={} dictation_skipped={} low_voiced_drops={} backpressure_drops={}",
+                    current_prob
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    hotkey_held.load(Ordering::Relaxed),
+                    transitions.load(Ordering::Relaxed),
+                    longest_voiced_ms.load(Ordering::Relaxed),
+                    keystroke_suppressions.load(Ordering::Relaxed),
+                    dictation_skipped.load(Ordering::Relaxed),
+                    low_voiced_drops.load(Ordering::Relaxed),
+                    backpressure_drops.load(Ordering::Relaxed),
+                );
+                last_health_log = Instant::now();
             }
         }
     }
