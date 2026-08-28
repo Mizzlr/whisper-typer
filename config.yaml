@@ -7,8 +7,7 @@ hotkey:
     - KEY_LEFTALT
   # Alternate hotkeys
   alt_combos:
-    - [KEY_LEFTCTRL, KEY_LEFTALT]   # Ctrl+Alt
-    - [KEY_RIGHTCTRL, KEY_RIGHTALT] # Right Ctrl+Right Alt
+    - [KEY_F13]                     # Logitech Back button via Input Remapper
     - [KEY_PAGEDOWN, KEY_RIGHT]     # Page Down + Right Arrow
     - [KEY_PAGEDOWN, KEY_DOWN]      # Page Down + Down Arrow
 
