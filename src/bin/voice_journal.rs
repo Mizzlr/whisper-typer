@@ -720,6 +720,17 @@ fn load_whisper_combos() -> Vec<HashSet<evdev::Key>> {
         .collect()
 }
 
+fn any_hotkey_combo_pressed(
+    devices: &HashMap<PathBuf, HashSet<evdev::Key>>,
+    combos: &[HashSet<evdev::Key>],
+) -> bool {
+    let all_pressed = devices
+        .values()
+        .flat_map(|keys| keys.iter().copied())
+        .collect::<HashSet<_>>();
+    combos.iter().any(|combo| combo.is_subset(&all_pressed))
+}
+
 /// Spawn one std::thread per detected keyboard that polls `fetch_events` and
 /// stamps the current epoch-ms into `last_keypress_ms` on any press/repeat.
 /// Also tracks held keys to detect when any whisper-typer hotkey combo is
@@ -749,6 +760,30 @@ fn spawn_keystroke_watcher(
                 }
             })
             .collect();
+
+        // Event streams can occasionally miss a key-up transition while a
+        // USB keyboard glitches. Reconcile against the kernel's current key
+        // bitmap every discovery pass so a stale hotkey cannot suppress the
+        // ambient recorder forever while the process still looks healthy.
+        // This also removes state for devices whose reader remains blocked
+        // after the device has disappeared.
+        let connected = keyboards
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<HashSet<_>>();
+        if let Ok(mut devices) = pressed.lock() {
+            devices.retain(|path, _| connected.contains(path));
+            for (path, dev) in &keyboards {
+                if let Ok(keys) = dev.get_key_state() {
+                    devices.insert(path.clone(), keys.iter().collect());
+                }
+            }
+            let now_active = any_hotkey_combo_pressed(&devices, &combos);
+            let was_active = hotkey_held.swap(now_active, Ordering::Relaxed);
+            if was_active && !now_active {
+                last_hotkey_release_ms.store(epoch_ms(), Ordering::Relaxed);
+            }
+        }
 
         for (path, mut dev) in keyboards {
             let newly_tracked = tracked
@@ -805,13 +840,7 @@ fn spawn_keystroke_watcher(
                             if combo_changed {
                                 let now_active = pressed
                                     .lock()
-                                    .map(|devices| {
-                                        let all_pressed = devices
-                                            .values()
-                                            .flat_map(|keys| keys.iter().copied())
-                                            .collect::<HashSet<_>>();
-                                        combos.iter().any(|combo| combo.is_subset(&all_pressed))
-                                    })
+                                    .map(|devices| any_hotkey_combo_pressed(&devices, &combos))
                                     .unwrap_or(false);
                                 let was_active = hotkey_held.swap(now_active, Ordering::Relaxed);
                                 if was_active && !now_active {
@@ -833,11 +862,7 @@ fn spawn_keystroke_watcher(
 
                 if let Ok(mut devices) = pressed.lock() {
                     devices.remove(&path);
-                    let all_pressed = devices
-                        .values()
-                        .flat_map(|keys| keys.iter().copied())
-                        .collect::<HashSet<_>>();
-                    let now_active = combos.iter().any(|combo| combo.is_subset(&all_pressed));
+                    let now_active = any_hotkey_combo_pressed(&devices, &combos);
                     let was_active = hotkey_held.swap(now_active, Ordering::Relaxed);
                     if was_active && !now_active {
                         last_release.store(epoch_ms(), Ordering::Relaxed);
@@ -1750,4 +1775,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (today_journal, _) = output_paths_for_today();
     println!("Voice journal saved to {}", today_journal.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hotkey_combo_can_span_multiple_keyboards() {
+        let combo = HashSet::from([evdev::Key::KEY_LEFTMETA, evdev::Key::KEY_LEFTALT]);
+        let devices = HashMap::from([
+            (
+                PathBuf::from("/dev/input/event1"),
+                HashSet::from([evdev::Key::KEY_LEFTMETA]),
+            ),
+            (
+                PathBuf::from("/dev/input/event2"),
+                HashSet::from([evdev::Key::KEY_LEFTALT]),
+            ),
+        ]);
+
+        assert!(any_hotkey_combo_pressed(&devices, &[combo]));
+    }
+
+    #[test]
+    fn released_key_clears_hotkey_combo() {
+        let combo = HashSet::from([evdev::Key::KEY_LEFTMETA, evdev::Key::KEY_LEFTALT]);
+        let devices = HashMap::from([(
+            PathBuf::from("/dev/input/event1"),
+            HashSet::from([evdev::Key::KEY_LEFTMETA]),
+        )]);
+
+        assert!(!any_hotkey_combo_pressed(&devices, &[combo]));
+    }
 }
