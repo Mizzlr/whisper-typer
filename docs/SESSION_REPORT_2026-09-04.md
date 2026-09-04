@@ -28,6 +28,10 @@ samples for seven days.
   Granite 4.2 to live correction.
 - Documented White Wolf inference, model measurements, and MX Master 3S/Solaar
   controls.
+- Added a local global Codex instruction at `~/.codex/AGENTS.md` to interpret
+  voice-dictated requests in context while verifying precision-sensitive
+  identifiers and values. This personal instruction is intentionally outside
+  the public repository.
 
 ## Verification
 
