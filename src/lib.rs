@@ -14,4 +14,4 @@ mod speech;
 pub use dictation::{hotkey, recorder, service, typer};
 pub use interfaces::mcp_server;
 pub use persistence::{history, runtime_settings};
-pub use speech::{processor, transcriber, vad};
+pub use speech::{processor, punctuation, remote_asr, transcriber, vad};

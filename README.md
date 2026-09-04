@@ -74,12 +74,12 @@ cd whisper-typer
 ./infra/install.sh
 ```
 
-`install.sh` does five things: adds you to the `input` group, installs the udev rule for `/dev/uinput`, runs `cargo build --release`, copies the four binaries to `~/.local/bin/`, and installs the systemd user services.
+`install.sh` does five things: adds you to the `input` group, installs the udev rule for `/dev/uinput`, runs `cargo build --release`, copies the five binaries to `~/.local/bin/` and ONNX runtime providers to `~/.local/lib/whisper-typer/`, and installs the systemd user services.
 
 After the script completes:
 
 - Log out and back in (for `input` group to take effect)
-- `ollama pull granite4.1:3b` (default local correction model)
+- `ollama pull granite4.2:3b` (default local correction model)
 - Place `ggml-distil-large-v3.bin`, `kokoro-v1.0.onnx`,
   `voices-v1.0.bin`, and `tokenizer.json` under `models/`
 - Optionally place `silero_vad.onnx` under `models/` for Voice Journal VAD
@@ -132,7 +132,7 @@ fail startup with a clear error instead of silently using defaults.
 ```yaml
 ollama:
   enabled: true
-  model: "granite4.1:3b"
+  model: "granite4.2:3b"
   host: "http://127.0.0.1:11434"
   keep_alive: 3600
   skip_threshold: 5              # skip Ollama on utterances ≤ N words
@@ -232,7 +232,7 @@ Flicker: 268 (15.6/min) | voiced: 0ms (max 3413ms) | gated: 3000 | dropped low-v
 **Hallucination filter (two stages, post-Whisper)**
 
 1. **Regex pass** — fast, deterministic. Rules live in `~/voice-journal/hallucinations.txt`. Catches known echo patterns, podcast bleed, named-entity garble.
-2. **LLM pass** — Ollama (`granite4.1:3b`) chat API with a few-shot prompt. Catches novel hallucinations the regex doesn't know about. Auto-disables if Ollama is unreachable; can be force-disabled via `WHISPER_VOICE_JOURNAL_LLM=0`.
+2. **LLM pass** — Ollama (`granite4.2:3b`) chat API with a few-shot prompt. Catches novel hallucinations the regex doesn't know about. Auto-disables if Ollama is unreachable; can be force-disabled via `WHISPER_VOICE_JOURNAL_LLM=0`.
 
 **Output files**
 

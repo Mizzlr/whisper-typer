@@ -535,7 +535,7 @@ async fn handle_transcribe(
 /// Decode a WAV byte stream to mono 16kHz f32 samples.
 /// Accepts 16-bit PCM or 32-bit float; resamples by linear interpolation
 /// if the source rate differs from 16kHz; mixes multi-channel down to mono.
-fn decode_wav_16k_mono(bytes: &[u8]) -> Result<Vec<f32>, String> {
+pub fn decode_wav_16k_mono(bytes: &[u8]) -> Result<Vec<f32>, String> {
     let cursor = std::io::Cursor::new(bytes);
     let mut reader = hound::WavReader::new(cursor).map_err(|e| format!("open: {e}"))?;
     let spec = reader.spec();

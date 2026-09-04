@@ -135,7 +135,10 @@ impl WhisperTranscriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_single_segment(true);
+        // Dictations may run for several minutes. Let Whisper split long audio
+        // into its native segments instead of forcing the entire recording
+        // through one decoder context, which truncates and stutters on long input.
+        params.set_single_segment(false);
         params.set_token_timestamps(false);
 
         if let Some(prompt) = initial_prompt {

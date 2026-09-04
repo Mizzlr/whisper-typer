@@ -3,12 +3,20 @@
 //! Stores transcription records as daily JSONL files in ~/.whisper-typer-history/,
 //! compatible with the Python whisper-typer history format.
 
-use chrono::Local;
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, Write};
-use std::path::PathBuf;
-use tracing::{debug, error};
+use std::io::{BufRead, BufWriter, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tracing::{debug, error, warn};
+
+#[derive(Debug, Clone)]
+pub struct AudioArtifact {
+    pub path: PathBuf,
+    pub bytes: u64,
+}
 
 /// Directory for history JSONL files.
 fn history_dir() -> PathBuf {
@@ -53,6 +61,118 @@ pub struct TranscriptionRecord {
     pub char_count: usize,
     pub word_count: usize,
     pub speed_ratio: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate_hz: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_samples: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_bytes: Option<u64>,
+}
+
+/// Save the exact non-silent microphone buffer used by Whisper as a private,
+/// lossless 16-bit mono WAV. Audio failures never block transcription.
+pub fn save_audio(
+    samples: &[f32],
+    sample_rate: u32,
+    recorded_at: &DateTime<Local>,
+    retention_days: u64,
+) -> Result<AudioArtifact, String> {
+    let audio_root = history_dir().join("audio");
+    let day_dir = audio_root.join(recorded_at.format("%Y-%m-%d").to_string());
+    create_private_dir(&audio_root)?;
+    prune_expired_audio(&audio_root, retention_days);
+    // Pruning removes empty date directories, so create today's directory only
+    // after pruning has completed.
+    create_private_dir(&day_dir)?;
+
+    let stem = recorded_at.format("%Y%m%dT%H%M%S%.6f").to_string();
+    let final_path = day_dir.join(format!("{stem}.wav"));
+    let temporary_path = day_dir.join(format!(".{stem}.wav.part"));
+
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary_path)
+        .map_err(|e| format!("create {}: {e}", temporary_path.display()))?;
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::new(BufWriter::new(file), spec)
+        .map_err(|e| format!("open WAV writer: {e}"))?;
+
+    for sample in samples {
+        let pcm = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+        if let Err(e) = writer.write_sample(pcm) {
+            drop(writer);
+            let _ = fs::remove_file(&temporary_path);
+            return Err(format!("write WAV sample: {e}"));
+        }
+    }
+    if let Err(e) = writer.finalize() {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(format!("finalize WAV: {e}"));
+    }
+    fs::rename(&temporary_path, &final_path)
+        .map_err(|e| format!("publish {}: {e}", final_path.display()))?;
+    let _ = fs::set_permissions(&final_path, fs::Permissions::from_mode(0o600));
+    let bytes = fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+
+    Ok(AudioArtifact {
+        path: final_path,
+        bytes,
+    })
+}
+
+fn create_private_dir(path: &Path) -> Result<(), String> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|e| format!("create private directory {}: {e}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("secure directory {}: {e}", path.display()))
+}
+
+fn prune_expired_audio(audio_root: &Path, retention_days: u64) {
+    if retention_days == 0 {
+        return;
+    }
+    let ttl = Duration::from_secs(retention_days.saturating_mul(86_400));
+    let Ok(day_dirs) = fs::read_dir(audio_root) else {
+        return;
+    };
+
+    for day_dir in day_dirs.flatten().filter(|entry| entry.path().is_dir()) {
+        let path = day_dir.path();
+        let Ok(files) = fs::read_dir(&path) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let file_path = file.path();
+            let is_capture = file_path.extension().is_some_and(|ext| ext == "wav")
+                || file_path.extension().is_some_and(|ext| ext == "part");
+            if !is_capture {
+                continue;
+            }
+            let expired = file
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+                .is_ok_and(|age| age > ttl);
+            if expired {
+                if let Err(e) = fs::remove_file(&file_path) {
+                    warn!("Failed to prune expired audio {}: {e}", file_path.display());
+                }
+            }
+        }
+        let _ = fs::remove_dir(path);
+    }
 }
 
 /// Append a transcription record to the daily history file.

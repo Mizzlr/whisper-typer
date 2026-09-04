@@ -22,6 +22,9 @@ build/
 *.log
 .grepai/
 
+# Private voice captures and recovered transcripts
+recovered-dictations-*.md
+
 # Model files (large binaries, download separately)
 *.onnx
 voices-v1.0.bin

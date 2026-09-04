@@ -1,0 +1,14 @@
+[Unit]
+Description=Warm the White Wolf resident Ollama grammar model
+After=network-online.target ollama.service
+Wants=network-online.target
+Requires=ollama.service
+PartOf=ollama.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused --max-time 120 --header "Content-Type: application/json" --data-binary "{\"model\":\"granite4.2:3b\",\"prompt\":\"Return exactly READY\",\"stream\":false,\"think\":false,\"keep_alive\":-1,\"options\":{\"temperature\":0,\"num_predict\":16}}" http://192.168.0.103:11434/api/generate
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

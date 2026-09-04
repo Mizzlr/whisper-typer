@@ -26,7 +26,8 @@ use serde_json::json;
 
 use whisper_typer_rs::vad::{self, SileroVad};
 
-const TRANSCRIBE_URL: &str = "http://127.0.0.1:8767/transcribe";
+const LOCAL_TRANSCRIBE_URL: &str = "http://127.0.0.1:8767/transcribe";
+const TRANSCRIBE_URL_ENV: &str = "WHISPER_VOICE_JOURNAL_ASR_URL";
 const SAMPLE_RATE: u32 = 16_000;
 const HALLUCINATION_CONFIG_NAME: &str = "hallucinations.txt";
 const VAD_RMS_THRESHOLD: f32 = 0.012;
@@ -87,11 +88,11 @@ enum VadMode {
 }
 
 // Ollama-based hallucination filter (second pass after regex).
-// Switched from gemma4:e2b (7.3 GB) to granite4.1:3b (2.1 GB) on 2026-05-03 —
-// frees ~5 GB of GPU memory while passing 7/7 of the existing few-shot
-// regression cases at ~150–250ms steady-state latency.
+// Uses the compact Granite 3B family to preserve GPU headroom. Keep the
+// deterministic regex pass and graceful fallback because model behavior can
+// change between Granite releases.
 const OLLAMA_HOST: &str = "http://127.0.0.1:11434";
-const OLLAMA_MODEL: &str = "granite4.1:3b";
+const OLLAMA_MODEL: &str = "granite4.2:3b";
 const OLLAMA_TIMEOUT_SEC: u64 = 30;
 const OLLAMA_KEEP_ALIVE_SEC: u64 = 3600;
 
@@ -170,8 +171,10 @@ struct AsrSegment {
 }
 
 #[derive(Debug, Deserialize)]
-struct AsrResponse {
-    segments: Vec<AsrSegment>,
+#[serde(untagged)]
+enum AsrResponse {
+    Segmented { segments: Vec<AsrSegment> },
+    Plain { text: String },
 }
 
 fn wav_bytes(samples: &[f32]) -> Result<Vec<u8>, String> {
@@ -194,7 +197,11 @@ fn wav_bytes(samples: &[f32]) -> Result<Vec<u8>, String> {
     Ok(cur.into_inner())
 }
 
-fn transcribe(client: &reqwest::blocking::Client, samples: &[f32]) -> Result<String, String> {
+fn transcribe_at(
+    client: &reqwest::blocking::Client,
+    samples: &[f32],
+    url: &str,
+) -> Result<String, String> {
     let wav = wav_bytes(samples)?;
     let part = reqwest::blocking::multipart::Part::bytes(wav)
         .file_name("chunk.wav")
@@ -202,7 +209,7 @@ fn transcribe(client: &reqwest::blocking::Client, samples: &[f32]) -> Result<Str
         .map_err(|e| e.to_string())?;
     let form = reqwest::blocking::multipart::Form::new().part("audio", part);
     let resp = client
-        .post(TRANSCRIBE_URL)
+        .post(url)
         .multipart(form)
         .send()
         .map_err(|e| e.to_string())?;
@@ -210,14 +217,37 @@ fn transcribe(client: &reqwest::blocking::Client, samples: &[f32]) -> Result<Str
         return Err(format!("transcribe failed: HTTP {}", resp.status()));
     }
     let parsed: AsrResponse = resp.json().map_err(|e| e.to_string())?;
-    let text = parsed
-        .segments
-        .iter()
-        .map(|s| s.text.trim())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let text = match parsed {
+        AsrResponse::Segmented { segments } => segments
+            .iter()
+            .map(|s| s.text.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+        AsrResponse::Plain { text } => text.trim().to_string(),
+    };
     Ok(text)
+}
+
+fn transcribe(client: &reqwest::blocking::Client, samples: &[f32]) -> Result<String, String> {
+    let primary = std::env::var(TRANSCRIBE_URL_ENV)
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| LOCAL_TRANSCRIBE_URL.to_string());
+    match transcribe_at(client, samples, &primary) {
+        Ok(text) => Ok(text),
+        Err(primary_error) if primary != LOCAL_TRANSCRIBE_URL => {
+            eprintln!(
+                "Voice Journal remote ASR failed ({primary_error}); falling back to local ASR"
+            );
+            transcribe_at(client, samples, LOCAL_TRANSCRIBE_URL).map_err(|fallback_error| {
+                format!(
+                    "remote ASR failed ({primary_error}); local fallback failed ({fallback_error})"
+                )
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Today's date in `YYYY-MM-DD`. Honors `WHISPER_VOICE_JOURNAL_TODAY_OVERRIDE`
@@ -550,6 +580,15 @@ fn is_hallucination(text: &str, filters: &[Regex]) -> bool {
 
     // Built-in guardrail for low-signal chunk fragments.
     if words.is_empty() {
+        return true;
+    }
+    // Granite Speech 5 can emit short acknowledgement/filler runs from
+    // low-context audio. Keep them in the unfiltered evidence stream, but do
+    // not promote an utterance made entirely of these fillers to the journal.
+    if words
+        .iter()
+        .all(|word| matches!(*word, "okay" | "ok" | "yeah"))
+    {
         return true;
     }
     if words.len() == 1 {
@@ -1245,11 +1284,13 @@ fn start_capture(
 /// midnight transparently rolls onto the new day's files. If the input
 /// file disappears (path moved, day rolled, service stopped), the tailer
 /// reopens on the next poll.
-fn spawn_dictation_tailer(line_tx: Sender<String>) {
+fn spawn_dictation_tailer(line_tx: Sender<String>, hallucination_filters: Vec<Regex>) {
     #[derive(Deserialize)]
     struct DictationEntry {
         #[serde(default)]
         timestamp: String,
+        #[serde(default)]
+        whisper_text: String,
         #[serde(default)]
         final_text: String,
     }
@@ -1321,7 +1362,12 @@ fn spawn_dictation_tailer(line_tx: Sender<String>) {
                         Ok(e) => e,
                         Err(_) => continue,
                     };
-                    if entry.final_text.trim().is_empty() {
+                    let raw_text = if entry.whisper_text.trim().is_empty() {
+                        entry.final_text.trim()
+                    } else {
+                        entry.whisper_text.trim()
+                    };
+                    if raw_text.is_empty() {
                         continue;
                     }
                     let hms = entry
@@ -1330,16 +1376,22 @@ fn spawn_dictation_tailer(line_tx: Sender<String>) {
                         .nth(1)
                         .and_then(|t| t.split('.').next())
                         .unwrap_or("--:--:--");
-                    let line = format!("[{hms}] [dictated] {}", entry.final_text.trim());
-                    if let Some(f) = journal.as_mut() {
-                        let _ = writeln!(f, "{line}");
-                        let _ = f.flush();
-                    }
+                    let raw_line = format!("[{hms}] [dictated] {raw_text}");
+                    let curated_line = format!("[{hms}] [dictated] {}", entry.final_text.trim());
+                    // The raw evidence stream always receives the exact
+                    // dictation. Only the curated journal and live view apply
+                    // deterministic filler/hallucination rules.
                     if let Some(f) = unfiltered.as_mut() {
-                        let _ = writeln!(f, "{line}");
+                        let _ = writeln!(f, "{raw_line}");
                         let _ = f.flush();
                     }
-                    let _ = line_tx.send(line);
+                    if !is_hallucination(raw_text, &hallucination_filters) {
+                        if let Some(f) = journal.as_mut() {
+                            let _ = writeln!(f, "{curated_line}");
+                            let _ = f.flush();
+                        }
+                        let _ = line_tx.send(curated_line);
+                    }
                 }
             }
 
@@ -1603,6 +1655,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             backpressure_drops: backpressure_drops.clone(),
         },
     )?;
+    let dictation_filters = hallucination_filters.clone();
     spawn_transcriber(
         audio_rx,
         line_tx.clone(),
@@ -1610,7 +1663,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hallucination_filters,
         llm_filter,
     );
-    spawn_dictation_tailer(line_tx);
+    spawn_dictation_tailer(line_tx, dictation_filters);
 
     if headless_enabled() {
         eprintln!("Voice Journal running headless");
@@ -1834,5 +1887,22 @@ mod tests {
         )]);
 
         assert!(!any_hotkey_combo_pressed(&devices, &[combo]));
+    }
+
+    #[test]
+    fn filler_only_utterances_are_filtered() {
+        let filters = Vec::new();
+        assert!(is_hallucination("okay", &filters));
+        assert!(is_hallucination("okay yeah okay yeah yeah okay", &filters));
+        assert!(is_hallucination("OK, yeah.", &filters));
+    }
+
+    #[test]
+    fn filler_words_inside_real_speech_are_preserved() {
+        assert!(!is_hallucination(
+            "okay check how the memory test is doing",
+            &[]
+        ));
+        assert!(!is_hallucination("yeah let us continue the test", &[]));
     }
 }

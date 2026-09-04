@@ -1,0 +1,18 @@
+[Unit]
+Description=Whisper Typer punctuation and truecasing (CUDA)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/punctuation-server
+ExecStart=%h/.local/share/punctuator-bench/.venv/bin/uvicorn punctuation_server:app --host 127.0.0.1 --port 8770
+Environment=LD_LIBRARY_PATH=%h/.local/share/punctuator-bench/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/lib/x86_64-linux-gnu
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=graphical-session.target

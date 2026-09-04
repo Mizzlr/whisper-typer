@@ -28,7 +28,7 @@ const TTS_API: &str = "http://127.0.0.1:8767";
 // noticeably; the result is cached per-session so the Stop hook only reads.
 
 const OLLAMA_HOST: &str = "http://127.0.0.1:11434";
-const LABEL_MODEL: &str = "granite4.1:3b";
+const LABEL_MODEL: &str = "granite4.2:3b";
 /// Hard cap on the Ollama call. If exceeded, we fall back to the deterministic
 /// label extractor; we never block the prompt-submit hook for longer than this.
 const LABEL_TIMEOUT_SECS: u64 = 8;

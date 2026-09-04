@@ -1,0 +1,16 @@
+[Unit]
+Description=Granite Speech 5 TurboCTC ASR service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/granite-speech5-bench/.venv/bin/uvicorn granite_speech5_server:app --host 192.168.0.103 --port 8769
+WorkingDirectory=%h/.local/share/granite-speech5-server
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

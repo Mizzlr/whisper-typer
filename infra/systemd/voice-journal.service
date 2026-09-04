@@ -16,8 +16,14 @@ PrivateTmp=true
 
 # Environment for audio + ONNX CUDA (Silero VAD uses ort)
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
-Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/ollama/mlx_cuda_v13
+Environment=LD_LIBRARY_PATH=__HOME_DIR__/.local/lib/whisper-typer:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/ollama/mlx_cuda_v13
 Environment=TERM=xterm-256color
+# Prefer White Wolf Granite Speech 5; transcriber automatically falls back to
+# Black Beast's local Distil-Whisper endpoint if the remote node is unavailable.
+Environment=WHISPER_VOICE_JOURNAL_ASR_URL=http://192.168.0.103:8769/transcribe
+# Preserve the raw/unfiltered journal while evaluating Granite Speech 5. The
+# semantic LLM filter remains available, but is opt-in during this trial.
+Environment=WHISPER_VOICE_JOURNAL_LLM=0
 
 StandardOutput=journal
 StandardError=journal

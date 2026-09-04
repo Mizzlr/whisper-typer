@@ -8,7 +8,7 @@ Conflicts=whisper-typer.service code-speaker.service
 [Service]
 Type=simple
 # Free GPU memory before allocating Whisper state buffers.
-ExecStartPre=-/usr/local/bin/ollama stop granite4.1:3b
+ExecStartPre=-/usr/local/bin/ollama stop granite4.2:3b
 ExecStart=%h/.local/bin/whisper-typer-rs
 WorkingDirectory=__REPO_DIR__
 Restart=on-failure
@@ -20,7 +20,7 @@ PrivateTmp=true
 # Environment for audio
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 # ONNX Runtime CUDA providers; cuDNN 9 from Python venv (nvidia-cudnn-cu12 pip package)
-Environment=LD_LIBRARY_PATH=__REPO_DIR__/target/release:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/ollama/mlx_cuda_v13
+Environment=LD_LIBRARY_PATH=__HOME_DIR__/.local/lib/whisper-typer:__REPO_DIR__/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/ollama/mlx_cuda_v13
 
 StandardOutput=journal
 StandardError=journal

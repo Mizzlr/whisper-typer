@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .transpose()?;
-    let output_mode = if args.no_ollama {
+    let output_mode = if args.no_ollama || !config.ollama.enabled {
         runtime_settings::OutputMode::Whisper
     } else {
         explicit_mode.unwrap_or(runtime_settings::OutputMode::Ollama)
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_settings = Arc::new(runtime_settings::RuntimeSettings::load(
         output_mode,
         config.ollama.enabled && !args.no_ollama,
-        explicit_mode.is_none() && !args.no_ollama,
+        explicit_mode.is_none() && !args.no_ollama && config.ollama.enabled,
     ));
 
     // Load Whisper model and pre-warm CUDA state.

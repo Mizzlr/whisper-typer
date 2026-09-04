@@ -16,15 +16,28 @@ audio:
   device_index: null      # null = system default microphone
 
 recording:
-  max_duration: 120       # Maximum recording length in seconds
+  max_duration: 300       # Maximum recording length in seconds (5 minutes)
+  save_audio: true        # Keep exact dictation clips for ASR/model evaluation
+  audio_retention_days: 7 # Automatically delete saved audio after 7 days
 
 whisper:
   model: "models/ggml-distil-large-v3.bin"
   device: "cuda"          # cuda, cpu, or mps (Mac)
 
-ollama:
+remote_asr:
   enabled: true
-  model: "granite4.1:3b"
+  url: "http://192.168.0.103:8769/transcribe"
+  timeout_seconds: 30
+  fallback_local: true
+
+punctuation:
+  enabled: true
+  url: "http://127.0.0.1:8770/punctuate"
+  timeout_ms: 2000
+
+ollama:
+  enabled: false
+  model: "granite4.2:3b"
   host: "http://127.0.0.1:11434"
   keep_alive: 3600          # Keep model loaded for 1 hour after each request
   skip_threshold: 5
@@ -34,7 +47,7 @@ typer:
   backend: "xdotool"      # xdotool for X11 (respects keyboard layout)
 
 corrections:
-  enabled: true
+  enabled: false
   path: "~/.config/whisper-typer/corrections.tsv"  # Local typo corrections, not committed
 
 feedback:                       # Deprecated compatibility block; currently ignored.
@@ -52,7 +65,7 @@ silence:
   threshold: 0.01          # RMS energy threshold
   duration: 1.5            # Seconds of silence to stop
   min_speech_duration: 0.5 # Minimum recording before checking
-  max_recording_duration: 120.0  # Maximum recording length (matches recording.max_duration)
+  max_recording_duration: 300.0  # Maximum recording length (matches recording.max_duration)
 
 # Code Speaker TTS (Kokoro) for Claude Code events
 tts:

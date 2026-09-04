@@ -21,7 +21,9 @@ use crate::config::Config;
 use crate::history::{self, TranscriptionRecord};
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::processor::{is_pathological_stutter, CorrectionMetadata, OllamaProcessor};
+use crate::punctuation::PunctuationClient;
 use crate::recorder::AudioRecorder;
+use crate::remote_asr::RemoteAsrClient;
 use crate::runtime_settings::{OutputMode, RuntimeSettings};
 use crate::transcriber::WhisperTranscriber;
 use crate::typer::TextTyper;
@@ -252,6 +254,8 @@ pub struct DictationService {
     state: ServiceState,
     recorder: AudioRecorder,
     transcriber: WhisperTranscriber,
+    remote_asr: Option<RemoteAsrClient>,
+    punctuation: Option<PunctuationClient>,
     processor: OllamaProcessor,
     typer: TextTyper,
     runtime_settings: Arc<RuntimeSettings>,
@@ -275,6 +279,28 @@ impl DictationService {
         let typer = TextTyper::new(&config.typer);
         let voice_gate = VoiceGate::new();
         let voice_corrections = VoiceCorrections::load(&config);
+        let remote_asr = if config.remote_asr.enabled {
+            match RemoteAsrClient::new(config.remote_asr.clone()) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    warn!("Remote ASR disabled: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let punctuation = if config.punctuation.enabled {
+            match PunctuationClient::new(config.punctuation.clone()) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    warn!("Punctuation processing disabled: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Short-timeout client for fire-and-forget TTS cancel calls
         let tts_cancel_client = reqwest::Client::builder()
@@ -287,6 +313,8 @@ impl DictationService {
             state: ServiceState::Idle,
             recorder,
             transcriber,
+            remote_asr,
+            punctuation,
             processor,
             typer,
             runtime_settings,
@@ -415,7 +443,10 @@ impl DictationService {
             return;
         }
 
-        let audio_duration = samples.len() as f64 / self.recorder.sample_rate() as f64;
+        let recorded_at = Local::now();
+        let sample_rate = self.recorder.sample_rate();
+        let sample_count = samples.len();
+        let audio_duration = sample_count as f64 / sample_rate as f64;
         info!(
             "Captured {:.1}s of audio ({} samples)",
             audio_duration,
@@ -425,36 +456,78 @@ impl DictationService {
         let runtime = self.runtime_settings.snapshot();
         let output_mode = runtime.output_mode;
 
-        let (raw_text, t_whisper, t_ollama, processed_text, ollama_text);
+        // Persist the exact buffer before ASR/correction/typing so benchmark
+        // inputs remain faithful even if later processing fails.
+        let audio_artifact = if self.config.recording.save_audio {
+            match history::save_audio(
+                &samples,
+                sample_rate,
+                &recorded_at,
+                self.config.recording.audio_retention_days,
+            ) {
+                Ok(artifact) => {
+                    info!("Saved dictation audio to {}", artifact.path.display());
+                    Some(artifact)
+                }
+                Err(e) => {
+                    warn!("Failed to save dictation audio; continuing transcription: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let (raw_text, t_whisper, t_punctuation, t_ollama, processed_text, ollama_text);
         let mut correction_metadata: Option<CorrectionMetadata> = None;
         // The deprecated Ollama audio mode intentionally follows this reliable
         // Whisper path. No utterance may be dropped merely because an
         // experimental multimodal request failed.
         {
             let t_whisper_start = Instant::now();
-            let transcriber = self.transcriber.clone();
-            raw_text =
-                match tokio::task::spawn_blocking(move || transcriber.transcribe(&samples, None))
+            let remote_result = match self.remote_asr.clone() {
+                Some(remote) => match remote.transcribe(&samples, sample_rate).await {
+                    Ok(result) => {
+                        info!("Remote ASR succeeded in {:.0}ms", result.latency_ms);
+                        Some(Ok(result))
+                    }
+                    Err(error) if remote.fallback_local() => {
+                        warn!("Remote ASR failed; using local Whisper fallback: {error}");
+                        None
+                    }
+                    Err(error) => Some(Err(error)),
+                },
+                None => None,
+            };
+            let transcription = match remote_result {
+                Some(result) => result,
+                None => {
+                    let transcriber = self.transcriber.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        transcriber.transcribe(&samples, None)
+                    })
                     .await
-                {
-                    Ok(Ok(result)) => {
-                        info!(
-                            "Transcription ({:.0}ms): \"{}\"",
-                            result.latency_ms, result.text
-                        );
-                        result.text
+                    {
+                        Ok(Ok(result)) => Ok(result),
+                        Ok(Err(error)) => Err(format!("local Whisper failed: {error}")),
+                        Err(error) => Err(format!("local Whisper task panicked: {error}")),
                     }
-                    Ok(Err(e)) => {
-                        warn!("Transcription failed: {e}");
-                        self.transition_to_idle();
-                        return;
-                    }
-                    Err(e) => {
-                        warn!("Transcription task panicked: {e}");
-                        self.transition_to_idle();
-                        return;
-                    }
-                };
+                }
+            };
+            raw_text = match transcription {
+                Ok(result) => {
+                    info!(
+                        "Transcription ({:.0}ms): \"{}\"",
+                        result.latency_ms, result.text
+                    );
+                    result.text
+                }
+                Err(error) => {
+                    warn!("Transcription failed: {error}");
+                    self.transition_to_idle();
+                    return;
+                }
+            };
             t_whisper = t_whisper_start.elapsed().as_secs_f64() * 1000.0;
 
             if raw_text.is_empty() {
@@ -495,19 +568,41 @@ impl DictationService {
                 return;
             }
 
+            // Restore punctuation and truecasing after ASR. Failure is
+            // deliberately fail-open: typing the raw transcript is better
+            // than dropping or delaying the user's dictation.
+            let t_punctuation_start = Instant::now();
+            let punctuated_text = match self.punctuation.clone() {
+                Some(client) => match client.process(&raw_text).await {
+                    Ok(result) => {
+                        info!(
+                            "Punctuation succeeded in {:.0}ms: \"{}\"",
+                            result.latency_ms, result.text
+                        );
+                        result.text
+                    }
+                    Err(error) => {
+                        warn!("Punctuation failed; using raw ASR text: {error}");
+                        raw_text.clone()
+                    }
+                },
+                None => raw_text.clone(),
+            };
+            t_punctuation = t_punctuation_start.elapsed().as_secs_f64() * 1000.0;
+
             // --- Ollama correction ---
             let t_ollama_start = Instant::now();
-            let word_count = raw_text.split_whitespace().count();
+            let word_count = punctuated_text.split_whitespace().count();
             let skip_threshold = self.config.ollama.skip_threshold;
             let (pt, ot) = match output_mode {
-                OutputMode::Whisper => (None, None),
-                _ if !runtime.ollama_enabled => (Some(raw_text.clone()), None),
+                OutputMode::Whisper => (Some(punctuated_text.clone()), None),
+                _ if !runtime.ollama_enabled => (Some(punctuated_text.clone()), None),
                 _ if skip_threshold > 0 && word_count <= skip_threshold => {
                     info!("Skipped Ollama ({word_count} words <= {skip_threshold} threshold)");
-                    (Some(raw_text.clone()), None)
+                    (Some(punctuated_text.clone()), None)
                 }
                 OutputMode::Ollama | OutputMode::Both => {
-                    let correction = self.processor.process(&raw_text).await;
+                    let correction = self.processor.process(&punctuated_text).await;
                     info!(
                         "Ollama correction accepted={}: \"{}\"",
                         correction.metadata.accepted, correction.text
@@ -540,7 +635,7 @@ impl DictationService {
 
         // Build final output
         let final_text = match output_mode {
-            OutputMode::Whisper => format!("{raw_clean} "),
+            OutputMode::Whisper => format!("{selected_text} "),
             OutputMode::Ollama => {
                 format!("{selected_text} ")
             }
@@ -557,8 +652,8 @@ impl DictationService {
         let t_total = t_start.elapsed().as_secs_f64() * 1000.0;
 
         info!(
-            "  Whisper: {:.0}ms | Ollama: {:.0}ms | Typing: {:.0}ms | Total: {:.0}ms | Audio: {:.1}s | Speed: {:.1}x",
-            t_whisper, t_ollama, t_type, t_total, audio_duration,
+            "  ASR: {:.0}ms | Punctuation: {:.0}ms | Ollama: {:.0}ms | Typing: {:.0}ms | Total: {:.0}ms | Audio: {:.1}s | Speed: {:.1}x",
+            t_whisper, t_punctuation, t_ollama, t_type, t_total, audio_duration,
             if t_total > 0.0 { (audio_duration * 1000.0) / t_total } else { 0.0 }
         );
 
@@ -572,7 +667,7 @@ impl DictationService {
         };
 
         let record = TranscriptionRecord {
-            timestamp: Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+            timestamp: recorded_at.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
             whisper_text: raw_text,
             ollama_text,
             final_text: final_text.clone(),
@@ -600,6 +695,12 @@ impl DictationService {
             char_count: final_text.len(),
             word_count: final_text.split_whitespace().count(),
             speed_ratio,
+            audio_path: audio_artifact
+                .as_ref()
+                .map(|artifact| artifact.path.to_string_lossy().into_owned()),
+            audio_sample_rate_hz: audio_artifact.as_ref().map(|_| sample_rate),
+            audio_samples: audio_artifact.as_ref().map(|_| sample_count),
+            audio_bytes: audio_artifact.as_ref().map(|artifact| artifact.bytes),
         };
         history::save_record(&record);
 

@@ -1,0 +1,23 @@
+[Unit]
+Description=Whisper ASR Server - White Wolf CUDA inference
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/whisper-asr-server --config %h/.config/whisper-asr/config.yaml --listen 192.168.0.103:8768
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+Environment=LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.cache
+MemoryHigh=6G
+MemoryMax=8G
+
+[Install]
+WantedBy=default.target

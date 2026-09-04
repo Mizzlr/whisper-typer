@@ -59,12 +59,18 @@ impl Default for AudioConfig {
 #[serde(default)]
 pub struct RecordingConfig {
     pub max_duration: f64,
+    /// Save each non-silent dictation as a lossless WAV for model evaluation.
+    pub save_audio: bool,
+    /// Automatically remove saved dictation audio older than this many days.
+    pub audio_retention_days: u64,
 }
 
 impl Default for RecordingConfig {
     fn default() -> Self {
         Self {
             max_duration: 120.0,
+            save_audio: false,
+            audio_retention_days: 7,
         }
     }
 }
@@ -74,6 +80,44 @@ impl Default for RecordingConfig {
 pub struct WhisperConfig {
     pub model: String,
     pub device: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RemoteAsrConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub timeout_seconds: u64,
+    pub fallback_local: bool,
+}
+
+impl Default for RemoteAsrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: "http://127.0.0.1:8769/transcribe".into(),
+            timeout_seconds: 30,
+            fallback_local: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PunctuationConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for PunctuationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: "http://127.0.0.1:8770/punctuate".into(),
+            timeout_ms: 2_000,
+        }
+    }
 }
 
 impl Default for WhisperConfig {
@@ -101,7 +145,7 @@ impl Default for OllamaConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: "granite4.1:3b".into(),
+            model: "granite4.2:3b".into(),
             host: "http://localhost:11434".into(),
             keep_alive: 3600,
             skip_threshold: 0,
@@ -230,6 +274,8 @@ pub struct Config {
     pub audio: AudioConfig,
     pub recording: RecordingConfig,
     pub whisper: WhisperConfig,
+    pub remote_asr: RemoteAsrConfig,
+    pub punctuation: PunctuationConfig,
     pub ollama: OllamaConfig,
     pub typer: TyperConfig,
     pub feedback: FeedbackConfig,

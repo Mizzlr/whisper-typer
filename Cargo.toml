@@ -20,6 +20,10 @@ path = "src/bin/voice_journal.rs"
 name = "whisper-benchmark"
 path = "src/bin/benchmark.rs"
 
+[[bin]]
+name = "whisper-asr-server"
+path = "src/bin/asr_server.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }

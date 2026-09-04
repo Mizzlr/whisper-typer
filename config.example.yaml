@@ -15,9 +15,20 @@ whisper:
   model: "models/ggml-distil-large-v3.bin"
   device: "cuda"
 
+remote_asr:
+  enabled: false
+  url: "http://127.0.0.1:8769/transcribe"
+  timeout_seconds: 30
+  fallback_local: true
+
+punctuation:
+  enabled: false
+  url: "http://127.0.0.1:8770/punctuate"
+  timeout_ms: 2000
+
 ollama:
   enabled: true
-  model: "granite4.1:3b"
+  model: "granite4.2:3b"
   host: "http://127.0.0.1:11434"
   keep_alive: 3600
   skip_threshold: 5

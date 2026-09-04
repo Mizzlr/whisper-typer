@@ -56,6 +56,18 @@ install -m 0755 "$REPO_DIR/target/release/whisper-typer-rs" "$HOME/.local/bin/wh
 install -m 0755 "$REPO_DIR/target/release/tts-hook"         "$HOME/.local/bin/tts-hook"
 install -m 0755 "$REPO_DIR/target/release/voice-journal"    "$HOME/.local/bin/voice-journal"
 install -m 0755 "$REPO_DIR/target/release/whisper-benchmark" "$HOME/.local/bin/whisper-benchmark"
+install -m 0755 "$REPO_DIR/target/release/whisper-asr-server" "$HOME/.local/bin/whisper-asr-server"
+
+# Keep runtime libraries outside Cargo's disposable target directory so
+# `cargo clean` cannot break deployed services.
+RUNTIME_LIB_DIR="$HOME/.local/lib/whisper-typer"
+mkdir -p "$RUNTIME_LIB_DIR"
+for runtime_lib in \
+    libonnxruntime_providers_shared.so \
+    libonnxruntime_providers_cuda.so \
+    libonnxruntime_providers_tensorrt.so; do
+    install -m 0644 "$REPO_DIR/target/release/$runtime_lib" "$RUNTIME_LIB_DIR/$runtime_lib"
+done
 echo -e "${GREEN}  Installed to ~/.local/bin/${NC}"
 
 # 5. systemd user services. Substitute __REPO_DIR__ in unit templates
@@ -64,13 +76,13 @@ echo -e "${YELLOW}[5/5] systemd user services...${NC}"
 mkdir -p "$HOME/.config/systemd/user"
 
 UNIT_DEST="$HOME/.config/systemd/user/whisper-typer-rs.service"
-sed "s|__REPO_DIR__|$REPO_DIR|g" \
+sed -e "s|__REPO_DIR__|$REPO_DIR|g" -e "s|__HOME_DIR__|$HOME|g" \
     "$INFRA_DIR/systemd/whisper-typer.service" > "$UNIT_DEST"
 chmod 0644 "$UNIT_DEST"
 echo -e "${GREEN}  whisper-typer-rs.service → $UNIT_DEST${NC}"
 
 VJ_DEST="$HOME/.config/systemd/user/voice-journal.service"
-sed "s|__REPO_DIR__|$REPO_DIR|g" \
+sed -e "s|__REPO_DIR__|$REPO_DIR|g" -e "s|__HOME_DIR__|$HOME|g" \
     "$INFRA_DIR/systemd/voice-journal.service" > "$VJ_DEST"
 chmod 0644 "$VJ_DEST"
 echo -e "${GREEN}  voice-journal.service     → $VJ_DEST${NC}"
@@ -84,7 +96,7 @@ echo "=== Setup Complete ==="
 echo
 echo -e "${YELLOW}Next steps:${NC}"
 echo "  1. Log out and back in (for input group to take effect)"
-echo "  2. Pull the Ollama model:  ollama pull granite4.1:3b"
+echo "  2. Pull the Ollama model:  ollama pull granite4.2:3b"
 echo "  3. Drop model files into models/ (see README.md):"
 echo "       - ggml-distil-large-v3.bin (Whisper)"
 echo "       - kokoro-v1.0.onnx + voices-v1.0.bin (TTS)"

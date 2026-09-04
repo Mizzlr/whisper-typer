@@ -1,0 +1,9 @@
+whisper:
+  model: "/home/mizzlr/.local/share/whisper-asr/models/ggml-distil-large-v3.5.bin"
+  device: "cuda"
+
+mcp:
+  enabled: false
+
+tts:
+  enabled: false
