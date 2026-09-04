@@ -107,6 +107,7 @@ impl Default for RemoteAsrConfig {
 pub struct PunctuationConfig {
     pub enabled: bool,
     pub url: String,
+    pub fallback_url: Option<String>,
     pub timeout_ms: u64,
 }
 
@@ -115,6 +116,7 @@ impl Default for PunctuationConfig {
         Self {
             enabled: false,
             url: "http://127.0.0.1:8770/punctuate".into(),
+            fallback_url: None,
             timeout_ms: 2_000,
         }
     }

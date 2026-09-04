@@ -10,6 +10,9 @@ shape, not general leaderboard scores. Results below were collected on an RTX
 - Speech-to-text: Granite Speech 5.0 TurboCTC on White Wolf is the current
   trial primary. Keep Distil-Whisper large-v3 warm on Black Beast as automatic
   fallback when the remote endpoint is unavailable.
+- Punctuation/truecasing: the ONNX CUDA service on White Wolf is primary; an
+  identical loopback-only service stays warm on Black Beast as automatic
+  fallback. Both optional paths fail open to exact ASR text.
 - Grammar correction: disabled during the raw Granite Speech 5 TurboCTC trial.
   `granite4.2:3b` is installed as the local Ollama successor, but must not be
   promoted until it passes the saved-corpus suite. The correction guard falls

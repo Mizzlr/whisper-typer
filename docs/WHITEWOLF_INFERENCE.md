@@ -9,11 +9,12 @@ RTX 3060 with 12 GiB VRAM.
 | Service | Endpoint | Resident model |
 |---|---|---|
 | `granite-speech5.service` (user unit) | `http://192.168.0.103:8769` | Granite Speech 5.0 470M TurboCTC |
+| `punctuation-whitewolf.service` (user unit) | `http://192.168.0.103:8770` | `punctuation_fullstop_truecase_english` (CUDA) |
 | `punctuation-blackbeast.service` (Black Beast user unit) | `http://127.0.0.1:8770` | `punctuation_fullstop_truecase_english` |
 
-White Wolf's ASR listener is restricted by its firewall to Black Beast at
-`192.168.0.100`; Black Beast's punctuation listener is loopback-only. Both
-models load and warm during service startup. The earlier White Wolf
+White Wolf's ASR and punctuation listeners are restricted by its firewall to
+Black Beast at `192.168.0.100`; Black Beast's punctuation listener is
+loopback-only. All models load and warm during service startup. The earlier White Wolf
 Distil-Whisper service on port 8768 and Ollama grammar service on port 11434
 are retained as deployment options but disabled during this trial.
 
@@ -22,12 +23,14 @@ Repository deployment inputs:
 - `infra/systemd/whisper-asr-whitewolf.service`
 - `infra/systemd/ollama-whitewolf.conf`
 - `infra/systemd/ollama-whitewolf-warm.service`
+- `infra/systemd/punctuation-whitewolf.service`
 - `infra/whitewolf-asr-config.yaml`
 
 ## API checks
 
 ```bash
 curl -fsS http://192.168.0.103:8769/health
+curl -fsS http://192.168.0.103:8770/health
 curl -fsS http://127.0.0.1:8770/health
 curl -fsS -F audio=@sample.wav http://192.168.0.103:8769/transcribe | jq
 ```
@@ -160,13 +163,17 @@ ms on those samples.
 
 ### Live punctuation trial
 
-Black Beast now runs a resident CUDA service for
+White Wolf and Black Beast now each run a resident CUDA service for
 `1-800-BAD-CODE/punctuation_fullstop_truecase_english` on
-`http://127.0.0.1:8770`. Dictation uses it after ASR and fails open to the raw
-transcript if the service is unavailable. The first live requests measured
-37–41 ms model latency. Ollama correction remains disabled. Voice Journal's
-unfiltered stream stores `whisper_text` (the exact raw ASR), while its curated
-dictated entries use the final punctuated text.
+ports 8770. White Wolf is primary and Black Beast's loopback listener is the
+warm fallback. Dictation and ambient Voice Journal transcription fail over
+each stage independently: White Wolf ASR to local Distil-Whisper, and White
+Wolf punctuation to local punctuation. If both punctuation services fail, the
+pipeline fails open to raw ASR rather than dropping text. The first live
+White Wolf punctuation request took 17 ms; both hosts returned the same text
+for the checked sentence. Ollama correction remains disabled. Voice Journal's
+unfiltered stream stores the exact raw ASR, while its curated journal receives
+punctuation and truecasing.
 
 ## Hardware-safety boundary
 

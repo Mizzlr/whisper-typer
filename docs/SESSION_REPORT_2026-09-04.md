@@ -2,9 +2,9 @@
 
 ## Outcome
 
-Whisper Typer now uses White Wolf's resident Granite Speech 5.0 TurboCTC ASR,
-with Black Beast's resident Distil-Whisper kept as an automatic fallback.
-Black Beast performs optional CUDA punctuation/truecasing and uses a persistent
+Whisper Typer now uses White Wolf's resident Granite Speech 5.0 TurboCTC ASR
+and CUDA punctuation/truecasing, with Black Beast keeping warm fallbacks for
+both stages. Black Beast uses a persistent
 in-process X11 clipboard for low-latency, Dvorak-safe paste. Voice Journal keeps
 the raw ASR evidence separately from curated output and retains private WAV
 samples for seven days.
@@ -16,6 +16,10 @@ samples for seven days.
 - Added a permanently warm Rust Whisper HTTP server and White Wolf units/config.
 - Added the Granite Speech 5 TurboCTC server and service definition.
 - Added the Black Beast CUDA punctuation server and loopback-only service.
+- Deployed the same CUDA punctuation model on White Wolf behind a
+  Black-Beast-only firewall rule.
+- Added independent primary/fallback routing for punctuation in Whisper Typer
+  and for both ASR and punctuation in Voice Journal.
 - Added private per-dictation WAV capture, atomic writes, metadata, and a
   seven-day retention policy.
 - Made Voice Journal accept segmented or plain ASR responses, use remote-first
@@ -40,6 +44,8 @@ samples for seven days.
 - Live Voice Journal service: active.
 - Live punctuation service: active; CUDA execution provider reported first.
 - White Wolf Granite Speech endpoint: healthy.
+- White Wolf punctuation endpoint: healthy; CUDA provider reported first and a
+  checked request completed in 17 ms with the same result as Black Beast.
 - Deployed Whisper Typer, Voice Journal, and punctuation artifacts matched the
   corresponding build/source hashes at verification time.
 - Two live paste samples measured 17.1 ms each, down from 183–222 ms; complete

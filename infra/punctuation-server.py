@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resident CUDA punctuation and truecasing service for Black Beast."""
+"""Resident CUDA punctuation and truecasing service for either inference host."""
 
 from contextlib import asynccontextmanager
 import threading

@@ -28,6 +28,9 @@ use whisper_typer_rs::vad::{self, SileroVad};
 
 const LOCAL_TRANSCRIBE_URL: &str = "http://127.0.0.1:8767/transcribe";
 const TRANSCRIBE_URL_ENV: &str = "WHISPER_VOICE_JOURNAL_ASR_URL";
+const LOCAL_PUNCTUATION_URL: &str = "http://127.0.0.1:8770/punctuate";
+const PUNCTUATION_URL_ENV: &str = "WHISPER_VOICE_JOURNAL_PUNCTUATION_URL";
+const PUNCTUATION_FALLBACK_URL_ENV: &str = "WHISPER_VOICE_JOURNAL_PUNCTUATION_FALLBACK_URL";
 const SAMPLE_RATE: u32 = 16_000;
 const HALLUCINATION_CONFIG_NAME: &str = "hallucinations.txt";
 const VAD_RMS_THRESHOLD: f32 = 0.012;
@@ -177,6 +180,11 @@ enum AsrResponse {
     Plain { text: String },
 }
 
+#[derive(Debug, Deserialize)]
+struct PunctuationResponse {
+    text: String,
+}
+
 fn wav_bytes(samples: &[f32]) -> Result<Vec<u8>, String> {
     let spec = WavSpec {
         channels: 1,
@@ -229,24 +237,87 @@ fn transcribe_at(
     Ok(text)
 }
 
-fn transcribe(client: &reqwest::blocking::Client, samples: &[f32]) -> Result<String, String> {
+fn transcribe(
+    remote_client: &reqwest::blocking::Client,
+    local_client: &reqwest::blocking::Client,
+    samples: &[f32],
+) -> Result<String, String> {
     let primary = std::env::var(TRANSCRIBE_URL_ENV)
         .ok()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| LOCAL_TRANSCRIBE_URL.to_string());
-    match transcribe_at(client, samples, &primary) {
+    let primary_client = if primary == LOCAL_TRANSCRIBE_URL {
+        local_client
+    } else {
+        remote_client
+    };
+    match transcribe_at(primary_client, samples, &primary) {
         Ok(text) => Ok(text),
         Err(primary_error) if primary != LOCAL_TRANSCRIBE_URL => {
             eprintln!(
                 "Voice Journal remote ASR failed ({primary_error}); falling back to local ASR"
             );
-            transcribe_at(client, samples, LOCAL_TRANSCRIBE_URL).map_err(|fallback_error| {
+            transcribe_at(local_client, samples, LOCAL_TRANSCRIBE_URL).map_err(|fallback_error| {
                 format!(
                     "remote ASR failed ({primary_error}); local fallback failed ({fallback_error})"
                 )
             })
         }
         Err(error) => Err(error),
+    }
+}
+
+fn punctuate_at(
+    client: &reqwest::blocking::Client,
+    text: &str,
+    url: &str,
+) -> Result<String, String> {
+    let response = client
+        .post(url)
+        .json(&json!({ "text": text }))
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let parsed: PunctuationResponse = response.json().map_err(|error| error.to_string())?;
+    let corrected = parsed.text.trim().to_string();
+    if corrected.is_empty() {
+        return Err("punctuation service returned empty text".to_string());
+    }
+    Ok(corrected)
+}
+
+/// Punctuate ambient Voice Journal text when configured. Failure is fail-open:
+/// the exact ASR text remains usable and is always retained in the raw journal.
+fn punctuate(client: &reqwest::blocking::Client, text: &str) -> Result<Option<String>, String> {
+    let Some(primary) = std::env::var(PUNCTUATION_URL_ENV)
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    match punctuate_at(client, text, &primary) {
+        Ok(corrected) => Ok(Some(corrected)),
+        Err(primary_error) => {
+            let fallback = std::env::var(PUNCTUATION_FALLBACK_URL_ENV)
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+                .unwrap_or_else(|| LOCAL_PUNCTUATION_URL.to_string());
+            if fallback == primary {
+                return Err(primary_error);
+            }
+            eprintln!(
+                "Voice Journal remote punctuation failed ({primary_error}); falling back to local punctuation"
+            );
+            punctuate_at(client, text, &fallback)
+                .map(Some)
+                .map_err(|fallback_error| {
+                    format!(
+                        "remote punctuation failed ({primary_error}); local fallback failed ({fallback_error})"
+                    )
+                })
+        }
     }
 }
 
@@ -1408,9 +1479,9 @@ fn spawn_transcriber(
     llm_filter: Arc<OllamaFilter>,
 ) {
     std::thread::spawn(move || {
-        let client = match reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(35))
+        let remote_asr_client = match reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(750))
+            .timeout(Duration::from_secs(5))
             .build()
         {
             Ok(client) => client,
@@ -1421,8 +1492,34 @@ fn spawn_transcriber(
                 return;
             }
         };
+        let local_asr_client = match reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(35))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = tx.send(format!(
+                    "[error] failed to create local ASR client: {error}"
+                ));
+                return;
+            }
+        };
+        let punctuation_client = match reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(500))
+            .timeout(Duration::from_secs(1))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = tx.send(format!(
+                    "[error] failed to create punctuation client: {error}"
+                ));
+                return;
+            }
+        };
         for chunk in rx {
-            match transcribe(&client, &chunk) {
+            match transcribe(&remote_asr_client, &local_asr_client, &chunk) {
                 Ok(text) if !text.trim().is_empty() => {
                     let trimmed = text.trim();
                     let ts = Local::now().format("%H:%M:%S");
@@ -1437,10 +1534,19 @@ fn spawn_transcriber(
                         let _ = tx.send(format!("[filtered-llm] {trimmed}"));
                         continue;
                     }
-                    let line = format!("[{ts}] {trimmed}");
-                    let _ = writer.write_journal(&line);
-                    let _ = writer.write_unfiltered(&line);
-                    let _ = tx.send(line);
+                    let raw_line = format!("[{ts}] {trimmed}");
+                    let _ = writer.write_unfiltered(&raw_line);
+                    let curated = match punctuate(&punctuation_client, trimmed) {
+                        Ok(Some(corrected)) => corrected,
+                        Ok(None) => trimmed.to_string(),
+                        Err(error) => {
+                            eprintln!("Voice Journal punctuation unavailable ({error}); preserving raw ASR text");
+                            trimmed.to_string()
+                        }
+                    };
+                    let curated_line = format!("[{ts}] {curated}");
+                    let _ = writer.write_journal(&curated_line);
+                    let _ = tx.send(curated_line);
                 }
                 Ok(_) => {}
                 Err(e) => {

@@ -1,0 +1,19 @@
+[Unit]
+Description=Whisper Typer punctuation and truecasing (White Wolf CUDA)
+After=network-online.target granite-speech5.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/punctuation-server
+ExecStart=%h/.local/share/granite-speech5-bench/.venv/bin/uvicorn punctuation_server:app --host 192.168.0.103 --port 8770
+Environment=LD_LIBRARY_PATH=%h/.local/share/granite-speech5-bench/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:%h/.local/share/granite-speech5-bench/.venv/lib/python3.12/site-packages/nvidia/cublas/lib:%h/.local/share/granite-speech5-bench/.venv/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:%h/.local/share/granite-speech5-bench/.venv/lib/python3.12/site-packages/nvidia/cufft/lib:%h/.local/share/granite-speech5-bench/.venv/lib/python3.12/site-packages/nvidia/curand/lib:%h/.local/share/granite-speech5-bench/.venv/lib/python3.12/site-packages/nvidia/cusparse/lib:%h/.local/share/granite-speech5-bench/.venv/lib/python3.12/site-packages/nvidia/nvjitlink/lib:/lib/x86_64-linux-gnu
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

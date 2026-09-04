@@ -27,13 +27,14 @@ whisper:
 remote_asr:
   enabled: true
   url: "http://192.168.0.103:8769/transcribe"
-  timeout_seconds: 30
+  timeout_seconds: 3
   fallback_local: true
 
 punctuation:
   enabled: true
-  url: "http://127.0.0.1:8770/punctuate"
-  timeout_ms: 2000
+  url: "http://192.168.0.103:8770/punctuate"
+  fallback_url: "http://127.0.0.1:8770/punctuate"
+  timeout_ms: 1000
 
 ollama:
   enabled: false

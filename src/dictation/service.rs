@@ -576,8 +576,8 @@ impl DictationService {
                 Some(client) => match client.process(&raw_text).await {
                     Ok(result) => {
                         info!(
-                            "Punctuation succeeded in {:.0}ms: \"{}\"",
-                            result.latency_ms, result.text
+                            "Punctuation succeeded in {:.0}ms (fallback={}): \"{}\"",
+                            result.latency_ms, result.used_fallback, result.text
                         );
                         result.text
                     }

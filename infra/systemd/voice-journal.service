@@ -21,6 +21,10 @@ Environment=TERM=xterm-256color
 # Prefer White Wolf Granite Speech 5; transcriber automatically falls back to
 # Black Beast's local Distil-Whisper endpoint if the remote node is unavailable.
 Environment=WHISPER_VOICE_JOURNAL_ASR_URL=http://192.168.0.103:8769/transcribe
+# Apply punctuation/truecasing on White Wolf, with the warm Black Beast service
+# as a bounded-latency fallback. The raw journal always preserves exact ASR.
+Environment=WHISPER_VOICE_JOURNAL_PUNCTUATION_URL=http://192.168.0.103:8770/punctuate
+Environment=WHISPER_VOICE_JOURNAL_PUNCTUATION_FALLBACK_URL=http://127.0.0.1:8770/punctuate
 # Preserve the raw/unfiltered journal while evaluating Granite Speech 5. The
 # semantic LLM filter remains available, but is opt-in during this trial.
 Environment=WHISPER_VOICE_JOURNAL_LLM=0
