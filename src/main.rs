@@ -122,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     queue_tx,
                     generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    discard_before: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                     deferred: Arc::new(std::sync::Mutex::new(Vec::new())),
                     transcriber: transcriber_for_http.clone(),
                 };

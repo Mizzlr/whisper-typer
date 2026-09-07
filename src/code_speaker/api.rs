@@ -69,6 +69,8 @@ pub struct TtsApiState {
     pub enabled: Arc<AtomicBool>,
     pub queue_tx: mpsc::Sender<SpeakJob>,
     pub generation: Arc<AtomicU64>,
+    /// Jobs older than the last disable must never be deferred or replayed.
+    pub discard_before: Arc<AtomicU64>,
     pub deferred: Arc<Mutex<Vec<SpeakJob>>>,
     /// Shared with the dictation service so the GUI's `/transcribe` calls
     /// hit the same loaded model.
@@ -193,6 +195,8 @@ pub async fn start_tts_api(state: TtsApiState, port: u16, queue_rx: mpsc::Receiv
         state.tts.clone(),
         state.generation.clone(),
         state.deferred.clone(),
+        state.enabled.clone(),
+        state.discard_before.clone(),
     );
 
     let app = router(state);
@@ -219,9 +223,16 @@ fn spawn_queue_consumer(
     tts: Arc<KokoroTtsEngine>,
     generation: Arc<AtomicU64>,
     deferred: Arc<Mutex<Vec<SpeakJob>>>,
-) {
+    enabled: Arc<AtomicBool>,
+    discard_before: Arc<AtomicU64>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
+            if !enabled.load(Ordering::SeqCst)
+                || job.generation < discard_before.load(Ordering::SeqCst)
+            {
+                continue;
+            }
             let sid = short_sid(&job.session_id).to_string();
             let deferred_count = deferred.lock().unwrap().len();
             let current_gen = generation.load(Ordering::Relaxed);
@@ -264,8 +275,20 @@ fn spawn_queue_consumer(
             let tts2 = tts.clone();
             let job_text = job.text;
             let job_event = job.event_type;
-            let speak_handle =
-                tokio::spawn(async move { do_speak(&tts2, job_text, job_event).await });
+            let enabled2 = enabled.clone();
+            let discard_before2 = discard_before.clone();
+            let job_generation = job.generation;
+            let speak_handle = tokio::spawn(async move {
+                do_speak(
+                    &tts2,
+                    job_text,
+                    job_event,
+                    &enabled2,
+                    &discard_before2,
+                    job_generation,
+                )
+                .await
+            });
 
             let cancelled = match speak_handle.await {
                 Ok(c) => c,
@@ -289,7 +312,7 @@ fn spawn_queue_consumer(
                 );
             }
         }
-    });
+    })
 }
 
 // --- Handlers ---
@@ -391,6 +414,14 @@ async fn handle_user_input(
     State(state): State<TtsApiState>,
     Json(req): Json<UserInputRequest>,
 ) -> Json<SimpleResponse> {
+    if !state.enabled.load(Ordering::SeqCst) {
+        state.deferred.lock().unwrap().clear();
+        return Json(SimpleResponse {
+            requeued: Some(0),
+            ..SimpleResponse::ok("disabled")
+        });
+    }
+
     // Interrupt any in-progress speech for the focus session — they're typing, no need to talk over them
     state.tts.interrupt();
 
@@ -406,6 +437,10 @@ async fn handle_user_input(
     let mut expired = 0usize;
 
     for mut job in items {
+        if job.generation < state.discard_before.load(Ordering::SeqCst) {
+            discarded += 1;
+            continue;
+        }
         if job.session_id.is_empty() || job.session_id == req.session_id {
             // Focus session or manual (MCP) — user is there, they'll see the output
             discarded += 1;
@@ -447,8 +482,9 @@ async fn handle_enable(State(state): State<TtsApiState>) -> Json<SimpleResponse>
 }
 
 async fn handle_disable(State(state): State<TtsApiState>) -> Json<SimpleResponse> {
-    state.enabled.store(false, Ordering::Relaxed);
-    state.generation.fetch_add(1, Ordering::Relaxed);
+    state.enabled.store(false, Ordering::SeqCst);
+    let cutoff = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    state.discard_before.store(cutoff, Ordering::SeqCst);
     state.tts.cancel();
     // Clear deferred on disable — user wants silence
     state.deferred.lock().unwrap().clear();
@@ -600,7 +636,14 @@ fn mix_to_mono<T: Copy>(frames: &[T], channels: usize, to_f32: impl Fn(T) -> f32
 
 /// Execute the speak pipeline: interrupt stale speech → speak.
 /// Returns true if the speech was cancelled mid-playback.
-async fn do_speak(tts: &Arc<KokoroTtsEngine>, text: String, event_type: String) -> bool {
+async fn do_speak(
+    tts: &Arc<KokoroTtsEngine>,
+    text: String,
+    event_type: String,
+    enabled: &AtomicBool,
+    discard_before: &AtomicU64,
+    generation: u64,
+) -> bool {
     let t_total = std::time::Instant::now();
 
     // Interrupt any in-flight speech (e.g., from an earlier queue item)
@@ -610,6 +653,9 @@ async fn do_speak(tts: &Arc<KokoroTtsEngine>, text: String, event_type: String) 
     // Without this, a previous cancel() (hotkey when nothing was playing) poisons
     // the next speak with an immediate bail.
     tts.clear_cancel();
+    if !enabled.load(Ordering::SeqCst) || generation < discard_before.load(Ordering::SeqCst) {
+        return true;
+    }
 
     info!("Queue: PLAYING [{event_type}] ({} chars)", text.len());
 
@@ -639,4 +685,42 @@ async fn do_speak(tts: &Arc<KokoroTtsEngine>, text: String, event_type: String) 
     save_tts_record(&record);
 
     result.cancelled
+}
+
+#[cfg(test)]
+mod dnd_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disabled_jobs_are_dropped_even_after_reenable_but_hotkey_jobs_defer() {
+        // All jobs are stale, so this exercises the real consumer without loading audio/models.
+        for (enabled, cutoff, expected_deferred) in [(false, 0, 0), (true, 2, 0), (true, 0, 1)] {
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(SpeakJob {
+                text: "queued before disable".into(),
+                event_type: "test".into(),
+                generation: 1,
+                session_id: "test".into(),
+                retries: 0,
+                created_at: std::time::Instant::now(),
+            })
+            .await
+            .unwrap();
+            drop(tx);
+            let deferred = Arc::new(Mutex::new(Vec::new()));
+            let consumer = spawn_queue_consumer(
+                rx,
+                Arc::new(KokoroTtsEngine::new(&crate::config::TTSConfig::default())),
+                Arc::new(AtomicU64::new(2)),
+                deferred.clone(),
+                Arc::new(AtomicBool::new(enabled)),
+                Arc::new(AtomicU64::new(cutoff)),
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(2), consumer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(deferred.lock().unwrap().len(), expected_deferred);
+        }
+    }
 }
