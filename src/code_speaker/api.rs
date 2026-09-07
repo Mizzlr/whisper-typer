@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use std::path::PathBuf;
 
 use super::history::{save_tts_record, TTSRecord};
+use super::notifications::{self, Notification};
 use super::tts::KokoroTtsEngine;
 use crate::transcriber::WhisperTranscriber;
 
@@ -88,6 +89,7 @@ pub struct SpeakJob {
     pub retries: u32,
     /// When the job was first created, for time-based expiry.
     pub created_at: std::time::Instant,
+    pub notification: Option<Notification>,
 }
 
 /// Check if a deferred job has exceeded its retry window.
@@ -115,6 +117,8 @@ struct SpeakRequest {
     event_type: String,
     #[serde(default)]
     session_id: String,
+    #[serde(default)]
+    notification: Option<Notification>,
 }
 
 fn default_event_type() -> String {
@@ -199,6 +203,7 @@ pub async fn start_tts_api(state: TtsApiState, port: u16, queue_rx: mpsc::Receiv
         state.discard_before.clone(),
     );
 
+    notifications::start_forwarder();
     let app = router(state);
     let addr = format!("127.0.0.1:{port}");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -231,6 +236,7 @@ fn spawn_queue_consumer(
             if !enabled.load(Ordering::SeqCst)
                 || job.generation < discard_before.load(Ordering::SeqCst)
             {
+                finish_notification(&job.notification, "discarded");
                 continue;
             }
             let sid = short_sid(&job.session_id).to_string();
@@ -239,6 +245,7 @@ fn spawn_queue_consumer(
 
             // Drop expired jobs before processing
             if is_job_expired(&job) {
+                finish_notification(&job.notification, "discarded");
                 let age_min = job.created_at.elapsed().as_secs() / 60;
                 info!(
                     "Queue: EXPIRED [{}] sid={sid} (age={age_min}m, retries={}) [deferred={deferred_count}]",
@@ -254,6 +261,8 @@ fn spawn_queue_consumer(
                 let mut def = deferred.lock().unwrap();
                 if def.len() < MAX_DEFERRED {
                     def.push(job);
+                } else {
+                    finish_notification(&job.notification, "discarded");
                 }
                 info!(
                     "Queue: DEFERRED stale [{evt}] sid={sid} (gen {job_gen} != {current_gen}, retries={retries}) [deferred={}]",
@@ -269,6 +278,7 @@ fn spawn_queue_consumer(
                 job.event_type, sid, job.retries, deferred_count,
             );
 
+            let notification = job.notification.clone();
             let event_type = job.event_type.clone();
 
             // Spawn do_speak in a separate task so a panic doesn't kill the consumer loop.
@@ -290,13 +300,15 @@ fn spawn_queue_consumer(
                 .await
             });
 
-            let cancelled = match speak_handle.await {
+            let (cancelled, delivery) = match speak_handle.await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Queue: PANIC in do_speak [{}] sid={}: {e}", event_type, sid);
-                    false
+                    finish_notification(&notification, "failed");
+                    continue;
                 }
             };
+            finish_notification(&notification, delivery);
 
             if cancelled {
                 // Job was already playing — user heard part of it. Drop, don't re-queue.
@@ -313,6 +325,15 @@ fn spawn_queue_consumer(
             }
         }
     })
+}
+
+fn finish_notification(event: &Option<Notification>, delivery: &str) {
+    if let Some(event) = event {
+        let mut update = event.clone();
+        update.delivery = delivery.into();
+        update.phase = 2;
+        notifications::enqueue(&update);
+    }
 }
 
 // --- Handlers ---
@@ -332,12 +353,34 @@ async fn handle_speak(
     State(state): State<TtsApiState>,
     Json(req): Json<SpeakRequest>,
 ) -> Json<SimpleResponse> {
-    if !state.enabled.load(Ordering::Relaxed) {
-        return Json(SimpleResponse::ok("disabled"));
-    }
-
     if req.text.trim().is_empty() {
         return Json(SimpleResponse::err("empty text"));
+    }
+    let enabled = state.enabled.load(Ordering::SeqCst);
+    let mut notification = req.notification.unwrap_or_else(|| Notification {
+        event_id: notifications::unique_id(),
+        session_id: req.session_id.clone(),
+        session_name: String::new(),
+        agent: String::new(),
+        event_type: req.event_type.clone(),
+        text: req.text.clone(),
+        occurred_at: notifications::now(),
+        turn_started_at: None,
+        turn_completed_at: None,
+        dnd_enabled: None,
+        delivery: "pending".into(),
+        phase: 0,
+    });
+    // The actual speaker snapshots DND before filtering, for every producer.
+    notification.session_id = req.session_id.clone();
+    notification.text = req.text.clone();
+    notification.event_type = req.event_type.clone();
+    notification.dnd_enabled = Some(!enabled);
+    notification.delivery = if enabled { "queued" } else { "muted" }.into();
+    notification.phase = 1;
+    notifications::enqueue(&notification);
+    if !enabled {
+        return Json(SimpleResponse::ok("disabled"));
     }
 
     let preview: String = req.text.chars().take(80).collect();
@@ -363,15 +406,18 @@ async fn handle_speak(
         session_id: req.session_id,
         retries: 0,
         created_at: std::time::Instant::now(),
+        notification: Some(notification.clone()),
     };
 
     match state.queue_tx.try_send(job) {
         Ok(()) => Json(SimpleResponse::ok("queued")),
         Err(mpsc::error::TrySendError::Full(_)) => {
+            finish_notification(&Some(notification.clone()), "failed");
             warn!("Speak queue full (capacity=20), dropping job");
             Json(SimpleResponse::err("queue full"))
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
+            finish_notification(&Some(notification.clone()), "failed");
             warn!("Speak queue consumer is dead (receiver dropped), cannot enqueue");
             Json(SimpleResponse::err("queue consumer dead"))
         }
@@ -415,7 +461,9 @@ async fn handle_user_input(
     Json(req): Json<UserInputRequest>,
 ) -> Json<SimpleResponse> {
     if !state.enabled.load(Ordering::SeqCst) {
-        state.deferred.lock().unwrap().clear();
+        for job in state.deferred.lock().unwrap().drain(..) {
+            finish_notification(&job.notification, "discarded");
+        }
         return Json(SimpleResponse {
             requeued: Some(0),
             ..SimpleResponse::ok("disabled")
@@ -438,23 +486,28 @@ async fn handle_user_input(
 
     for mut job in items {
         if job.generation < state.discard_before.load(Ordering::SeqCst) {
+            finish_notification(&job.notification, "discarded");
             discarded += 1;
             continue;
         }
         if job.session_id.is_empty() || job.session_id == req.session_id {
             // Focus session or manual (MCP) — user is there, they'll see the output
+            finish_notification(&job.notification, "discarded");
             discarded += 1;
             continue;
         }
         // Check time-based expiry before re-queuing
         job.retries += 1;
         if is_job_expired(&job) {
+            finish_notification(&job.notification, "discarded");
             expired += 1;
             continue;
         }
         // Re-queue with current generation
         job.generation = current_gen;
-        if state.queue_tx.try_send(job).is_ok() {
+        if let Err(error) = state.queue_tx.try_send(job) {
+            finish_notification(&error.into_inner().notification, "discarded");
+        } else {
             requeued += 1;
         }
     }
@@ -487,7 +540,9 @@ async fn handle_disable(State(state): State<TtsApiState>) -> Json<SimpleResponse
     state.discard_before.store(cutoff, Ordering::SeqCst);
     state.tts.cancel();
     // Clear deferred on disable — user wants silence
-    state.deferred.lock().unwrap().clear();
+    for job in state.deferred.lock().unwrap().drain(..) {
+        finish_notification(&job.notification, "discarded");
+    }
     info!("TTS disabled (do-not-disturb)");
     Json(SimpleResponse::ok("disabled"))
 }
@@ -635,7 +690,7 @@ fn mix_to_mono<T: Copy>(frames: &[T], channels: usize, to_f32: impl Fn(T) -> f32
 }
 
 /// Execute the speak pipeline: interrupt stale speech → speak.
-/// Returns true if the speech was cancelled mid-playback.
+/// Returns cancellation state and the observed audio delivery outcome.
 async fn do_speak(
     tts: &Arc<KokoroTtsEngine>,
     text: String,
@@ -643,7 +698,7 @@ async fn do_speak(
     enabled: &AtomicBool,
     discard_before: &AtomicU64,
     generation: u64,
-) -> bool {
+) -> (bool, &'static str) {
     let t_total = std::time::Instant::now();
 
     // Interrupt any in-flight speech (e.g., from an earlier queue item)
@@ -654,7 +709,7 @@ async fn do_speak(
     // the next speak with an immediate bail.
     tts.clear_cancel();
     if !enabled.load(Ordering::SeqCst) || generation < discard_before.load(Ordering::SeqCst) {
-        return true;
+        return (true, "discarded");
     }
 
     info!("Queue: PLAYING [{event_type}] ({} chars)", text.len());
@@ -684,7 +739,16 @@ async fn do_speak(
     };
     save_tts_record(&record);
 
-    result.cancelled
+    (
+        result.cancelled,
+        if result.cancelled {
+            "interrupted"
+        } else if result.playback_ms > 0.0 {
+            "played"
+        } else {
+            "failed"
+        },
+    )
 }
 
 #[cfg(test)]
@@ -703,6 +767,7 @@ mod dnd_tests {
                 session_id: "test".into(),
                 retries: 0,
                 created_at: std::time::Instant::now(),
+                notification: None,
             })
             .await
             .unwrap();

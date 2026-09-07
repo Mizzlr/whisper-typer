@@ -14,6 +14,12 @@ use std::time::{Duration, Instant};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+// This binary uses the hook delivery half of the shared module.
+#[allow(dead_code)]
+#[path = "../code_speaker/notifications.rs"]
+mod notifications;
+use notifications::Notification;
+
 const TTS_API: &str = "http://127.0.0.1:8767";
 
 // --- Ollama-backed task labeling ---
@@ -81,6 +87,7 @@ struct SpeakRequest {
     text: String,
     event_type: String,
     session_id: String,
+    notification: Notification,
 }
 
 #[derive(Serialize)]
@@ -212,8 +219,9 @@ fn dedup_file_for(session_id: &str) -> PathBuf {
 fn is_duplicate_stop(session_id: &str, text: &str) -> bool {
     let path = dedup_file_for(session_id);
     let previous = fs::read_to_string(&path).unwrap_or_default();
-    let _ = fs::write(&path, text);
-    previous == text
+    let key = format!("{:?}\n{text}", read_turn_start(session_id));
+    let _ = fs::write(&path, &key);
+    previous == key
 }
 
 /// Clean up dedup + last-prompt files older than 24 hours and the legacy
@@ -543,6 +551,10 @@ async fn main() {
         return;
     }
 
+    if event_name == "UserPromptSubmit" {
+        save_turn_start(&session_id);
+    }
+
     // Build HTTP client with short timeouts
     let client = Client::builder()
         .connect_timeout(Duration::from_millis(300))
@@ -552,24 +564,6 @@ async fn main() {
 
     // Quick connectivity check — exit cleanly if TTS API is down
     let tts_api_up = client.get(format!("{TTS_API}/status")).send().await.is_ok();
-
-    if !tts_api_up {
-        save_record(&HistoryRecord {
-            timestamp: now_timestamp(),
-            event: event_name,
-            action: "skipped".into(),
-            detail: Some("TTS API unreachable".into()),
-            text: None,
-            text_chars: None,
-            duration_ms: u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX),
-            tts_api_up: false,
-            session_id: Some(session_id),
-            cwd: event.cwd.clone(),
-            project: Some(project),
-            is_focus,
-        });
-        return;
-    }
 
     let (action, detail, text) = match event_name.as_str() {
         "SessionStart" => {
@@ -595,12 +589,99 @@ async fn main() {
         text,
         text_chars,
         duration_ms: u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX),
-        tts_api_up: true,
+        tts_api_up,
         session_id: Some(session_id),
         cwd: event.cwd.clone(),
         project: Some(project),
         is_focus,
     });
+}
+
+fn turn_start_file(session_id: &str) -> PathBuf {
+    let safe: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    history_dir().join(format!(".turn-start-{safe}"))
+}
+
+fn save_turn_start(session_id: &str) {
+    if !session_id.is_empty() {
+        let _ = fs::create_dir_all(history_dir());
+        let _ = fs::write(
+            turn_start_file(session_id),
+            notifications::now().to_string(),
+        );
+    }
+}
+
+fn read_turn_start(session_id: &str) -> Option<f64> {
+    fs::read_to_string(turn_start_file(session_id))
+        .ok()?
+        .parse()
+        .ok()
+}
+
+async fn send_notification(client: &Client, session_id: &str, text: String, event_type: String) {
+    let completed = matches!(event_type.as_str(), "stop" | "background_stop");
+    let occurred_at = notifications::now();
+    let start = if completed {
+        read_turn_start(session_id)
+    } else {
+        None
+    };
+    let mut notification = Notification {
+        event_id: if completed && start.is_some() {
+            format!("claude-{session_id}-{}-stop", start.unwrap())
+        } else {
+            notifications::unique_id()
+        },
+        session_id: session_id.into(),
+        session_name: String::new(),
+        agent: "claude".into(),
+        event_type: event_type.clone(),
+        text: text.clone(),
+        occurred_at,
+        turn_started_at: start,
+        turn_completed_at: completed.then_some(occurred_at),
+        dnd_enabled: None,
+        delivery: "pending".into(),
+        phase: 0,
+    };
+    let response = client
+        .post(format!("{TTS_API}/speak"))
+        .json(&SpeakRequest {
+            text,
+            event_type,
+            session_id: session_id.into(),
+            notification: notification.clone(),
+        })
+        .send()
+        .await;
+    match response {
+        Ok(response) if response.status().is_success() => {
+            if let Ok(body) = response.json::<serde_json::Value>().await {
+                match body.get("status").and_then(|s| s.as_str()) {
+                    Some("disabled") => {
+                        notification.dnd_enabled = Some(true);
+                        notification.delivery = "muted".into();
+                    }
+                    Some("queued") => {
+                        notification.dnd_enabled = Some(false);
+                        notification.delivery = "queued".into();
+                    }
+                    _ => {
+                        notification.delivery = "failed".into();
+                    }
+                }
+            }
+        }
+        _ => {
+            notification.delivery = "unavailable".into();
+        }
+    }
+    // Independent hook handoff also works when the speaker is down.
+    notifications::forward(&notification).await;
 }
 
 // --- Event handlers ---
@@ -641,15 +722,7 @@ async fn handle_session_start(
     }
 
     let text = "Claude Code is ready.".to_string();
-    let _ = client
-        .post(format!("{TTS_API}/speak"))
-        .json(&SpeakRequest {
-            text: text.clone(),
-            event_type: "session_start".into(),
-            session_id: session_id.into(),
-        })
-        .send()
-        .await;
+    send_notification(client, session_id, text.clone(), "session_start".into()).await;
 
     ("spoke".into(), None, Some(text))
 }
@@ -688,15 +761,7 @@ async fn handle_stop(
 
     let short_text = task_done_text(session_id, project, is_focus);
     if is_focus {
-        let _ = client
-            .post(format!("{TTS_API}/speak"))
-            .json(&SpeakRequest {
-                text: short_text.clone(),
-                event_type: "stop".into(),
-                session_id: session_id.into(),
-            })
-            .send()
-            .await;
+        send_notification(client, session_id, short_text.clone(), "stop".into()).await;
 
         (
             "spoke".into(),
@@ -705,15 +770,13 @@ async fn handle_stop(
         )
     } else {
         // Non-focus session: short announcement (queued, plays after current speech)
-        let _ = client
-            .post(format!("{TTS_API}/speak"))
-            .json(&SpeakRequest {
-                text: short_text.clone(),
-                event_type: "background_stop".into(),
-                session_id: session_id.into(),
-            })
-            .send()
-            .await;
+        send_notification(
+            client,
+            session_id,
+            short_text.clone(),
+            "background_stop".into(),
+        )
+        .await;
 
         (
             "queued_background".into(),
@@ -732,15 +795,7 @@ async fn handle_permission(
     let tool = event.tool_name.as_deref().unwrap_or("unknown tool");
     let text = format!("{project} needs permission.");
 
-    let _ = client
-        .post(format!("{TTS_API}/speak"))
-        .json(&SpeakRequest {
-            text: text.clone(),
-            event_type: "permission".into(),
-            session_id: session_id.into(),
-        })
-        .send()
-        .await;
+    send_notification(client, session_id, text.clone(), "permission".into()).await;
 
     (
         "spoke".into(),
@@ -785,15 +840,7 @@ async fn handle_notification(
         None => return ("skipped".into(), Some("no notification_type".into()), None),
     };
 
-    let _ = client
-        .post(format!("{TTS_API}/speak"))
-        .json(&SpeakRequest {
-            text: text.into(),
-            event_type: event_type.into(),
-            session_id: session_id.into(),
-        })
-        .send()
-        .await;
+    send_notification(client, session_id, text.into(), event_type.into()).await;
 
     (
         "spoke".into(),

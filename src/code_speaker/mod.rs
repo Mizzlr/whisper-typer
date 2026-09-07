@@ -9,3 +9,5 @@
 pub mod api;
 pub mod history;
 pub mod tts;
+
+pub mod notifications;
