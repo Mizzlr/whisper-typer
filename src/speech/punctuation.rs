@@ -90,6 +90,14 @@ impl PunctuationClient {
         if corrected.is_empty() {
             return Err("punctuation service returned empty text".into());
         }
+        // The punctuation tokenizer can turn symbols such as '%' into <unk>.
+        // Reject corrupt output so the fallback endpoint or original ASR text
+        // is used, rather than typing model tokens or losing percentages.
+        if corrected.matches("<unk>").count() > text.matches("<unk>").count()
+            || corrected.matches('%').count() != text.matches('%').count()
+        {
+            return Err("punctuation service corrupted symbols".into());
+        }
         Ok(PunctuationResult {
             text: corrected,
             latency_ms: response
@@ -106,6 +114,51 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_corrupted_percentages_but_accepts_preserved_symbols() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/punctuate",
+                    post(|Json(request): Json<serde_json::Value>| async move {
+                        let text = match request["text"].as_str().unwrap() {
+                            "are you 100% sure" => "Are you 100<unk>? Sure.",
+                            "it is 25%" => "It is 25.",
+                            "unknown symbol" => "Unknown <unk> symbol.",
+                            _ => "It is 12.5% complete.",
+                        };
+                        Json(json!({"text": text}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let client = PunctuationClient::new(PunctuationConfig {
+            enabled: true,
+            url: format!("http://{addr}/punctuate"),
+            fallback_url: None,
+            timeout_ms: 500,
+        })
+        .unwrap();
+        for text in ["are you 100% sure", "it is 25%", "unknown symbol"] {
+            assert!(client
+                .process(text)
+                .await
+                .err()
+                .unwrap()
+                .contains("corrupted symbols"));
+        }
+        assert_eq!(
+            client.process("it is 12.5% complete").await.unwrap().text,
+            "It is 12.5% complete."
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn falls_back_when_primary_returns_an_error() {

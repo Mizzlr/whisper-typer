@@ -12,7 +12,9 @@ combination is the logical GNOME shortcut `Ctrl+;`.
 | Smart Shift button above the main wheel | Launch right-drag Flameshot selection |
 | Physical `Ctrl+Z` | Launch right-drag Flameshot selection |
 | Thumb wheel | Page/tab navigation through the existing Solaar rules |
-| Forward button | Diverted through the existing Solaar/Input Remapper setup |
+| Forward button | Diverted in Solaar to paste (`Control_L + v`) |
+| Back button | Mapped to `KEY_ENTER` via Input Remapper preset |
+| Hidden Gesture button | Diverted in Solaar to trigger Whisper Typer push-to-talk (`KEY_F24`) via `whisper-hotkey-daemon` |
 
 The screenshot launcher is installed at
 `~/.local/bin/flameshot-right-drag`. It finds the forwarded Input Remapper
@@ -29,7 +31,7 @@ binding: <Control>semicolon
 command: /home/mizzlr/.local/bin/flameshot-right-drag
 ```
 
-Solaar rules live in `~/.config/solaar/rules.yaml`. The Smart Shift rule is:
+Solaar rules live in `~/.config/solaar/rules.yaml`:
 
 ```yaml
 ---
@@ -37,7 +39,31 @@ Solaar rules live in `~/.config/solaar/rules.yaml`. The Smart Shift rule is:
 - Execute:
   - /home/mizzlr/.local/bin/flameshot-right-drag
 ...
+---
+- Key: [Forward Button, pressed]
+- KeyPress:
+  - [Control_L, v]
+  - click
+...
+---
+- Key: [Mouse Gesture Button, pressed]
+- Execute:
+  - /home/mizzlr/.local/bin/whisper-hotkey
+  - press
+...
+---
+- Key: [Mouse Gesture Button, released]
+- Execute:
+  - /home/mizzlr/.local/bin/whisper-hotkey
+  - release
+...
 ```
+
+The gesture hotkey daemon is managed by `whisper-hotkey-daemon.service`
+(installed at `~/.local/bin/whisper-hotkey-daemon`). It creates a persistent
+`uinput` virtual keyboard (`whisper-gesture-keyboard`) with `KEY_F24`, so that
+Whisper Typer can monitor push-to-talk press and release without X11 clipboard
+or cursor-blinking interference.
 
 ## Required Solaar state
 
@@ -47,15 +73,25 @@ For the MX Master 3S:
 scroll-ratchet = Freespinning
 smart-shift = 1
 Smart Shift diversion = Diverted
+Forward Button diversion = Diverted
+Mouse Gesture Button diversion = Diverted
 thumb wheel diversion = enabled
 ```
 
 The persisted keyed diversion map in `~/.config/solaar/config.yaml` keeps the
-Forward button (`0x56`) and Smart Shift (`0xc4`) diverted:
+Forward button (`0x56`), Gesture button (`0xc3`), and Smart Shift (`0xc4`) diverted:
 
 ```yaml
-divert-keys: {0x52: 0x0, 0x53: 0x0, 0x56: 0x1, 0xc3: 0x0, 0xc4: 0x1}
+divert-keys: {0x52: 0x0, 0x53: 0x0, 0x56: 0x1, 0xc3: 0x1, 0xc4: 0x1}
+reprogrammable-keys: {0x50: 0x50, 0x51: 0x51, 0x52: 0x52, 0x53: 0x53, 0x56: 0x56, 0xc3: 195, 0xc4: 0xc4}
 ```
+
+> [!IMPORTANT]
+> In `reprogrammable-keys`, the Mouse Gesture Button (`0xc3`) must remain set to
+> `195` (`Gesture Button Navigation`) and never mapped to `0x56` (`Mouse Forward Button`).
+> Mapping `0xc3` to `0x56` causes the mouse hardware to alias the gesture button with
+> the forward button, making them execute the same paste action and causing cursor-flicker
+> during dictation.
 
 Verify the complete live device state with `solaar show`. With Solaar
 1.1.11, do not use `solaar config "MX Master 3S" divert-keys "Smart Shift"`
