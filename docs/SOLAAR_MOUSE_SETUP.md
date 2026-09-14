@@ -17,16 +17,19 @@ combination is the logical GNOME shortcut `Ctrl+;`.
 | Smart Shift button above the main wheel | Launch right-drag Flameshot selection |
 | Physical `Ctrl+Z` | Launch right-drag Flameshot selection |
 | Thumb wheel | Page/tab navigation through the existing Solaar rules |
-| Forward button | Mapped to paste (`Control_L + v`) via Input Remapper preset |
-| Back button | Mapped to `KEY_ENTER` (submit) via Input Remapper preset |
+| Forward button | Mapped to paste (`Ctrl` + the key that types `v`) by `logi-mouse-daemon` |
+| Back button | Mapped to `KEY_ENTER` (submit) by `logi-mouse-daemon` |
 | Hidden Gesture button | Diverted in Solaar to trigger Whisper Typer push-to-talk (`KEY_F24`) via `whisper-hotkey-daemon` |
 
-Ownership split: Input Remapper owns the ordinary buttons that already emit
-standard evdev codes (left, right, middle, Back, Forward). Solaar owns the
-exotic controls that only exist as HID++ controls (Gesture button, Smart Shift,
-thumb wheel). The side buttons must stay **undiverted** in Solaar — a diverted
-button never reaches `/dev/input/event7`, so Input Remapper can no longer map
-it.
+Ownership split: `logi-mouse-daemon` owns the ordinary buttons that already emit
+standard evdev codes (left, right, middle, Back, Forward). Solaar owns the exotic
+controls that only exist as HID++ controls (Gesture button, Smart Shift, thumb
+wheel). The side buttons must stay **undiverted** in Solaar — a diverted button
+never reaches `/dev/input/event7`, so the daemon can no longer see it.
+
+Run `systemctl --user status logi-mouse-daemon` and
+`tail -f ~/.whisper-typer-history/mouse/$(date +%F).jsonl` to watch what the
+daemon does with each button.
 
 The screenshot launcher is installed at
 `~/.local/bin/flameshot-right-drag`. It finds the forwarded Input Remapper
@@ -94,8 +97,9 @@ reprogrammable-keys: {0x50: 0x50, 0x51: 0x51, 0x52: 0x52, 0x53: 0x53, 0x56: 0x56
 ```
 
 The Input Remapper preset
-`~/.config/input-remapper-2/presets/Logitech USB Receiver/Whisper mouse.json`
-holds both side-button mappings:
+`~/.config/input-remapper-2/presets/Logitech USB Receiver/Whisper mouse.json` is
+kept on disk as the rollback path, but it is no longer autoloaded — the daemon
+owns the mouse node now. It still holds both side-button mappings:
 
 ```json
 {"input_combination": [{"type": 1, "code": 275, "origin_hash": "3053316a9883deb9b2680fdf4ec5566b"}],

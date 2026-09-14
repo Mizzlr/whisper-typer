@@ -12,12 +12,13 @@ button is held while the forwarded node (the one X actually reads) reports it
 released. It clears it by toggling the device, which re-initialises its state.
 """
 
+import os
 import re
 import subprocess
 import time
 
-RAW = "Logitech USB Receiver Mouse"
-FORWARDED = "input-remapper Logitech USB Receiver Mouse forwarded"
+RAW = os.environ.get("LOGI_MOUSE_RAW", "Logitech USB Receiver Mouse")
+FORWARDED = os.environ.get("LOGI_MOUSE_SINK", "logi-mouse forwarded")
 BUTTONS = (1, 2, 3)
 INTERVAL = 2.0
 

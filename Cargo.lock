@@ -4330,6 +4330,7 @@ dependencies = [
  "enigo",
  "evdev",
  "hound",
+ "libc",
  "misaki-rs",
  "ndarray",
  "ndarray-npy",

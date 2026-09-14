@@ -1,0 +1,14 @@
+[Unit]
+Description=Logitech mouse input daemon (owns the receiver mouse node)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/logi-mouse-daemon
+Restart=always
+RestartSec=2
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=graphical-session.target

@@ -24,6 +24,10 @@ path = "src/bin/benchmark.rs"
 name = "whisper-asr-server"
 path = "src/bin/asr_server.rs"
 
+[[bin]]
+name = "logi-mouse-daemon"
+path = "src/bin/logi_mouse_daemon.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -66,6 +70,9 @@ enigo = { version = "0.2", features = ["xdo"] }
 
 # Date/time
 chrono = "0.4"
+
+# Mouse daemon: poll(2) on the grabbed evdev node
+libc = "0.2"
 
 # MCP server
 rmcp = { version = "0.16", features = ["server", "macros", "transport-streamable-http-server"] }

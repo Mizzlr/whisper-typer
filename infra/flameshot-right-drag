@@ -1,88 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Flameshot only accepts a selection with logical button 1, and the left button
-# on this MX Master 3S is mechanically unreliable. While the overlay is open
-# this wrapper swaps logical buttons 1 and 3 on the Input Remapper pointer, so a
-# physical RIGHT drag makes the selection; afterwards the baseline map is put
-# back on every exit path.
+# Right-drag selection for Flameshot.
 #
-# Learned on this machine:
-#   * Address the X device by ID. Name lookups are fine for reads, but writes
-#     through the name did not stick.
-#   * The raw receiver node ("Logitech USB Receiver Mouse") is held by Input
-#     Remapper and silently ignores set-button-map, so only the forwarded node
-#     ("input-remapper ... forwarded") is swapped.
-#   * A session killed with SIGKILL cannot run its trap, so the next capture
-#     repairs a leftover "3 2 1" map before swapping again.
+# Flameshot only accepts a selection with logical button 1 and this mouse's left
+# button is mechanically unreliable, so the selection uses a physical right
+# drag. `logi-mouse-daemon` owns the buttons and swaps logical left and right for
+# the duration of the overlay, so no X button map is touched here: a crashed or
+# killed capture cannot leave the buttons inverted, and the daemon expires the
+# swap on its own if this script never sends `swap-off`.
 
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+socket_path="${LOGI_MOUSE_SOCKET:-$runtime_dir/logi-mouse.sock}"
+daemon_bin="${LOGI_MOUSE_DAEMON:-$HOME/.local/bin/logi-mouse-daemon}"
+flameshot_bin="${FLAMESHOT_BIN:-/usr/bin/flameshot}"
+capture_timeout="${FLAMESHOT_TIMEOUT:-300}"
+
 exec 9>"$runtime_dir/flameshot-right-drag.lock"
 if ! flock -n 9; then
   notify-send "Flameshot" "A capture is already in progress" 2>/dev/null || true
   exit 0
 fi
 
-flameshot_bin="${FLAMESHOT_BIN:-/usr/bin/flameshot}"
-capture_timeout="${FLAMESHOT_TIMEOUT:-300}"
-device_name="${FLAMESHOT_POINTER_DEVICE:-input-remapper Logitech USB Receiver Mouse forwarded}"
-
-fail() { notify-send "Flameshot" "$1" 2>/dev/null || true; }
-
-read_map() {
-  xinput get-button-map "$1" 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//' || true
+control() {
+  "$daemon_bin" --control "$1" --socket-path "$socket_path" >/dev/null 2>&1 || true
 }
 
-# Write a map and confirm the server applied it. The retries cover the small
-# window where an immediate read can be served before the write lands.
-apply_map() {
-  local dev="$1" want="$2" attempt
-  local -a v=()
-  read -r -a v <<<"$want"
-  (( ${#v[@]} >= 3 )) || return 1
-  for attempt in 1 2 3; do
-    xinput set-button-map "$dev" "${v[@]}" >/dev/null 2>&1 || true
-    [[ "$(read_map "$dev")" == "$want" ]] && return 0
-    sleep 0.05
-  done
-  return 1
-}
+# Put the buttons back even when Flameshot exits abnormally, and close the lock
+# fd for the child so an orphaned capture cannot hold it.
+swap_off() { control swap-off; }
+trap swap_off EXIT HUP INT QUIT TERM
 
-device_id="$(xinput list --id-only "$device_name" 2>/dev/null | head -n 1)"
-if [[ -z "$device_id" ]]; then
-  fail "Mouse device not found: $device_name"
-  exit 1
-fi
-
-baseline="$(read_map "$device_id")"
-if [[ -z "$baseline" ]]; then
-  fail "Could not read the mouse button map"
-  exit 1
-fi
-
-# Recover the baseline if a previous session was killed between swap and restore.
-if [[ "$baseline" == 3\ 2\ 1* ]]; then
-  baseline="${baseline/3 2 1/1 2 3}"
-  apply_map "$device_id" "$baseline" || true
-fi
-
-swapped="${baseline/1 2 3/3 2 1}"
-if [[ "$swapped" == "$baseline" ]]; then
-  fail "Unexpected button map: $baseline"
-  exit 1
-fi
-
-restore_map() {
-  apply_map "$device_id" "$baseline" || fail "Button map restore failed (device $device_id)"
-}
-trap restore_map EXIT HUP INT QUIT TERM
-
-apply_map "$device_id" "$swapped" || {
-  fail "Could not swap the mouse buttons"
-  exit 1
-}
-
-# Bounded so a hung overlay cannot leave left/right inverted indefinitely.
-# fd 9 is closed for the child: otherwise an orphaned capture would keep the
-# lock held and later presses would exit early without repairing the map.
+control swap-on
 timeout "$capture_timeout" "$flameshot_bin" gui -c -s 9>&- || true

@@ -287,6 +287,7 @@ whisper-typer/
 │   ├── install.sh              # build, deploy, udev, and user services
 │   ├── install-mouse-stack.sh  # deploy the MX Master 3S Solaar/Input Remapper stack
 │   ├── verify-mouse-stack.sh   # verify that stack against the live session
+│   ├── test-logi-mouse-daemon.py # end-to-end test against synthetic uinput devices
 │   ├── hooks/tts-hook.sh       # older shell-hook implementation
 │   ├── systemd/                # daemon and journal unit templates
 │   └── udev/99-uinput.rules    # input-device permissions
