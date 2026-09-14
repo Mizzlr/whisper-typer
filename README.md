@@ -285,11 +285,14 @@ whisper-typer/
 │       └── benchmark.rs        # local latency summary
 ├── infra/
 │   ├── install.sh              # build, deploy, udev, and user services
+│   ├── install-mouse-stack.sh  # deploy the MX Master 3S Solaar/Input Remapper stack
+│   ├── verify-mouse-stack.sh   # verify that stack against the live session
 │   ├── hooks/tts-hook.sh       # older shell-hook implementation
 │   ├── systemd/                # daemon and journal unit templates
 │   └── udev/99-uinput.rules    # input-device permissions
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── MOUSE_INPUT_STACK.md    # MX Master 3S input stack and recovery runbook
 │   ├── MODEL_RECOMMENDATIONS.md
 │   └── reports/                # dated engineering evaluations
 ├── models/tokenizer.json       # tracked Kokoro tokenizer metadata

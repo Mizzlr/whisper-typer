@@ -1,0 +1,44 @@
+%YAML 1.3
+---
+- Key: [Smart Shift, pressed]
+- Execute:
+  - /home/mizzlr/.local/bin/flameshot-right-drag
+...
+---
+- Key: [Mouse Gesture Button, pressed]
+- Execute:
+  - /home/mizzlr/.local/bin/whisper-hotkey
+  - press
+...
+---
+- Key: [Mouse Gesture Button, released]
+- Execute:
+  - /home/mizzlr/.local/bin/whisper-hotkey
+  - release
+...
+---
+- Modifiers: Control
+- Test: [thumb_wheel_down, 0xa]
+- KeyPress:
+  - [Control_L, Page_Down]
+  - click
+...
+---
+- Modifiers: Control
+- Test: [thumb_wheel_up, 0xa]
+- KeyPress:
+  - [Control_L, Page_Up]
+  - click
+...
+---
+- Test: [thumb_wheel_down, 0xa]
+- KeyPress:
+  - [Super_L, Page_Down]
+  - click
+...
+---
+- Test: [thumb_wheel_up, 0xa]
+- KeyPress:
+  - [Super_L, Page_Up]
+  - click
+...

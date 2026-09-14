@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Clear a stale button-down state on the grabbed Logitech receiver node.
+
+Input Remapper grabs the physical node ("Logitech USB Receiver Mouse") and
+re-emits through the virtual "input-remapper ... forwarded" node. If the
+injector restarts while a button is physically held, the release never reaches
+X, and the raw node keeps reporting e.g. button[1]=down forever. The server then
+treats every later click as part of an ongoing drag, so clicks look dead.
+
+This guard watches for that specific inconsistency: the raw node claims a
+button is held while the forwarded node (the one X actually reads) reports it
+released. It clears it by toggling the device, which re-initialises its state.
+"""
+
+import re
+import subprocess
+import time
+
+RAW = "Logitech USB Receiver Mouse"
+FORWARDED = "input-remapper Logitech USB Receiver Mouse forwarded"
+BUTTONS = (1, 2, 3)
+INTERVAL = 2.0
+
+
+def xinput(*args):
+    try:
+        out = subprocess.run(
+            ["xinput", *args], capture_output=True, text=True, timeout=5
+        )
+        return out.stdout
+    except Exception:
+        return ""
+
+
+def device_id(name):
+    ids = xinput("list", "--id-only", name).split()
+    return ids[0] if ids else None
+
+
+def buttons_down(dev_id):
+    state = xinput("query-state", dev_id)
+    return {
+        int(m.group(1))
+        for m in re.finditer(r"button\[(\d+)\]=down", state)
+    }
+
+
+def clear_stale(raw_id):
+    xinput("disable", raw_id)
+    time.sleep(0.2)
+    xinput("enable", raw_id)
+
+
+def main():
+    while True:
+        time.sleep(INTERVAL)
+        fwd_id = device_id(FORWARDED)
+        if fwd_id is None:
+            # Input Remapper is not forwarding; the raw node is the live path.
+            continue
+        raw_id = device_id(RAW)
+        if raw_id is None:
+            continue
+
+        fwd_down = buttons_down(fwd_id)
+        raw_down = buttons_down(raw_id)
+        stale = {b for b in BUTTONS if b in raw_down and b not in fwd_down}
+        if stale:
+            clear_stale(raw_id)
+            subprocess.run(
+                [
+                    "notify-send",
+                    "Mouse",
+                    f"Cleared stuck button(s) {sorted(stale)} on the receiver node",
+                ],
+                capture_output=True,
+            )
+
+
+if __name__ == "__main__":
+    main()

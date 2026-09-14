@@ -1,0 +1,22 @@
+# Expected live settings for the MX Master 3S on this machine.
+#
+# Solaar persists these in ~/.config/solaar/config.yaml and applies them to the
+# device on startup. This fragment is the reference the verifier checks with
+# `solaar show`; it is not installed over the live config.yaml, which also holds
+# device identity (serial, unit id) and unrelated settings.
+
+scroll-ratchet: freespinning     # main wheel free-spins
+smart-shift: 1                   # Smart Shift button available for diversion
+hires-scroll-mode: false
+thumb-scroll-mode: true          # thumb wheel diverted (Solaar owns it)
+
+# 0x52 Middle, 0x53 Back, 0x56 Forward, 0xc3 Gesture, 0xc4 Smart Shift
+#
+# Back and Forward MUST stay regular (0x0): Input Remapper can only remap a
+# button that reaches /dev/input/event7. Gesture and Smart Shift are diverted
+# because the firmware exposes them only as HID++ controls.
+divert-keys: {0x52: 0x0, 0x53: 0x0, 0x56: 0x0, 0xc3: 0x1, 0xc4: 0x1}
+
+# 0xc3 must stay 195 (Gesture Button Navigation); 0x56 (Mouse Forward Button)
+# here aliases the gesture button with Forward and breaks dictation.
+reprogrammable-keys: {0x50: 0x50, 0x51: 0x51, 0x52: 0x52, 0x53: 0x53, 0x56: 0x56, 0xc3: 195, 0xc4: 0xc4}

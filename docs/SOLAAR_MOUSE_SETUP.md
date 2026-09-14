@@ -4,6 +4,11 @@ This workstation uses an MX Master 3S under X11 with Solaar and Input
 Remapper. The active keyboard layout is Dvorak, so the physical `Ctrl+Z`
 combination is the logical GNOME shortcut `Ctrl+;`.
 
+> The complete stack record — ownership rules, mirrored configs under `infra/`,
+> deployment, verification and the recovery runbook — lives in
+> [MOUSE_INPUT_STACK.md](MOUSE_INPUT_STACK.md). This page is the short
+> operational summary.
+
 ## Current behavior
 
 | Control | Behavior |
@@ -12,9 +17,16 @@ combination is the logical GNOME shortcut `Ctrl+;`.
 | Smart Shift button above the main wheel | Launch right-drag Flameshot selection |
 | Physical `Ctrl+Z` | Launch right-drag Flameshot selection |
 | Thumb wheel | Page/tab navigation through the existing Solaar rules |
-| Forward button | Diverted in Solaar to paste (`Control_L + v`) |
-| Back button | Mapped to `KEY_ENTER` via Input Remapper preset |
+| Forward button | Mapped to paste (`Control_L + v`) via Input Remapper preset |
+| Back button | Mapped to `KEY_ENTER` (submit) via Input Remapper preset |
 | Hidden Gesture button | Diverted in Solaar to trigger Whisper Typer push-to-talk (`KEY_F24`) via `whisper-hotkey-daemon` |
+
+Ownership split: Input Remapper owns the ordinary buttons that already emit
+standard evdev codes (left, right, middle, Back, Forward). Solaar owns the
+exotic controls that only exist as HID++ controls (Gesture button, Smart Shift,
+thumb wheel). The side buttons must stay **undiverted** in Solaar — a diverted
+button never reaches `/dev/input/event7`, so Input Remapper can no longer map
+it.
 
 The screenshot launcher is installed at
 `~/.local/bin/flameshot-right-drag`. It finds the forwarded Input Remapper
@@ -38,12 +50,6 @@ Solaar rules live in `~/.config/solaar/rules.yaml`:
 - Key: [Smart Shift, pressed]
 - Execute:
   - /home/mizzlr/.local/bin/flameshot-right-drag
-...
----
-- Key: [Forward Button, pressed]
-- KeyPress:
-  - [Control_L, v]
-  - click
 ...
 ---
 - Key: [Mouse Gesture Button, pressed]
@@ -73,18 +79,41 @@ For the MX Master 3S:
 scroll-ratchet = Freespinning
 smart-shift = 1
 Smart Shift diversion = Diverted
-Forward Button diversion = Diverted
+Forward Button diversion = Regular
 Mouse Gesture Button diversion = Diverted
 thumb wheel diversion = enabled
 ```
 
 The persisted keyed diversion map in `~/.config/solaar/config.yaml` keeps the
-Forward button (`0x56`), Gesture button (`0xc3`), and Smart Shift (`0xc4`) diverted:
+Gesture button (`0xc3`) and Smart Shift (`0xc4`) diverted, and leaves the
+Forward button (`0x56`) regular so Input Remapper receives it:
 
 ```yaml
-divert-keys: {0x52: 0x0, 0x53: 0x0, 0x56: 0x1, 0xc3: 0x1, 0xc4: 0x1}
+divert-keys: {0x52: 0x0, 0x53: 0x0, 0x56: 0x0, 0xc3: 0x1, 0xc4: 0x1}
 reprogrammable-keys: {0x50: 0x50, 0x51: 0x51, 0x52: 0x52, 0x53: 0x53, 0x56: 0x56, 0xc3: 195, 0xc4: 0xc4}
 ```
+
+The Input Remapper preset
+`~/.config/input-remapper-2/presets/Logitech USB Receiver/Whisper mouse.json`
+holds both side-button mappings:
+
+```json
+{"input_combination": [{"type": 1, "code": 275, "origin_hash": "3053316a9883deb9b2680fdf4ec5566b"}],
+ "target_uinput": "keyboard", "output_symbol": "KEY_ENTER", "mapping_type": "key_macro"}
+{"input_combination": [{"type": 1, "code": 276, "origin_hash": "3053316a9883deb9b2680fdf4ec5566b"}],
+ "target_uinput": "keyboard", "output_symbol": "Control_L + v", "mapping_type": "key_macro"}
+```
+
+The `origin_hash` binds the preset to one specific device node
+(`md5(capabilities + name)`), so extra mice on the machine are unaffected.
+Input Remapper resolves macro symbols through its `xmodmap.json`, which is
+layout-aware — on Dvorak the symbol `v` resolves to keycode 52.
+
+> [!IMPORTANT]
+> Do not map `KEY_F24` to a mouse button. Whisper Typer's fallback hotkey has
+> exactly one producer: the `whisper-hotkey-daemon`. A second F24 producer
+> (Solaar paste rule, stale Input Remapper mapping) makes one button press emit
+> two hotkeys and dictation flaps.
 
 > [!IMPORTANT]
 > In `reprogrammable-keys`, the Mouse Gesture Button (`0xc3`) must remain set to
@@ -99,6 +128,22 @@ as a read-only query: that incomplete keyed-setting command can serialize the
 key name as a scalar and break the persisted diversion map.
 
 ## Recovery checks
+
+If the pointer moves and scrolls but **clicks do nothing**, the grabbed
+receiver node is holding a stale button-down state: Input Remapper restarted
+between a button press and its release, so X treats every later click as part
+of an ongoing drag. Check and clear it with:
+
+```bash
+xinput query-state "Logitech USB Receiver Mouse" | grep 'button\[1\]'
+xinput disable "Logitech USB Receiver Mouse"
+xinput enable  "Logitech USB Receiver Mouse"
+```
+
+`mouse-button-guard.service` (`~/.local/bin/mouse-button-guard`) watches for
+this and clears it within a couple of seconds: it only acts when the raw node
+claims a button is held while the forwarded node — the one X actually reads —
+reports it released.
 
 ```bash
 systemctl --user status app-solaar@autostart.service
