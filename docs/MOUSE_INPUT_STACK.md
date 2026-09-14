@@ -51,6 +51,13 @@ Two invariants come from that diagram:
    (a Solaar paste rule, or a mouse mapping that emits `KEY_F24`) makes one press
    emit two hotkeys and dictation flaps. The daemon emits no `KEY_F24` at all.
 
+Holding the gesture button holds `F24` down in X, and X re-enables auto-repeat
+for that keycode whenever the keymap is reloaded (layout switch, `setxkbmap`, or
+Input Remapper refreshing its mapping). A repeating `F24` flickers in the focused
+application, so `whisper-hotkey-daemon` re-asserts `xset -r 202` at start-up,
+before every press, and on a five-second idle tick. `whisper-f24-no-repeat.service`
+still applies the same setting once at session start.
+
 ## The daemon
 
 `src/bin/logi_mouse_daemon.rs`, installed as `~/.local/bin/logi-mouse-daemon`
@@ -154,6 +161,7 @@ There is deliberately no Forward rule: the daemon owns that button.
 | Nothing moves at all | daemon cannot open or read the device | `journalctl --user -u logi-mouse-daemon -n 50`; the journal records `source_device_not_available` style info messages |
 | Screenshot selects with the wrong button | swap flag left on | `~/.local/bin/logi-mouse-daemon --control swap-off`; the flag also expires on its own |
 | Gesture button dictates twice | a second `KEY_F24` producer appeared | confirm no Solaar Forward rule and that the daemon emits no `KEY_F24` |
+| Holding gesture flickers the cursor or the focused app | X auto-repeat got re-enabled for `F24` (keymap reload) | `systemctl --user restart whisper-hotkey-daemon`; it re-asserts `xset -r 202` on start-up, per press and every 5s |
 | Paste lands as another letter | keymap changed under the daemon | restart the daemon; it re-reads the X keymap, or pin `--paste-keycode` |
 | Gesture and Forward do the same thing | firmware alias `0xc3 → 0x56` | restore `reprogrammable-keys` `0xc3: 195` |
 | Daemon gone, mouse behaves as stock | unit stopped or crashed repeatedly | `systemctl --user status logi-mouse-daemon`; the raw node keeps working, just without remaps |

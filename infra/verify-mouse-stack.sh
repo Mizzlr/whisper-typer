@@ -121,5 +121,24 @@ check "gesture button not aliased to Forward" \
 check "thumb wheel diverted" "printf '%s' \"\$show\" | grep -q 'Thumb Wheel Diversion *: True'"
 check "main wheel free-spinning" "printf '%s' \"\$show\" | grep -q 'Scroll Wheel Ratcheted *: Freespinning'"
 
+echo "gesture hotkey hygiene"
+python3 - <<'PY'
+import os, sys
+keycode = int(os.environ.get("WHISPER_F24_KEYCODE", "202"))
+try:
+    from Xlib import display
+except Exception:
+    print("  [SKIP] python3-xlib unavailable; cannot check F24 auto-repeat"); sys.exit(0)
+try:
+    rep = list(display.Display().get_keyboard_control().auto_repeats)
+except Exception as exc:
+    print(f"  [SKIP] cannot query X keyboard control: {exc}"); sys.exit(0)
+if rep[keycode // 8] & (1 << (keycode % 8)):
+    print(f"  [FAIL] keycode {keycode} (F24) auto-repeats; holding gesture will flicker")
+    sys.exit(1)
+print(f"  [PASS] F24 auto-repeat is off (keycode {keycode})")
+PY
+[[ $? -eq 0 ]] && pass=$((pass+1)) || fail=$((fail+1))
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ $fail -eq 0 ]]
