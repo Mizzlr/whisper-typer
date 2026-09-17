@@ -44,6 +44,9 @@ Calculations use decimals, including standard thousands commas. Labels, empty
 cells, percentages and currency-marked values are excluded rather than assuming
 units; compact statistics show ten significant digits.
 
+Text/source views wrap to the window width and number original file lines;
+wrapped continuations do not create extra line numbers or change copied text.
+
 While reading, only content and requested selection statistics appear. Right-click
 for source, copy selection/content/path, zoom, search and PDF paging. Ctrl+C copies
 selected text/cells; Ctrl+Shift+C copies full contents. Ctrl+F finds; Ctrl+L returns

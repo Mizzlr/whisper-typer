@@ -200,3 +200,15 @@ retention/zoom/copy, folder expansion, recent/download views, fuzzy untracked
 reports, and existing Markdown/CSV/PDF rendering. Regression fixtures are synthetic
 and private live probes remain outside the repository. Runtime history is private
 SQLite outside Git; renderer assets and screenshots are not staged.
+
+- [x] Wrap Folio text/source lines to the viewport and show original line numbers in a visible gutter, including zoom/resize updates.
+
+Text-readability batch: 18 isolated GUI/behavior checks passed. Long prose and
+unbroken words wrap without horizontal scrolling; original line count and copied
+contents stay unchanged. Synthetic fixtures only.
+
+- [x] Increase Folio CSV selection/header/statistics contrast; use explicit dark selection foregrounds for table and text views.
+
+Contrast batch: existing 18 behavioral checks passed; selected cells and statistics
+were visually checked on a synthetic CSV in isolated Xvfb. No private file data
+was used in the regression fixture or preview.

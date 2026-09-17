@@ -168,6 +168,26 @@ class UiTests(unittest.TestCase):
         from PyQt5 import QtWidgets
         self.assertEqual(QtWidgets.QApplication.clipboard().text(),str(path))
 
+    def test_text_wrap_and_line_numbers_preserve_original_lines(self):
+        from PyQt5 import QtWidgets
+        self.window.show()
+        text=('A long sentence that should wrap naturally. '*80)+'\n'+('x'*800)+'\nLast line.'
+        self.window.document_ready(Document(self.path/'sample.txt','text',text),None)
+        self.application.processEvents()
+        editor=self.window.source
+        self.assertEqual(editor.lineWrapMode(),QtWidgets.QPlainTextEdit.WidgetWidth)
+        self.assertEqual(editor.blockCount(),3)
+        self.assertGreater(editor.document().firstBlock().layout().lineCount(),1)
+        self.assertEqual(editor.horizontalScrollBar().maximum(),0)
+        self.assertTrue(editor.gutter.isVisible())
+        self.assertEqual(editor.viewportMargins().left(),editor.gutter_width())
+        self.assertEqual(editor.toPlainText(),text)
+        self.window.copy_content()
+        self.assertEqual(QtWidgets.QApplication.clipboard().text(),text)
+        width=editor.gutter_width()
+        self.window.zoom(1)
+        self.assertGreaterEqual(editor.gutter_width(),width)
+
     def paste(self,text):
         from PyQt5 import QtCore
         mime=QtCore.QMimeData();mime.setText(text)

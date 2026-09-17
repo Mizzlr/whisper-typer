@@ -162,6 +162,67 @@ class PasteInput(QtWidgets.QPlainTextEdit):
             self.setPlainText(source.text())
 
 
+class LineNumbers(QtWidgets.QWidget):
+    def __init__(self,editor):
+        super().__init__(editor)
+        self.editor=editor
+
+    def paintEvent(self,event):
+        editor=self.editor
+        painter=QtGui.QPainter(self)
+        painter.fillRect(event.rect(),QtGui.QColor('#f5f2e9'))
+        painter.setPen(QtGui.QColor('#949b8b'))
+        painter.setFont(editor.font())
+        block=editor.firstVisibleBlock()
+        top=int(editor.blockBoundingGeometry(block).translated(editor.contentOffset()).top())
+        while block.isValid() and top<=event.rect().bottom():
+            height=int(editor.blockBoundingRect(block).height())
+            if block.isVisible() and top+height>=event.rect().top():
+                painter.drawText(0,top,self.width()-8,editor.fontMetrics().height(),
+                                 QtCore.Qt.AlignRight,str(block.blockNumber()+1))
+            top+=height
+            block=block.next()
+
+
+class NumberedText(QtWidgets.QPlainTextEdit):
+    def __init__(self):
+        super().__init__()
+        self.gutter=LineNumbers(self)
+        self.setLineWrapMode(self.WidgetWidth)
+        self.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.blockCountChanged.connect(self.update_gutter)
+        self.updateRequest.connect(self.repaint_gutter)
+        self.update_gutter()
+
+    def gutter_width(self):
+        return 16+self.fontMetrics().horizontalAdvance('9')*len(str(max(1,self.blockCount())))
+
+    def update_gutter(self,unused=None):
+        self.setViewportMargins(self.gutter_width(),0,0,0)
+        self.place_gutter()
+        self.gutter.update()
+
+    def place_gutter(self):
+        rect=self.viewport().geometry()
+        self.gutter.setGeometry(rect.x()-self.gutter_width(),rect.y(),self.gutter_width(),rect.height())
+
+    def repaint_gutter(self,rect,dy):
+        if dy:
+            self.gutter.scroll(0,dy)
+        else:
+            self.gutter.update(0,rect.y(),self.gutter_width(),rect.height())
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        if hasattr(self,'gutter'):
+            self.place_gutter()
+
+    def changeEvent(self,event):
+        super().changeEvent(event)
+        if event.type()==QtCore.QEvent.FontChange and hasattr(self,'gutter'):
+            self.update_gutter()
+
+
 class Folio(QtWidgets.QMainWindow):
     def __init__(self,history_path=None):
         super().__init__()
@@ -311,10 +372,9 @@ class Folio(QtWidgets.QMainWindow):
         self.bridge = Bridge(self.channel)
         self.channel.registerObject('folio', self.bridge)
         self.web_page.setWebChannel(self.channel)
-        self.source = QtWidgets.QPlainTextEdit()
+        self.source = NumberedText()
         self.source.setReadOnly(True)
         self.source.setFont(QtGui.QFont('JetBrains Mono', 11))
-        self.source.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         self.table = CsvTable()
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
@@ -334,7 +394,7 @@ class Folio(QtWidgets.QMainWindow):
         self.stats = QtWidgets.QLabel('Select cells, rows, or columns to see their statistics.')
         self.stats.setWordWrap(True)
         self.stats.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.stats.setObjectName('location')
+        self.stats.setObjectName('statistics')
         reader.addWidget(self.stats)
         self.stats.hide()
         layout.addWidget(reading, 1)
@@ -345,16 +405,18 @@ class Folio(QtWidgets.QMainWindow):
         self.setStyleSheet('''
 QMainWindow,QWidget {background:#fbf8f1;color:#353b33;font-family:"JetBrains Mono";font-size:13px}
 QLabel#location {color:#858879;font-size:11px;padding:4px 0 9px}
+QLabel#statistics {color:#3f5143;font-size:12px;padding:6px 0}
 QPushButton,QToolButton {background:#f4f1e8;border:1px solid #dddccd;border-radius:5px;padding:5px 10px}
 QPushButton:hover {background:#e9eee2;border-color:#a8b8a1}
 QPushButton:checked {background:#e1ebdc;color:#315543;border-color:#b0c1a8}
 QPushButton:disabled {color:#aaa99e}
-QLineEdit,QPlainTextEdit {background:#fffdf8;border:1px solid #dedbcd;border-radius:7px;padding:10px;selection-background-color:#cedfca}
+QLineEdit,QPlainTextEdit {background:#fffdf8;border:1px solid #dedbcd;border-radius:7px;padding:10px;selection-background-color:#bed5af;selection-color:#17271a}
 QListWidget {border:0;background:#fbf8f1;padding:0}
 QListWidget::item {background:#f1eee4;border:1px solid #dedbcd;padding:3px 8px;border-radius:5px}
 QListWidget::item:selected {background:#dfe8d9;color:#2b4d37}
-QTableView {background:#fffdf8;alternate-background-color:#f4f1e9;border:1px solid #dedbcd;gridline-color:#e5e2d8;selection-background-color:#d8e6d0}
-QHeaderView::section {background:#eeede3;border:0;padding:8px;color:#6b7364}
+QTableView {background:#fffdf8;alternate-background-color:#f4f1e9;border:1px solid #dedbcd;gridline-color:#e5e2d8;selection-background-color:#bed5af;selection-color:#17271a}
+QTableView::item:selected {background:#bed5af;color:#17271a}
+QHeaderView::section {background:#eeede3;border:0;padding:8px;color:#435240}
 QScrollArea {border:0;background:#eeeae0}
 QSplitter::handle {background:#e5e0d4;width:1px}
 ''')
@@ -1040,7 +1102,9 @@ def main():
     application.setApplicationName('Folio')
     window = Folio()
     window.show()
-    if len(sys.argv)==3 and sys.argv[1]=='--image':
+    if len(sys.argv)==3 and sys.argv[1]=='--read':
+        window.load_path(Path(sys.argv[2]))
+    elif len(sys.argv)==3 and sys.argv[1]=='--image':
         window.parse_image(QtGui.QImage(sys.argv[2]))
     elif len(sys.argv) > 1:
         window.path_input.setPlainText('\n'.join(sys.argv[1:]))
