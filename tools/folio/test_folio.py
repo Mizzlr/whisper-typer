@@ -182,6 +182,8 @@ class UiTests(unittest.TestCase):
             time.sleep(.1)
         else:self.fail('Offline rendering failed: '+str(self.js("({ready:document.documentElement.dataset.folioReady,mermaid:!!document.querySelector('.mermaid svg'),math:!!document.querySelector('mjx-container'),error:document.querySelector('.render-error')?.textContent,mathjax:typeof MathJax,channel:typeof QWebChannel,body:document.body.innerText.slice(0,800)})")))
         self.assertEqual(self.js("document.querySelectorAll('article table').length"),1)
+        self.assertIn('Tea',self.js("document.querySelector('article table').innerText"))
+        self.assertIn('Coffee',self.js("document.querySelector('article table').innerText"))
         self.js("document.querySelectorAll('article table tbody tr')[0].cells[2].click()")
         self.wait(lambda:True,.1)
         self.js("document.querySelectorAll('article table tbody tr')[1].cells[2].dispatchEvent(new MouseEvent('click',{ctrlKey:true}))")
@@ -193,7 +195,10 @@ class UiTests(unittest.TestCase):
         from PyQt5 import QtWidgets
         self.wait(lambda:'print("hello")' in QtWidgets.QApplication.clipboard().text())
         artifact=os.environ.get('FOLIO_PREVIEW')
-        if artifact:self.window.grab().save(artifact)
+        if artifact:
+            from PyQt5 import QtTest
+            QtTest.QTest.qWait(500)  # Allow Chromium's compositor to finish painting.
+            self.window.grab().save(artifact)
 
 
 if __name__=='__main__':
