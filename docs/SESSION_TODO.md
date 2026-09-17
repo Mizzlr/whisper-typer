@@ -188,3 +188,15 @@ pasted-path loading. Live discovery found 16 Git repos in 13.47 ms; two exact
 path probes resolved in 1.83 and 32.83 ms. Installed through tools/folio/install.py
 with checksum-pinned offline assets and an Applications launcher. Whisper Typer
 services were not changed. Folio starts on demand; no boot autostart was added.
+
+- [x] Simplify Folio to automatic text/image paste, dated file groups, content-only reading and Escape to return to a cleared input.
+- [x] Preserve original dump/screenshots privately, browse folders, and add Recent/Downloads views.
+- [x] Resolve terminal-wrapped/shortened paths and fuzzy report names from recent adhoc dates, including untracked files.
+- [x] Replace private report identifiers in new tests with synthetic fixtures; review unpublished changes for data artifacts and credentials before publication.
+
+Minimal Folio batch: 17 behavioral checks passed in isolated Xvfb. Checks cover
+automatic paste, old/new history persistence, Escape and reopening, screenshot
+retention/zoom/copy, folder expansion, recent/download views, fuzzy untracked
+reports, and existing Markdown/CSV/PDF rendering. Regression fixtures are synthetic
+and private live probes remain outside the repository. Runtime history is private
+SQLite outside Git; renderer assets and screenshots are not staged.

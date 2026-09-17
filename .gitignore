@@ -54,3 +54,8 @@ AGENTS.md
 # Stale log files
 mcp-logs.txt
 wa-logs.txt
+
+# Folio runtime data and OCR inputs belong outside the public source tree.
+tools/folio/vendor/
+tools/folio/screenshots/
+tools/folio/history.sqlite3*

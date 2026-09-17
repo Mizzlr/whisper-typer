@@ -72,6 +72,19 @@ class FilesTests(unittest.TestCase):
         binary=self.home/'binary';binary.write_bytes(b'abc\0def')
         with self.assertRaises(ValueError):load_document(binary)
 
+    def test_wrapped_directories_partial_report_and_fuzzy_recent_untracked(self):
+        repo=self.home/'repo-a'
+        date=repo/'adhoc/2000-01-02/example_report'
+        date.mkdir(parents=True)
+        file=date/'RESULTS.csv';file.write_text('value\n1\n')
+        resolver=PathResolver(self.home,self.home/'other')
+        text='Please read (adhoc/2000-01-\n 02/example_report/RESULTS.csv). Other unrelated prose.'
+        self.assertEqual(pasted_paths(text),['adhoc/2000-01-02/example_report/RESULTS.csv'])
+        self.assertEqual(resolver.resolve('2/example_report/RESULTS.csv'),[file])
+        self.assertEqual(resolver.resolve('RESULT.csv'),[file])
+        self.assertEqual(resolver.resolve('example_report'),[date])
+        self.assertEqual(pasted_paths('No files here, just ordinary prose.'),[])
+
     def test_selection_statistics_exact_and_units(self):
         result=selection_summary(['0.1','0.2','1,000','label','','15%','$2','NaN','Inf'])
         self.assertEqual(result['cells'],9);self.assertEqual(result['numeric'],3)
@@ -99,9 +112,9 @@ class UiTests(unittest.TestCase):
 
     def setUp(self):
         from app import Folio
-        self.window=Folio()
         self.temp=tempfile.TemporaryDirectory()
         self.path=Path(self.temp.name)
+        self.window=Folio(self.path/'history.sqlite3')
 
     def tearDown(self):
         self.window.close();self.window.deleteLater()
@@ -149,11 +162,81 @@ class UiTests(unittest.TestCase):
         self.assertEqual(self.window.current.path,path)
         self.assertEqual(self.window.source.toPlainText(),source)
         self.window.open_paths(str(path))
-        self.wait(lambda:self.window.open_button.isEnabled())
+        self.wait(lambda:not self.window.resolving)
         self.assertEqual(self.window.file_list.count(),1)
         self.window.copy_path()
         from PyQt5 import QtWidgets
         self.assertEqual(QtWidgets.QApplication.clipboard().text(),str(path))
+
+    def paste(self,text):
+        from PyQt5 import QtCore
+        mime=QtCore.QMimeData();mime.setText(text)
+        self.window.path_input.insertFromMimeData(mime)
+        self.wait(lambda:not self.window.resolving and not self.window.paste_timer.isActive())
+
+    def test_auto_paste_group_click_escape_and_old_new_history(self):
+        self.window.show()
+        file=self.path/'first.txt';file.write_text('Just the file content.')
+        second=self.path/'second.csv';second.write_text('name,value\nA,2\n')
+        self.paste('Some unrelated prose.\n('+str(file)+')')
+        self.assertEqual(len(self.window.batches),1)
+        self.assertEqual(self.window.batches[0]['paths'],[str(file)])
+        item=next(self.window.file_list.item(i) for i in range(self.window.file_list.count()) if self.window.file_list.item(i).data(256)==str(file))
+        self.window.activate_item(item)
+        self.wait(lambda:self.window.current is not None)
+        self.assertTrue(self.window.reading.isVisible())
+        self.assertFalse(self.window.header.isVisible());self.assertFalse(self.window.toolbar.isVisible())
+        self.assertEqual(self.window.source.toPlainText(),'Just the file content.')
+        self.window.escape()
+        self.assertTrue(self.window.file_list.isVisible());self.assertEqual(self.window.path_input.toPlainText(),'')
+        item=next(self.window.file_list.item(i) for i in range(self.window.file_list.count()) if self.window.file_list.item(i).data(256)==str(file))
+        self.window.activate_item(item)
+        self.assertTrue(self.window.reading.isVisible())
+        self.window.escape()
+        self.paste(str(second))
+        self.assertEqual(len(self.window.batches),2)
+        self.assertEqual(self.window.batches[1]['paths'],[str(file)])
+        from history import History
+        history=History(self.path/'history.sqlite3')
+        self.assertEqual(len(history.recent()),2)
+        self.assertEqual((self.path/'history.sqlite3').stat().st_mode&0o777,0o600)
+        history.close()
+
+    def test_folder_dump_expands_files_browse_recent_and_downloads(self):
+        self.window.show()
+        folder=self.path/'reports';folder.mkdir()
+        file=folder/'report.txt';file.write_text('A useful report.')
+        self.paste(str(folder))
+        self.assertIn(str(file),self.window.batches[0]['paths'])
+        self.window.open_folder(folder)
+        self.wait(lambda:self.window.browsing_folder)
+        self.assertEqual(self.window.file_list.count(),1)
+        self.window.activate_item(self.window.file_list.item(0))
+        self.wait(lambda:self.window.current is not None)
+        self.window.escape();self.window.show_recent()
+        self.assertEqual(self.window.context_entries,[file])
+        self.window.show_downloads(folder)
+        self.wait(lambda:self.window.context_entries==[file] and self.window.back_button.isVisible())
+
+    def test_image_paste_keeps_original_and_extracted_text_zoom_and_escape(self):
+        from PyQt5 import QtCore,QtGui,QtWidgets
+        from unittest.mock import patch
+        self.window.show()
+        file=self.path/'report.txt';file.write_text('Report content.')
+        image=QtGui.QImage(800,400,QtGui.QImage.Format_RGB32);image.fill(QtGui.QColor('#fbf8f1'))
+        mime=QtCore.QMimeData();mime.setImageData(image)
+        with patch('app.image_text',return_value=str(file)):
+            self.window.path_input.insertFromMimeData(mime)
+            self.wait(lambda:bool(self.window.batches))
+        batch=self.window.batches[0]
+        self.assertTrue(batch['has_image']);self.assertEqual(batch['source'],str(file))
+        self.assertEqual(batch['paths'],[str(file)])
+        self.window.activate_item(self.window.file_list.item(0))
+        self.assertEqual(self.window.current.kind,'image')
+        width=self.window.pdf_label.width();self.window.zoom(1)
+        self.assertGreater(self.window.pdf_label.width(),width)
+        self.window.copy_image();self.assertFalse(QtWidgets.QApplication.clipboard().image().isNull())
+        self.window.escape();self.assertTrue(self.window.file_list.isVisible())
 
     def test_pdf_load_extract_page_navigation_zoom_pan(self):
         from PyQt5 import QtGui,QtCore
@@ -169,7 +252,7 @@ class UiTests(unittest.TestCase):
         for _ in range(7):self.window.zoom(1)
         self.assertGreater(self.window.pdf.horizontalScrollBar().maximum(),0)
         self.window.change_page(1)
-        self.wait(lambda:'Page 2 of 2' in self.window.status.text())
+        self.wait(lambda:self.window.pdf_loaded_page==2)
 
     @unittest.skipUnless(RENDER,'Actual WebEngine rendering requires --render under Xvfb')
     def test_offline_mermaid_math_markdown_tables_and_code_copy(self):

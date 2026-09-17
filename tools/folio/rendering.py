@@ -10,7 +10,7 @@ import markdown
 VENDOR = Path.home() / '.local/share/folio/vendor'
 CSS = '''
 :root {color-scheme:light} * {box-sizing:border-box}
-body {margin:0;background:#fbf8f1;color:#302f2b;font:17px/1.75 "DejaVu Sans",sans-serif}
+body {margin:0;background:#fbf8f1;color:#302f2b;font:15px/1.75 "JetBrains Mono","DejaVu Sans Mono",monospace}
 article {max-width:1000px;margin:auto;padding:38px 48px 90px}
 h1,h2,h3 {line-height:1.3;letter-spacing:-.025em;color:#263e35}
 h1 {font-size:32px;padding-bottom:16px;border-bottom:1px solid #ddd8ca}
@@ -25,7 +25,8 @@ tr:nth-child(even) {background:#f4f1e9} img {max-width:100%;height:auto}
 hr {border:0;border-top:1px solid #dedacc;margin:32px 0}
 .mermaid {background:#fffdf8;border:1px solid #e1ddcf;border-radius:12px;padding:24px;overflow:auto;text-align:center}
 .mermaid svg {max-width:100%;height:auto} .render-error {color:#9a4435;font-size:13px}
-button.copy-code {float:right;color:#527564;border:1px solid #cad5c8;border-radius:5px;background:#fbf8f1;padding:4px 8px;cursor:pointer}
+button.copy-code {float:right;color:#527564;border:1px solid #cad5c8;border-radius:5px;background:#fbf8f1;padding:4px 8px;cursor:pointer;opacity:0}
+pre:hover button.copy-code,.table-stats:hover button.copy-code {opacity:1}
 td.folio-selected,th.folio-selected {background:#cfe0c7!important;outline:1px solid #95b08a}
 table td,table th {cursor:cell;user-select:none} .row-grip {cursor:pointer;color:#89927f;font-size:11px;width:28px}
 .table-stats {font-size:12px;color:#6b7b64;line-height:1.6;margin:8px 0 28px}
@@ -91,7 +92,7 @@ if(!Array.prototype.at)Array.prototype.at=function(i){i=Math.trunc(i)||0;return 
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded',async()=>{
- mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',themeVariables:{primaryColor:'#e7eee2',primaryTextColor:'#304439',primaryBorderColor:'#9eb493',lineColor:'#789181',fontFamily:'DejaVu Sans'}});
+ mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',themeVariables:{primaryColor:'#e7eee2',primaryTextColor:'#304439',primaryBorderColor:'#9eb493',lineColor:'#789181',fontFamily:'JetBrains Mono'}});
  const bridge=await new Promise(resolve=>new QWebChannel(qt.webChannelTransport,c=>resolve(c.objects.folio)));
  try {
  await mermaid.run({querySelector:'.mermaid'});
@@ -104,11 +105,11 @@ document.addEventListener('DOMContentLoaded',async()=>{
  for (const table of document.querySelectorAll('article table')) {
   const rows=Array.from(table.rows);let anchor=null;let revision=0;
   const status=document.createElement('div');status.className='table-stats';
-  status.textContent='Select cells · Shift selects a rectangle · Ctrl adds cells · Header selects column · Row number selects row';
+  const output=document.createElement('span');status.append(output);
   const copy=document.createElement('button');copy.className='copy-code';copy.textContent='Copy selection';status.prepend(copy);table.after(status);
   const cells=rows.map((row,r)=>Array.from(row.cells).map((cell,c)=>{cell.dataset.row=r;cell.dataset.col=c;return cell;}));
   const selected=new Set();
-  const update=()=>{const version=++revision;for(const row of cells)for(const cell of row)cell.classList.toggle('folio-selected',selected.has(cell));bridge.stats(JSON.stringify(Array.from(selected).map(c=>c.textContent)),text=>{if(version===revision){status.lastChild.textContent=text;}});};
+  const update=()=>{const version=++revision;for(const row of cells)for(const cell of row)cell.classList.toggle('folio-selected',selected.has(cell));bridge.stats(JSON.stringify(Array.from(selected).map(c=>c.textContent)),text=>{if(version===revision){output.textContent=text;}});};
   copy.onclick=()=>{const out=[];for(const row of cells){const chosen=row.filter(c=>selected.has(c));if(chosen.length)out.push(chosen.map(c=>c.textContent).join('\\t'));}bridge.copy(out.join('\\n'));};
   for (let r=0;r<rows.length;r++) {
    const grip=document.createElement(r===0?'th':'td');grip.className='row-grip';grip.textContent=r===0?'#':r;

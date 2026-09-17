@@ -19,10 +19,11 @@ def install():
     # Fail before copying anything if UI/text dependencies are absent.
     import bleach  # noqa: F401
     import markdown  # noqa: F401
+    from PIL import Image  # noqa: F401
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-    for command in ('pdfinfo', 'pdftoppm', 'pdftotext'):
+    for command in ('pdfinfo', 'pdftoppm', 'pdftotext', 'tesseract'):
         if not shutil.which(command):
-            raise RuntimeError(f'Missing {command}; install poppler-utils.')
+            raise RuntimeError(f'Missing {command}; see README.md dependencies.')
     home = Path.home()
     share = home / '.local/share/folio'
     for package, version, checksum in PACKAGES:
@@ -46,7 +47,7 @@ def install():
     source = Path(__file__).resolve().parent
     library = home / '.local/lib/folio'
     library.mkdir(parents=True, exist_ok=True)
-    for name in ('app.py', 'files.py', 'rendering.py', 'cell_stats.py'):
+    for name in ('app.py', 'files.py', 'rendering.py', 'cell_stats.py','history.py'):
         shutil.copyfile(source / name, library / name)
     executable = home / '.local/bin/folio'
     executable.parent.mkdir(parents=True, exist_ok=True)
