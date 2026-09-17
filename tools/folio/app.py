@@ -1,1132 +1,617 @@
-#!/usr/bin/python3
-"""Folio — a local reading desk for documents and pasted ideas."""
+#!/usr/bin/env python3
+"""Folio: a quiet, native Tk reading window with private paste history."""
+import base64
 import csv
 import io
 import json
+import mimetypes
 import os
+import queue
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
+import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
 from pathlib import Path
+from tkinter import ttk
+from urllib.parse import urlparse, unquote
 
-from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtWebChannel import QWebChannel
-from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineProfile, QWebEngineView
-
-from files import Document, PathResolver, load_document, pasted_paths, pdf_page, image_text
-from rendering import VENDOR, document_html
-from cell_stats import selection_summary, display_summary
+from PIL import Image, ImageTk, ImageGrab
+from tkinterweb import HtmlFrame
+from files import Document, PathResolver, load_document, pasted_paths, image_text, unzip_contents
+from rendering import CSS, rendered_body
 from history import History
+from tk_widgets import Table, LIGHT, DARK
 
 
-class Signals(QtCore.QObject):
-    done = QtCore.pyqtSignal(object, object)
-
-
-class Job(QtCore.QRunnable):
-    def __init__(self, function, callback):
-        super().__init__()
-        self.function = function
-        self.signals = Signals()
-        self.signals.done.connect(callback)
-
-    def run(self):
-        try:
-            result, error = self.function(), None
-        except Exception as exc:
-            result, error = None, str(exc)
-        self.signals.done.emit(result, error)
-
-
-class LocalRequests(QWebEngineUrlRequestInterceptor):
-    def interceptRequest(self, info):
-        if info.requestUrl().scheme() not in ('file', 'data', 'about', 'qrc'):
-            info.block(True)
-
-
-class Page(QWebEnginePage):
-    file_link = QtCore.pyqtSignal(str)
-
-    def acceptNavigationRequest(self, url, kind, main_frame):
-        if main_frame and kind == self.NavigationTypeLinkClicked:
-            if url.isLocalFile():
-                if url.toLocalFile() == self.url().toLocalFile() and url.hasFragment():
-                    return True
-                self.file_link.emit(url.toLocalFile())
-            elif url.scheme() in ('http', 'https', 'mailto'):
-                QtGui.QDesktopServices.openUrl(url)
-            return False
-        return True
-
-
-class Bridge(QtCore.QObject):
-    @QtCore.pyqtSlot(str, result=str)
-    def stats(self, values):
-        return display_summary(selection_summary(json.loads(values)))
-
-    @QtCore.pyqtSlot(str)
-    def copy(self, text):
-        QtWidgets.QApplication.clipboard().setText(text)
-
-
-class CsvModel(QtCore.QAbstractTableModel):
-    def __init__(self, rows):
-        super().__init__()
-        self.rows = rows
-        self.columns = max((len(row) for row in rows), default=0)
-
-    def rowCount(self, parent=QtCore.QModelIndex()):
-        return 0 if parent.isValid() else len(self.rows)
-
-    def columnCount(self, parent=QtCore.QModelIndex()):
-        return 0 if parent.isValid() else self.columns
-
-    def data(self, index, role=QtCore.Qt.DisplayRole):
-        if role in (QtCore.Qt.DisplayRole, QtCore.Qt.ToolTipRole) and index.isValid():
-            row = self.rows[index.row()]
-            return row[index.column()] if index.column() < len(row) else ''
-        if role == QtCore.Qt.BackgroundRole and index.row() == 0:
-            return QtGui.QColor('#e6ede2')
-
-    def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):
-        if role == QtCore.Qt.DisplayRole:
-            return str(section + 1) if orientation == QtCore.Qt.Vertical else self.column_label(section)
-
-    @staticmethod
-    def column_label(number):
-        result = ''
-        number += 1
-        while number:
-            number, digit = divmod(number - 1, 26)
-            result = chr(65 + digit) + result
-        return result
-
-
-class CsvTable(QtWidgets.QTableView):
-    def keyPressEvent(self, event):
-        if event.matches(QtGui.QKeySequence.Copy):
-            indexes = self.selectionModel().selectedIndexes()
-            if indexes:
-                selected = {(x.row(), x.column()) for x in indexes}
-                rs, cs = [x.row() for x in indexes], [x.column() for x in indexes]
-                output = io.StringIO()
-                writer = csv.writer(output, delimiter='\t', lineterminator='\n')
-                for row in range(min(rs), max(rs)+1):
-                    writer.writerow([self.model().index(row, col).data() if (row, col) in selected else ''
-                                     for col in range(min(cs), max(cs)+1)])
-                QtWidgets.QApplication.clipboard().setText(output.getvalue())
-            return
-        super().keyPressEvent(event)
-
-
-class PdfScroll(QtWidgets.QScrollArea):
-    """Drag to pan; ordinary wheel is vertical, Shift+wheel is horizontal."""
+class TableParser(HTMLParser):
     def __init__(self):
-        super().__init__()
-        self.drag = None
-        self.viewport().installEventFilter(self)
-        self.setAlignment(QtCore.Qt.AlignCenter)
-
-    def eventFilter(self, obj, event):
-        if event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
-            self.drag = (event.pos(), self.horizontalScrollBar().value(), self.verticalScrollBar().value())
-            self.viewport().setCursor(QtCore.Qt.ClosedHandCursor)
-            return True
-        if event.type() == QtCore.QEvent.MouseMove and self.drag:
-            pos, horizontal, vertical = self.drag
-            delta = event.pos() - pos
-            self.horizontalScrollBar().setValue(horizontal - delta.x())
-            self.verticalScrollBar().setValue(vertical - delta.y())
-            return True
-        if event.type() == QtCore.QEvent.MouseButtonRelease:
-            self.drag = None
-            self.viewport().unsetCursor()
-        if event.type() == QtCore.QEvent.Wheel and event.modifiers() & QtCore.Qt.ShiftModifier:
-            bar = self.horizontalScrollBar()
-            bar.setValue(bar.value() - event.angleDelta().y())
-            return True
-        return super().eventFilter(obj, event)
+        super().__init__();self.rows=[];self.row=None;self.cell=None
+    def handle_starttag(self,tag,attrs):
+        if tag=='tr':self.row=[]
+        elif tag in ('td','th'):self.cell=''
+        elif tag=='br' and self.cell is not None:self.cell+='\n'
+    def handle_data(self,data):
+        if self.cell is not None:self.cell+=data
+    def handle_endtag(self,tag):
+        if tag in ('td','th') and self.cell is not None:
+            self.row.append(self.cell.strip());self.cell=None
+        elif tag=='tr' and self.row is not None:self.rows.append(self.row);self.row=None
 
 
-class PasteInput(QtWidgets.QPlainTextEdit):
-    image_pasted = QtCore.pyqtSignal(object)
-
-    def insertFromMimeData(self, source):
-        if source.hasImage():
-            image=source.imageData()
-            image=image.toImage() if isinstance(image,QtGui.QPixmap) else QtGui.QImage(image)
-            self.image_pasted.emit(image)
-        elif source.hasText():
-            # A new paste is a new request; no Select All step is required.
-            self.setPlainText(source.text())
-
-
-class LineNumbers(QtWidgets.QWidget):
-    def __init__(self,editor):
-        super().__init__(editor)
-        self.editor=editor
-
-    def paintEvent(self,event):
-        editor=self.editor
-        painter=QtGui.QPainter(self)
-        painter.fillRect(event.rect(),QtGui.QColor('#f5f2e9'))
-        painter.setPen(QtGui.QColor('#949b8b'))
-        painter.setFont(editor.font())
-        block=editor.firstVisibleBlock()
-        top=int(editor.blockBoundingGeometry(block).translated(editor.contentOffset()).top())
-        while block.isValid() and top<=event.rect().bottom():
-            height=int(editor.blockBoundingRect(block).height())
-            if block.isVisible() and top+height>=event.rect().top():
-                painter.drawText(0,top,self.width()-8,editor.fontMetrics().height(),
-                                 QtCore.Qt.AlignRight,str(block.blockNumber()+1))
-            top+=height
-            block=block.next()
+def local_resource(url,data=None,method='GET',encoding=None):
+    """Embedded content may use local files/data only; no network fetching."""
+    parsed=urlparse(url)
+    if parsed.scheme=='data':
+        header,content=url.split(',',1)
+        raw=base64.b64decode(content) if ';base64' in header else unquote(content).encode()
+        return url,raw,header[5:].split(';')[0],200
+    if parsed.scheme=='file' and parsed.netloc in ('','localhost'):
+        path=Path(unquote(parsed.path))
+        return url,path.read_bytes(),mimetypes.guess_type(str(path))[0] or 'application/octet-stream',200
+    raise ValueError('External embedded resources are disabled.')
 
 
-class NumberedText(QtWidgets.QPlainTextEdit):
-    def __init__(self):
-        super().__init__()
-        self.gutter=LineNumbers(self)
-        self.setLineWrapMode(self.WidgetWidth)
-        self.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
-        self.blockCountChanged.connect(self.update_gutter)
-        self.updateRequest.connect(self.repaint_gutter)
-        self.update_gutter()
-
-    def gutter_width(self):
-        return 16+self.fontMetrics().horizontalAdvance('9')*len(str(max(1,self.blockCount())))
-
-    def update_gutter(self,unused=None):
-        self.setViewportMargins(self.gutter_width(),0,0,0)
-        self.place_gutter()
-        self.gutter.update()
-
-    def place_gutter(self):
-        rect=self.viewport().geometry()
-        self.gutter.setGeometry(rect.x()-self.gutter_width(),rect.y(),self.gutter_width(),rect.height())
-
-    def repaint_gutter(self,rect,dy):
-        if dy:
-            self.gutter.scroll(0,dy)
-        else:
-            self.gutter.update(0,rect.y(),self.gutter_width(),rect.height())
-
-    def resizeEvent(self,event):
-        super().resizeEvent(event)
-        if hasattr(self,'gutter'):
-            self.place_gutter()
-
-    def changeEvent(self,event):
-        super().changeEvent(event)
-        if event.type()==QtCore.QEvent.FontChange and hasattr(self,'gutter'):
-            self.update_gutter()
+def typeset(source,dark=False):
+    if not re.search(r'\$|\\\(|\\\[|```mermaid|^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap|timeline|journey)\b',source,re.M):
+        return rendered_body(source)
+    worker=Path(__file__).with_name('render_worker.py')
+    env=dict(os.environ,QTWEBENGINE_CHROMIUM_FLAGS='--disable-gpu',QT_QUICK_BACKEND='software')
+    result=subprocess.run(['xvfb-run','-a','/usr/bin/python3',str(worker)]+(['--dark'] if dark else []),input=source,
+                          text=True,capture_output=True,timeout=30,env=env)
+    if result.returncode:raise ValueError('Local diagram/math typesetting failed; Source is available from the menu.')
+    return json.loads(result.stdout)
 
 
-class FileListDelegate(QtWidgets.QStyledItemDelegate):
-    def paint(self,painter,option,index):
-        super().paint(painter,option,index)
-        if index.data(QtCore.Qt.UserRole+1) and index.row()>0:
-            painter.save()
-            painter.setPen(QtGui.QColor('#dedbce'))
-            painter.drawLine(option.rect.left()+8,option.rect.top()+1,
-                             option.rect.right()-8,option.rect.top()+1)
-            painter.restore()
-
-
-class Folio(QtWidgets.QMainWindow):
-    def __init__(self,history_path=None):
-        super().__init__()
-        self.setWindowTitle('Folio')
-        self.setWindowIcon(QtGui.QIcon.fromTheme('accessories-text-editor'))
-        self.resize(1180, 820)
-        self.resolver = PathResolver()
-        self.pool = QtCore.QThreadPool(self)
-        self.pool.setMaxThreadCount(3)
-        self.documents = {}
-        self.current = None
-        self.closing = False
-        self.generation = 0
-        self.pdf_generation = 0
-        self.stats_generation = 0
-        self.paste_generation = 0
-        self.navigation_generation=0
-        self.loading_paths = set()
-        self.resolving = False
-        self.context_entries = []
-        self.context_stack = []
+class Folio:
+    def __init__(self,root,history_path=None):
+        self.root=root;root.title('Folio');root.wm_class('Folio','Folio') if hasattr(root,'wm_class') else None
         self.history=History(history_path)
-        self.batches=self.history.recent()
-        self.history_complete=False
-        self.loading_history=False
-        self.history_scroll=0
-        self.browsing_folder=False
-        self.pending_image=None
-        self.pdf_image = None
-        self.pdf_zoom = .65
-        self.temp = tempfile.TemporaryDirectory(prefix='folio-')
-        self.settings = QtCore.QSettings(str(Path(history_path).with_suffix('.ini')),QtCore.QSettings.IniFormat) if history_path else QtCore.QSettings('Folio', 'Reader')
-        body = QtWidgets.QWidget()
-        self.setCentralWidget(body)
-        layout = QtWidgets.QVBoxLayout(body)
-        layout.setContentsMargins(16, 12, 16, 8)
-        self.path_input = PasteInput()
-        self.path_input.setPlaceholderText('Paste paths or content')
-        self.path_input.setFixedHeight(48)
-        header=QtWidgets.QHBoxLayout()
-        self.back_button=self.button('← Back',self.go_back)
-        self.back_button.hide()
-        header.addWidget(self.back_button)
-        header.addWidget(self.path_input,1)
-        header.addStretch()
-        header.addWidget(self.button('Recent',self.show_recent))
-        header.addWidget(self.button('Downloads',self.show_downloads))
-        self.header=QtWidgets.QWidget()
-        self.header.setLayout(header)
-        self.date=QtWidgets.QLabel()
-        self.date.setObjectName('location')
-        layout.addWidget(self.date)
-        layout.addWidget(self.header)
-        self.clock=QtCore.QTimer(self)
-        self.clock.timeout.connect(lambda:self.date.setText(QtCore.QDateTime.currentDateTime().toString('MMMM d · HH:mm:ss')))
-        self.clock.start(1000)
-        self.date.setText(QtCore.QDateTime.currentDateTime().toString('MMMM d · HH:mm:ss'))
-        self.paste_timer = QtCore.QTimer(self)
-        self.paste_timer.setSingleShot(True)
-        self.paste_timer.setInterval(180)
-        self.paste_timer.timeout.connect(self.parse_paste)
-        self.path_input.textChanged.connect(self.schedule_paste)
-        self.path_input.image_pasted.connect(self.parse_image)
-        self.file_list = QtWidgets.QListWidget()
-        self.file_list.setItemDelegate(FileListDelegate(self.file_list))
-        self.file_list.viewport().setCursor(QtCore.Qt.PointingHandCursor)
-        self.file_list.setViewMode(QtWidgets.QListView.ListMode)
-        self.file_list.setFlow(QtWidgets.QListView.TopToBottom)
-        self.file_list.setMovement(QtWidgets.QListView.Static)
-        self.file_list.setResizeMode(QtWidgets.QListView.Adjust)
-        self.file_list.setWrapping(False)
-        self.file_list.setWordWrap(False)
-        self.file_list.setSpacing(0)
-        self.file_list.setTextElideMode(QtCore.Qt.ElideMiddle)
-        self.file_list.setMinimumHeight(0)
-        self.file_list.itemClicked.connect(self.activate_item)
-        self.file_list.itemActivated.connect(self.activate_item)
-        self.file_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.file_list.customContextMenuRequested.connect(self.file_menu)
-        layout.addWidget(self.file_list,1)
-        self.file_list.hide()
-        reading = QtWidgets.QWidget()
-        self.reading=reading
-        reader = QtWidgets.QVBoxLayout(reading)
-        reader.setContentsMargins(0, 0, 0, 0)
-        self.location = QtWidgets.QLabel('')
-        self.location.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.location.setWordWrap(True)
-        self.location.setObjectName('location')
-        actions = QtWidgets.QHBoxLayout()
-        actions.addWidget(self.location, 1)
-        menu = QtWidgets.QMenu(self)
-        self.viewer_menu=menu
-        menu.addAction('Copy selection',self.copy_selection)
-        menu.addAction('Copy content',self.copy_content)
-        self.image_copy_action=menu.addAction('Copy image',self.copy_image)
-        self.source_toggle = menu.addAction('Source')
-        self.source_toggle.setCheckable(True)
-        self.source_toggle.triggered.connect(self.refresh_view)
-        self.path_button = menu.addAction('Copy path', self.copy_path)
-        menu.addAction('Find', self.show_find)
-        menu.addAction('Zoom in', lambda:self.zoom(1))
-        menu.addAction('Zoom out', lambda:self.zoom(-1))
-        menu.addAction('Fit PDF width', self.fit_pdf)
-        menu.addAction('Previous PDF page',lambda:self.change_page(-1))
-        menu.addAction('Next PDF page',lambda:self.change_page(1))
-        menu.addSeparator()
-        menu.addAction('Close · Esc',self.escape)
-        menu.addAction('Open file…', self.choose_files)
-        self.copy_button = self.button('Copy', self.copy_content)
-        actions.addWidget(self.copy_button)
-        more = QtWidgets.QToolButton()
-        more.setText('…')
-        more.setMenu(menu)
-        more.setPopupMode(QtWidgets.QToolButton.InstantPopup)
-        actions.addWidget(more)
-        self.toolbar=QtWidgets.QWidget()
-        self.toolbar.setLayout(actions)
-        reader.addWidget(self.toolbar)
-        self.toolbar.hide()
-        self.find = QtWidgets.QLineEdit()
-        self.find.setPlaceholderText('Find in document')
-        self.find.setMaximumWidth(220)
-        self.find.returnPressed.connect(self.find_next)
-        reader.addWidget(self.find)
-        self.find.hide()
-        self.pdf_controls = QtWidgets.QWidget()
-        controls = QtWidgets.QHBoxLayout(self.pdf_controls)
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.addWidget(self.button('←', lambda:self.change_page(-1)))
-        self.page_number = QtWidgets.QSpinBox()
-        self.page_number.valueChanged.connect(self.render_pdf)
-        controls.addWidget(self.page_number)
-        self.page_count = QtWidgets.QLabel()
-        controls.addWidget(self.page_count)
-        controls.addWidget(self.button('→', lambda:self.change_page(1)))
-        controls.addStretch()
-        reader.addWidget(self.pdf_controls)
-        self.views = QtWidgets.QStackedWidget()
-        self.web = QWebEngineView()
-        # The central widget (including its page) must die before the profile.
-        self.profile = QWebEngineProfile(self)
-        self.interceptor = LocalRequests(self.profile)
-        self.profile.setUrlRequestInterceptor(self.interceptor)
-        self.web_page = Page(self.profile, self.web)
-        self.web_page.file_link.connect(lambda p:self.open_paths(p, context=self.current.path if self.current else None))
-        self.web.setPage(self.web_page)
-        self.channel = QWebChannel(self.web_page)
-        self.bridge = Bridge(self.channel)
-        self.channel.registerObject('folio', self.bridge)
-        self.web_page.setWebChannel(self.channel)
-        self.source = NumberedText()
-        self.source.setReadOnly(True)
-        self.source.setFont(QtGui.QFont('JetBrains Mono', 11))
-        self.table = CsvTable()
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.table.setAlternatingRowColors(True)
-        self.table.setWordWrap(False)
-        self.table.setSortingEnabled(False)
-        self.table.horizontalHeader().setDefaultSectionSize(190)
-        self.table.verticalHeader().setDefaultSectionSize(32)
-        self.pdf = PdfScroll()
-        self.pdf_label = QtWidgets.QLabel()
-        self.pdf_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self.pdf.setWidget(self.pdf_label)
-        for widget in (self.web, self.source, self.table, self.pdf):
-            self.views.addWidget(widget)
-            widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-            widget.customContextMenuRequested.connect(lambda pos,w=widget:self.viewer_menu.exec_(w.mapToGlobal(pos)))
-        reader.addWidget(self.views, 1)
-        self.stats = QtWidgets.QLabel('Select cells, rows, or columns to see their statistics.')
-        self.stats.setWordWrap(True)
-        self.stats.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.stats.setObjectName('statistics')
-        reader.addWidget(self.stats)
-        self.stats.hide()
-        layout.addWidget(reading, 1)
-        reading.hide()
-        self.status = QtWidgets.QLabel('')
-        self.status.setObjectName('location')
-        layout.addWidget(self.status)
-        self.setStyleSheet('''
-QMainWindow,QWidget {background:#fbf8f1;color:#353b33;font-family:"JetBrains Mono";font-size:13px}
-QLabel#location {color:#858879;font-size:11px;padding:4px 0 9px}
-QLabel#statistics {color:#3f5143;font-size:12px;padding:6px 0}
-QPushButton,QToolButton {background:#f4f1e8;border:1px solid #dddccd;border-radius:5px;padding:5px 10px}
-QPushButton:hover {background:#e9eee2;border-color:#a8b8a1}
-QPushButton:checked {background:#e1ebdc;color:#315543;border-color:#b0c1a8}
-QPushButton:disabled {color:#aaa99e}
-QLineEdit,QPlainTextEdit {background:#fffdf8;border:1px solid #dedbcd;border-radius:7px;padding:10px;selection-background-color:#bed5af;selection-color:#17271a}
-QListWidget {border:0;background:#fbf8f1;padding:0}
-QListWidget::item {background:transparent;border:0;padding:3px 8px}
-QListWidget::item:hover {background:#f2f0e7}
-QListWidget::item:selected {background:#dfe8d9;color:#2b4d37}
-QTableView {background:#fffdf8;alternate-background-color:#f4f1e9;border:1px solid #dedbcd;gridline-color:#e5e2d8;selection-background-color:#bed5af;selection-color:#17271a}
-QTableView::item:selected {background:#bed5af;color:#17271a}
-QHeaderView::section {background:#eeede3;border:0;padding:8px;color:#435240}
-QScrollArea {border:0;background:#eeeae0}
-QSplitter::handle {background:#e5e0d4;width:1px}
-''')
-        self.pdf_controls.hide()
-        self.source_toggle.setEnabled(False)
-        self.copy_button.setEnabled(False)
-        self.path_button.setEnabled(False)
-        self.source.setPlaceholderText('')
-        self.views.setCurrentWidget(self.source)
-        for shortcut, callback in [('Ctrl+L', self.ready_for_paste), ('Ctrl+O', self.choose_files), ('Ctrl+F', self.show_find), ('Escape', self.escape),('Ctrl+Shift+C',self.copy_content),('Ctrl++',lambda:self.zoom(1)),('Ctrl+-',lambda:self.zoom(-1)),('Alt+Right',lambda:self.change_page(1)),('Alt+Left',lambda:self.change_page(-1))]:
-            QtWidgets.QShortcut(QtGui.QKeySequence(shortcut), self, activated=callback)
-        QtWidgets.QApplication.instance().installEventFilter(self)
-        geometry = self.settings.value('geometry')
-        if geometry:
-            self.restoreGeometry(geometry)
-        self.show_history()
-        self.file_list.verticalScrollBar().valueChanged.connect(self.load_more_history)
+        self.settings_path=Path(history_path).with_suffix('.json') if history_path else Path.home()/'.config/folio/settings.json'
+        try:self.settings=json.loads(self.settings_path.read_text())
+        except (OSError,ValueError):self.settings={}
+        self.dark=bool(self.settings.get('dark',False));self.top=bool(self.settings.get('top',True))
+        root.geometry(self.settings.get('geometry','1180x820'))
+        root.attributes('-topmost',self.top)
+        self.resolver=PathResolver();self.batches=self.history.recent();self.history_complete=False
+        self.current=None;self.documents={};self.rendered={};self.callbacks={}
+        self.context_entries=[];self.context_stack=[];self.context_label='Paths';self.active_batch=None
+        self.view='list';self.root_tab='Paths';self.navigation=0;self.paste_generation=0
+        self.closing=False;self.busy=0;self.image_scale=1.;self.image=None;self.image_photo=None
+        self.temp=tempfile.TemporaryDirectory(prefix='folio-');self.zip_roots={}
+        self.executor=ThreadPoolExecutor(max_workers=3,thread_name_prefix='folio')
+        self.results=queue.Queue();self.paste_timer=None
+        self.frame=tk.Frame(root);self.frame.pack(fill='both',expand=True,padx=16,pady=10)
+        self.nav=tk.Frame(self.frame);self.nav.pack(fill='x',pady=(0,8))
+        self.date=tk.Label(self.nav,font=('JetBrains Mono',9),anchor='w');self.date.pack(side='left')
+        self.top_button=self.button(self.nav,'Top',self.toggle_top);self.top_button.pack(side='right')
+        self.theme_button=self.button(self.nav,'◐',self.toggle_theme);self.theme_button.pack(side='right',padx=(0,6))
+        self.back_button=self.button(self.nav,'← Back',self.go_back)
+        self.transpose_button=self.button(self.nav,'Transpose',self.transpose)
+        self.switcher=tk.Frame(self.nav)
+        self.tab_buttons={}
+        for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Ad hoc',self.show_adhoc)]:
+            button=self.button(self.switcher,label,callback);button.pack(side='left',padx=3);self.tab_buttons[label]=button
+        self.switcher.pack(side='right',padx=7)
+        self.reader_tabs=tk.Frame(self.nav)
+        self.input_frame=tk.Frame(self.frame);self.input_frame.pack(fill='x',pady=(0,10))
+        self.path_input=tk.Text(self.input_frame,height=2,wrap='word',font=('JetBrains Mono',10),bd=1,relief='solid',padx=10,pady=8,undo=True)
+        self.path_input.pack(fill='x')
+        self.path_input.bind('<<Modified>>',self.input_changed)
+        self.content=tk.Frame(self.frame);self.content.pack(fill='both',expand=True)
+        self.list_frame=tk.Frame(self.content)
+        self.list_text=tk.Text(self.list_frame,wrap='none',font=('JetBrains Mono',10),cursor='hand2',bd=0,padx=5,pady=2)
+        self.list_scroll=ttk.Scrollbar(self.list_frame,command=self.list_text.yview)
+        self.list_text.configure(yscrollcommand=self.list_scrolled)
+        self.list_scroll.pack(side='right',fill='y');self.list_text.pack(fill='both',expand=True)
+        self.html=HtmlFrame(self.content,messages_enabled=False,javascript_enabled=False,
+                           request_func=local_resource,on_link_click=self.open_link,threading_enabled=False,
+                           selected_text_highlight_color=LIGHT['selected'],selected_text_color=LIGHT['selected_fg'])
+        self.html.bind('<Button-3>',self.menu,add='+');self.html.html.bind('<Button-3>',self.menu,add='+')
+        self.source_frame=tk.Frame(self.content)
+        self.gutter=tk.Text(self.source_frame,width=5,wrap='none',state='disabled',bd=0,font=('JetBrains Mono',10),padx=5,pady=12)
+        self.gutter.pack(side='left',fill='y')
+        self.source=tk.Text(self.source_frame,wrap='word',font=('JetBrains Mono',10),bd=0,padx=12,pady=12)
+        self.source_scroll=ttk.Scrollbar(self.source_frame,command=self.source_yview)
+        self.source.configure(yscrollcommand=self.source_scrolled)
+        self.source_scroll.pack(side='right',fill='y');self.source.pack(fill='both',expand=True)
+        self.source.bind('<Button-3>',self.menu)
+        self.image_frame=tk.Frame(self.content)
+        self.image_canvas=tk.Canvas(self.image_frame,highlightthickness=0)
+        self.image_v=ttk.Scrollbar(self.image_frame,orient='vertical',command=self.image_canvas.yview)
+        self.image_h=ttk.Scrollbar(self.image_frame,orient='horizontal',command=self.image_canvas.xview)
+        self.image_canvas.configure(yscrollcommand=self.image_v.set,xscrollcommand=self.image_h.set)
+        self.image_canvas.grid(row=0,column=0,sticky='nsew');self.image_v.grid(row=0,column=1,sticky='ns');self.image_h.grid(row=1,column=0,sticky='ew')
+        self.image_frame.rowconfigure(0,weight=1);self.image_frame.columnconfigure(0,weight=1)
+        self.image_canvas.bind('<ButtonPress-1>',lambda e:self.image_canvas.scan_mark(e.x,e.y))
+        self.image_canvas.bind('<B1-Motion>',lambda e:self.image_canvas.scan_dragto(e.x,e.y,gain=1))
+        self.image_canvas.bind('<Button-3>',self.menu)
+        for event,direction in [('<Button-4>',-1),('<Button-5>',1)]:
+            self.image_canvas.bind(event,lambda e,d=direction:self.image_wheel(e,d))
+        self.table=None;self.embedded_tables=[]
+        self.status=tk.Label(self.frame,font=('JetBrains Mono',9),anchor='w');self.status.pack(fill='x')
+        root.bind('<Control-v>',self.paste);root.bind('<Control-V>',self.paste)
+        root.bind('<Escape>',lambda e:self.escape());root.bind('<Control-l>',lambda e:self.escape())
+        root.bind('<Control-f>',lambda e:self.find());root.bind('<Control-Shift-C>',lambda e:self.copy_content())
+        root.bind('<Control-plus>',lambda e:self.zoom(1));root.bind('<Control-minus>',lambda e:self.zoom(-1))
+        root.protocol('WM_DELETE_WINDOW',self.close)
+        self.apply_theme();self.show_history();self.tick();self.clock()
 
-    def button(self, label, callback, checkable=False):
-        button = QtWidgets.QPushButton(label)
-        button.setCheckable(checkable)
-        button.clicked.connect(lambda checked=False:callback())
-        return button
+    def button(self,parent,text,command):
+        return tk.Button(parent,text=text,command=command,font=('JetBrains Mono',9),relief='solid',bd=1,
+                         padx=8,pady=3,takefocus=False,cursor='hand2')
 
-    def submit(self, function, callback):
-        job = Job(function, lambda result,error:callback(result,error) if not self.closing else None)
-        self.pool.start(job)
+    def save_settings(self):
+        self.settings_path.parent.mkdir(parents=True,exist_ok=True)
+        self.settings_path.write_text(json.dumps(dict(dark=self.dark,top=self.top,geometry=self.root.geometry())))
+        os.chmod(self.settings_path,0o600)
 
-    def eventFilter(self, obj, event):
-        if event.type() == QtCore.QEvent.KeyPress and event.matches(QtGui.QKeySequence.Paste):
-            focus = QtWidgets.QApplication.focusWidget()
-            if focus != self.path_input and not isinstance(focus, QtWidgets.QLineEdit):
-                self.path_input.insertFromMimeData(QtWidgets.QApplication.clipboard().mimeData())
-                return True
-        return super().eventFilter(obj, event)
+    def toggle_top(self):
+        self.top=not self.top;self.root.attributes('-topmost',self.top)
+        self.update_buttons();self.save_settings()
 
-    def show_find(self):
-        self.find.show()
-        self.find.setFocus()
-        self.find.selectAll()
+    def toggle_theme(self):
+        self.dark=not self.dark;self.apply_theme();self.save_settings()
+        if self.view=='list':self.render_list()
+        elif self.view=='document':self.render_document()
+        elif self.view=='source':self.show_source()
 
-    def hide_find(self):
-        self.find.hide()
-        self.path_input.setFocus()
+    def apply_theme(self):
+        self.palette=DARK if self.dark else LIGHT;p=self.palette
+        style=ttk.Style(self.root);style.theme_use('clam')
+        for name in ('Vertical.TScrollbar','Horizontal.TScrollbar'):
+            style.configure(name,background=p['line'],troughcolor=p['bg'],bordercolor=p['bg'],arrowcolor=p['muted'],lightcolor=p['line'],darkcolor=p['line'])
+        def paint(widget):
+            if isinstance(widget,(tk.Frame,tk.Label,tk.Button,tk.Text,tk.Canvas)):
+                options={'bg':p['bg']}
+                if isinstance(widget,(tk.Label,tk.Button,tk.Text)):options['fg']=p['fg']
+                if isinstance(widget,tk.Button):options.update(activebackground=p['button'],activeforeground=p['fg'],highlightbackground=p['line'])
+                if isinstance(widget,tk.Text):options.update(insertbackground=p['fg'],selectbackground=p['selected'],selectforeground=p['selected_fg'])
+                try:widget.configure(**options)
+                except tk.TclError:pass
+            # HtmlFrame's internal nodes/widgets are managed by its renderer.
+            if widget is self.html:return
+            for child in widget.winfo_children():paint(child)
+        self.root.configure(bg=p['bg']);paint(self.frame)
+        self.date.configure(fg=p['muted']);self.status.configure(fg=p['muted']);self.gutter.configure(fg=p['muted'])
+        self.html.configure(selected_text_highlight_color=p['selected'],selected_text_color=p['selected_fg'])
+        self.update_buttons()
 
-    def ready_for_paste(self):
-        self.show_history()
-        self.path_input.setFocus()
-        self.path_input.selectAll()
+    def update_buttons(self):
+        p=self.palette
+        self.top_button.configure(text=('✓ ' if self.top else '')+'Top',bg=p['button'] if self.top else p['bg'],fg=p['green'])
+        self.theme_button.configure(text='☀' if self.dark else '◐',fg=p['muted'])
+        for label,button in self.tab_buttons.items():button.configure(bg=p['button'] if label==self.root_tab else p['bg'],fg=p['green'] if label==self.root_tab else p['muted'])
 
-    def escape(self):
-        self.find.hide()
-        self.paste_generation+=1
-        self.generation+=1
-        self.pdf_generation+=1
-        self.navigation_generation+=1
-        self.stats_generation+=1
-        self.resolving=False
-        self.paste_timer.stop()
-        self.path_input.blockSignals(True)
-        self.path_input.clear()
-        self.path_input.blockSignals(False)
-        self.context_stack=[]
-        self.pending_image=None
-        self.show_history()
-        self.path_input.setFocus()
+    def clock(self):
+        if self.closing:return
+        from datetime import datetime
+        self.date.configure(text=datetime.now().strftime('%B %-d · %H:%M:%S'))
+        self.clock_timer=self.root.after(1000,self.clock)
+
+    def submit(self,function,callback):
+        self.busy+=1
+        identity=uuid.uuid4().hex;self.callbacks[identity]=callback
+        results=self.results
+        def completed(future):
+            try:results.put((identity,future.result(),None))
+            except Exception as exc:results.put((identity,None,str(exc)))
+        self.executor.submit(function).add_done_callback(completed)
+
+    def tick(self):
+        if self.closing:return
+        while True:
+            try:identity,value,error=self.results.get_nowait()
+            except queue.Empty:break
+            self.busy-=1;callback=self.callbacks.pop(identity);callback(value,error)
+        self.tick_timer=self.root.after(20 if self.busy else 80,self.tick)
+
+    def input_changed(self,event=None):
+        if not self.path_input.edit_modified():return
+        self.path_input.edit_modified(False)
+        if self.paste_timer:self.root.after_cancel(self.paste_timer)
+        self.paste_timer=self.root.after(180,self.parse_input)
+
+    def paste(self,event=None,text=None,image=None):
+        if image is None and text is None:
+            try:text=self.root.clipboard_get()
+            except tk.TclError:
+                try:image=ImageGrab.grabclipboard()
+                except (OSError,NotImplementedError):image=None
+        self.escape()
+        if isinstance(image,Image.Image):
+            data=io.BytesIO();image.save(data,'PNG');png=data.getvalue()
+            self.paste_generation+=1;generation=self.paste_generation;self.status.configure(text='Reading image…')
+            def ready(value,error):
+                if generation!=self.paste_generation:return
+                if error:self.status.configure(text=error);return
+                self.resolve_dump(value,png)
+            self.submit(lambda:image_text(png),ready)
+        elif text is not None:
+            self.path_input.delete('1.0','end');self.path_input.insert('1.0',text)
+        return 'break'
+
+    def parse_input(self):
+        self.paste_timer=None
+        text=self.path_input.get('1.0','end-1c').strip()
+        if text:self.resolve_dump(text)
+
+    def resolve_dump(self,source,image=None):
+        self.paste_generation+=1;generation=self.paste_generation
+        self.status.configure(text='Finding files…')
+        resolver=self.resolver
+        def resolve():
+            paths=[]
+            for name in pasted_paths(source):
+                for path in resolver.resolve(name):
+                    paths.append(path)
+                    if path.is_dir():
+                        paths.extend(sorted((p for p in path.iterdir() if p.is_file()),key=lambda p:p.name.casefold())[:2000])
+            return list(dict.fromkeys(paths))
+        def ready(paths,error):
+            if generation!=self.paste_generation:return
+            if error:self.status.configure(text=error);return
+            batch=self.history.add(source,paths,image);self.batches.insert(0,batch)
+            self.show_history()
+        self.submit(resolve,ready)
+
+    def hide_views(self):
+        for widget in self.content.winfo_children():widget.pack_forget()
 
     def show_history(self):
-        self.browsing_folder=False
-        self.file_list.blockSignals(True)
-        self.file_list.clear()
-        for batch in self.batches:
-            header=QtWidgets.QListWidgetItem(('◩ ' if batch['has_image'] else '≡ ')+batch['stamp'])
-            header.setData(QtCore.Qt.UserRole,f"context:{batch['id']}")
-            header.setData(QtCore.Qt.UserRole+1,True)
-            header.setForeground(QtGui.QColor('#8e9383'))
-            header.setFont(QtGui.QFont('JetBrains Mono',9))
-            header.setSizeHint(QtCore.QSize(0,36))
-            self.file_list.addItem(header)
-            for path in batch['paths']:
-                self.add_file_item(Path(path))
-            if not batch['paths']:
-                item=QtWidgets.QListWidgetItem('Pasted content')
-                item.setData(QtCore.Qt.UserRole,f"dump:{batch['id']}")
-                item.setSizeHint(QtCore.QSize(0,36))
-                self.file_list.addItem(item)
-        self.file_list.blockSignals(False)
-        self.reading.hide()
-        self.file_list.show()
-        self.path_input.show()
-        self.header.show()
-        self.date.show()
-        self.back_button.hide()
-        self.status.clear()
-        self.setWindowTitle('Folio')
-        self.file_list.verticalScrollBar().setValue(self.history_scroll)
+        self.navigation+=1;self.root_tab='Paths';self.context_label='Paths';self.context_stack=[]
+        self.view='list';self.show_list_controls();self.render_list()
 
-    def load_more_history(self,value):
-        bar=self.file_list.verticalScrollBar()
-        if self.loading_history or self.history_complete or self.browsing_folder or self.reading.isVisible() or bar.maximum()==0 or value<bar.maximum()-64:
-            return
-        self.loading_history=True
-        more=self.history.recent(50,len(self.batches))
-        if not more:
-            self.history_complete=True
+    def show_list_controls(self):
+        self.transpose_button.pack_forget()
+        self.root.title('Folio');self.reader_tabs.pack_forget();self.switcher.pack(side='right',padx=7)
+        self.date.pack(side='left');self.input_frame.pack(fill='x',before=self.content,pady=(0,10))
+        if self.context_label=='Paths':self.back_button.pack_forget()
+        else:self.back_button.pack(side='right',padx=5,before=self.theme_button)
+        self.update_buttons();self.hide_views();self.list_frame.pack(fill='both',expand=True);self.status.configure(text='')
+
+    def label_path(self,path):
+        path=Path(path)
+        for destination in self.zip_roots.values():
+            if path.is_relative_to(destination):return str(path.relative_to(destination))
+        try:return str(path.relative_to(Path.home()))
+        except ValueError:return str(path)
+
+    def render_list(self):
+        text=self.list_text;p=self.palette;text.configure(state='normal');text.delete('1.0','end')
+        text.tag_configure('date',foreground=p['muted'],font=('JetBrains Mono',9),spacing1=12,spacing3=7)
+        text.tag_configure('file',foreground=p['green'],spacing1=5,spacing3=5)
+        self.list_actions=[]
+        def item(label,action,date=False):
+            tag=f'item{len(self.list_actions)}';self.list_actions.append(action)
+            text.insert('end',label+'\n',(tag,'date' if date else 'file'))
+            text.tag_bind(tag,'<Button-1>',lambda e,callback=action:callback())
+        if self.context_label=='Paths':
+            for batch in self.batches:
+                item(('◩ ' if batch['has_image'] else '≡ ')+batch['stamp'],lambda b=batch:self.open_dump(b),True)
+                for path in batch['paths']:item(self.label_path(path),lambda p=path,b=batch:self.open_group_path(p,b))
+                if not batch['paths']:item('Pasted content',lambda b=batch:self.open_dump(b))
         else:
-            self.batches.extend(more)
-            self.history_scroll=value
-            bar.blockSignals(True)
-            self.show_history()
-            bar.blockSignals(False)
-        self.loading_history=False
+            for path in self.context_entries:item(('▸ ' if path.is_dir() else '')+self.label_path(path),lambda p=path:self.load_path(p))
+            if not self.context_entries:item('No files',lambda:None,True)
+        text.configure(state='disabled')
+
+    def list_scrolled(self,first,last):
+        self.list_scroll.set(first,last)
+        if self.view=='list' and self.context_label=='Paths' and float(first)>0 and float(last)>.98 and not self.history_complete:
+            self.root.after_idle(self.load_more)
+
+    def load_more(self):
+        if self.view!='list' or self.context_label!='Paths' or self.history_complete:return
+        more=self.history.recent(50,len(self.batches))
+        if not more:self.history_complete=True;return
+        position=self.list_text.yview()[0];self.batches.extend(more);self.render_list();self.list_text.yview_moveto(position)
+
+    def open_group_path(self,path,batch):
+        self.active_batch=batch['id'];self.context_entries=[Path(p) for p in batch['paths']];self.load_path(Path(path))
+
+    def open_dump(self,batch):
+        self.active_batch=batch['id'];self.context_entries=[Path(p) for p in batch['paths']]
+        image=self.history.image(batch['id']) if batch['has_image'] else None
+        self.select_document(Document(None,'image' if image else 'markdown',batch['source'],rows=image))
+
+    def show_context(self,entries,label=None):
+        self.navigation+=1
+        if label:self.context_label=label
+        self.context_entries=list(entries);self.active_batch=None;self.view='list'
+        self.show_list_controls();self.render_list()
 
     def show_recent(self):
-        self.context_stack=[]
-        self.show_context(self.history.recent_files())
-        self.back_button.show()
+        self.context_stack=[];self.root_tab='Recent';self.show_context(self.history.recent_files(),'Recent')
 
     def show_downloads(self,folder=None):
-        folder=Path(folder) if folder else Path.home()/'Downloads'
-        self.context_stack=[]
-        if folder.is_dir():
-            generation=self.paste_generation
-            def ready(entries,error):
-                if generation!=self.paste_generation:
-                    return
-                if error:
-                    self.status.setText(error)
-                    return
-                self.show_context(entries)
-                self.back_button.show()
-            self.submit(lambda:sorted(folder.iterdir(),key=lambda p:p.stat().st_mtime,reverse=True),ready)
-        else:
-            self.show_context([])
-            self.status.setText('No Downloads folder')
-            self.back_button.show()
+        self.root_tab='Downloads';self.context_stack=[]
+        self.open_folder(Path(folder or Path.home()/'Downloads'),'Downloads',push=False,by_date=True)
 
-    def copy_selection(self):
-        if self.views.currentWidget()==self.web:
-            QtWidgets.QApplication.clipboard().setText(self.web.page().selectedText())
-        elif self.views.currentWidget()==self.source:
-            self.source.copy()
-        elif self.views.currentWidget()==self.table:
-            self.table.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress,QtCore.Qt.Key_C,QtCore.Qt.ControlModifier))
+    def show_adhoc(self):
+        self.context_stack=[];self.root_tab='Ad hoc'
+        paths=[repo/'adhoc' for repo in self.resolver.repos if (repo/'adhoc').is_dir()]
+        self.show_context(paths,'Ad hoc')
+
+    def open_folder(self,path,label=None,push=True,by_date=False):
+        self.navigation+=1;navigation=self.navigation
+        previous=(self.context_label,list(self.context_entries))
+        def ready(entries,error):
+            if navigation!=self.navigation:return
+            if error:self.status.configure(text=error);return
+            if push:self.context_stack.append(previous)
+            self.show_context(entries,label or self.label_path(path))
+        def listing():
+            if not path.is_dir():return []
+            if by_date or path.name=='adhoc':return sorted(path.iterdir(),key=lambda p:p.stat().st_mtime,reverse=True)
+            return sorted(path.iterdir(),key=lambda p:(not p.is_dir(),p.name.casefold()))
+        self.submit(listing,ready)
+
+    def go_back(self):
+        self.navigation+=1
+        if self.view!='list':
+            self.view='list';self.show_list_controls();self.render_list()
+        elif self.context_stack:
+            label,entries=self.context_stack.pop();self.show_context(entries,label)
+        else:self.show_history()
+
+    def escape(self):
+        self.navigation+=1;self.paste_generation+=1
+        if self.paste_timer:self.root.after_cancel(self.paste_timer);self.paste_timer=None
+        self.path_input.delete('1.0','end');self.path_input.edit_modified(False)
+        self.show_history();self.path_input.focus_set()
+        return 'break'
+
+    def open_link(self,url):
+        parsed=urlparse(url)
+        if parsed.scheme=='file':self.load_path(Path(unquote(parsed.path)))
+        elif parsed.scheme in ('https','http','mailto'):self.open_browser(url)
+
+    def open_browser(self,url):
+        command=shutil.which('firefox') or shutil.which('xdg-open')
+        if not command:raise ValueError('Firefox is not installed.')
+        subprocess.Popen([command,url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+
+    def load_path(self,path):
+        path=Path(path).resolve();self.navigation+=1;navigation=self.navigation
+        if path.is_dir():self.open_folder(path);return
+        if path.suffix.lower()=='.pdf':
+            try:self.open_browser(path.as_uri());self.history.opened(path);self.status.configure(text='Opened in Firefox')
+            except Exception as exc:self.status.configure(text=str(exc))
+            return
+        if path.suffix.lower()=='.zip':
+            if path in self.zip_roots:self.open_folder(self.zip_roots[path],label=path.name);return
+            destination=Path(self.temp.name)/('zip-'+uuid.uuid4().hex)/path.stem
+            def ready(entries,error):
+                if navigation!=self.navigation:return
+                if error:self.status.configure(text=error);return
+                self.zip_roots[path]=destination;self.context_stack.append((self.context_label,list(self.context_entries)))
+                self.show_context(entries,path.name)
+            self.status.configure(text='Opening ZIP…');self.submit(lambda:unzip_contents(path,destination),ready);return
+        if path in self.documents:self.select_document(self.documents[path]);return
+        self.status.configure(text='Opening…')
+        def ready(document,error):
+            if navigation!=self.navigation:return
+            if error:self.status.configure(text=error);return
+            self.documents[path]=document
+            self.select_document(document)
+        self.submit(lambda:load_document(path),ready)
+
+    def select_document(self,document):
+        self.navigation+=1;self.current=document;self.view='document'
+        if document.path and not document.path.is_relative_to(Path(self.temp.name)):self.history.opened(document.path)
+        self.root.title(document.path.name if document.path else 'Folio')
+        self.input_frame.pack_forget();self.date.pack_forget();self.switcher.pack_forget()
+        self.back_button.pack(side='right',padx=5,before=self.theme_button)
+        self.populate_tabs();self.status.configure(text='');self.render_document()
+
+    def populate_tabs(self):
+        for child in self.reader_tabs.winfo_children():child.destroy()
+        entries=list(dict.fromkeys(p for p in self.context_entries if p.is_file()))
+        path=self.current.path
+        if path and path not in entries:entries.insert(0,path)
+        self.tab_paths=entries
+        if len(entries)<2:self.reader_tabs.pack_forget();return
+        selected=entries.index(path) if path in entries else 0
+        start=max(0,min(selected-1,len(entries)-4));self.tab_start=start
+        if start:self.button(self.reader_tabs,'‹',lambda:self.load_path(entries[start-1])).pack(side='left')
+        for entry in entries[start:start+4]:
+            label=entry.name
+            if sum(p.name==entry.name for p in entries)>1:label=entry.parent.name+'/'+label
+            if len(label)>24:label=label[:12]+'…'+label[-10:]
+            button=self.button(self.reader_tabs,label,lambda p=entry:self.load_path(p))
+            button.configure(relief='flat',fg=self.palette['green'],bg=self.palette['button'] if entry==path else self.palette['bg'])
+            button.pack(side='left',padx=2)
+        if start+4<len(entries):self.button(self.reader_tabs,'›',lambda:self.load_path(entries[start+4])).pack(side='left')
+        self.reader_tabs.pack(side='left',fill='x',expand=True,padx=(0,10))
+
+    def render_document(self):
+        if not self.current:return
+        self.hide_views();document=self.current;p=self.palette;navigation=self.navigation
+        self.transpose_button.pack_forget()
+        if self.table:self.table.destroy();self.table=None
+        if document.kind=='image':
+            self.image=Image.open(io.BytesIO(document.rows)).copy();self.image_scale=min(1.,max(100,self.content.winfo_width()-20)/self.image.width)
+            self.image_frame.pack(fill='both',expand=True);self.draw_image();return
+        if document.kind=='text':self.show_source();return
+        if document.kind=='csv':
+            self.table=Table(self.content,document.rows,p,self.copy_text,self.submit);self.table.pack(fill='both',expand=True)
+            self.transpose_button.pack(side='right',padx=5,before=self.back_button);return
+        self.html.pack(fill='both',expand=True)
+        key=(str(document.path),document.text,self.dark)
+        if key in self.rendered:self.show_html(self.rendered[key]);return
+        self.status.configure(text='Rendering…')
+        def ready(body,error):
+            if navigation!=self.navigation or self.view!='document':return
+            if error:self.status.configure(text=error);self.show_source();return
+            self.rendered[key]=body;self.show_html(body);self.status.configure(text='')
+        dark=self.dark
+        self.submit(lambda:typeset(document.text,dark),ready)
+
+    def show_html(self,body):
+        for table in self.embedded_tables:
+            # Detach nodes before destroying embedded Tk widgets.
+            try:self.html.widget_to_element(table).widget=None
+            except (KeyError,tk.TclError):pass
+            table.destroy()
+        self.embedded_tables=[];rows=[]
+        def replace(match):
+            parser=TableParser();parser.feed(match[0]);rows.append(parser.rows)
+            height=min(360,30*(len(parser.rows)+1)+40)
+            return f'<object id="folio-table-{len(rows)-1}" style="width:100%;height:{height}px"></object>'
+        body=re.sub(r'<table\b[^>]*>[\s\S]*?</table>',replace,body)
+        body=re.sub(r'<button\b[^>]*>[\s\S]*?</button>','',body)
+        css=CSS.replace('article','.article').replace(':root {color-scheme:light}','')
+        # Tkhtml renders conservative HTML/CSS; advanced scripts never run here.
+        css+='\n.article {padding:25px 36px;max-width:1000px} object {display:block} img {max-width:100%}\n'
+        if self.dark:
+            mapping={'#fbf8f1':'#181d23','#302f2b':'#e2e7eb','#263e35':'#c1e4cb','#356b58':'#aadbbd','#f0ede4':'#252d36','#e1ddcf':'#343e49','#687469':'#a8b6aa','#fffdf8':'#20262e','#dfddcf':'#343e49','#f4f1e9':'#252d36','#ddd8ca':'#343e49'}
+            for old,new in mapping.items():css=css.replace(old,new)
+        base=self.current.path.parent.as_uri()+'/' if self.current.path else Path.home().as_uri()+'/'
+        self.html.load_html('<html><head><style>'+css+'</style></head><body><div class="article">'+body+'</div></body></html>',base_url=base)
+        for index,values in enumerate(rows):
+            table=Table(self.html,values,self.palette,self.copy_text,self.submit)
+            self.html.document.getElementById('folio-table-'+str(index)).widget=table
+            self.embedded_tables.append(table)
+        if rows:self.transpose_button.pack(side='right',padx=5,before=self.back_button)
+
+    def transpose(self):
+        for table in ([self.table] if self.table else self.embedded_tables):table.transpose()
+
+    def source_yview(self,*args):
+        self.source.yview(*args);self.update_gutter()
+
+    def source_scrolled(self,first,last):
+        self.source_scroll.set(first,last);self.update_gutter()
+
+    def update_gutter(self):
+        if not self.source.winfo_ismapped():return
+        self.gutter.configure(state='normal');self.gutter.delete('1.0','end')
+        top=self.source.index('@0,0');bottom=self.source.index('@0,'+str(self.source.winfo_height()))
+        for line in range(int(top.split('.')[0]),int(bottom.split('.')[0])+1):
+            info=self.source.dlineinfo(f'{line}.0')
+            if info:
+                # A newline with spacing follows the wrapped height of its source line.
+                end=self.source.index(f'{line}.0 lineend')
+                last=self.source.dlineinfo(end)
+                height=(last[1]+last[3]-info[1]) if last else info[3]
+                tag='number'+str(line)
+                self.gutter.tag_configure(tag,spacing3=max(0,height-info[3]))
+                self.gutter.insert('end',str(line)+'\n',tag)
+        self.gutter.configure(state='disabled')
+
+    def show_source(self):
+        self.view='source';self.hide_views();self.source_frame.pack(fill='both',expand=True)
+        self.transpose_button.pack_forget()
+        self.source.configure(state='normal');self.source.delete('1.0','end');self.source.insert('1.0',self.current.text);self.source.configure(state='disabled')
+        self.root.after_idle(self.update_gutter)
+        self.highlight_source()
+
+    def highlight_source(self):
+        if not self.current.path:return
+        from pygments import lex
+        from pygments.lexers import get_lexer_for_filename
+        from pygments.styles import get_style_by_name
+        from pygments.util import ClassNotFound
+        try:lexer=get_lexer_for_filename(self.current.path.name)
+        except ClassNotFound:return
+        style=get_style_by_name('monokai' if self.dark else 'friendly')
+        document=self.current;navigation=self.navigation
+        def tokens():
+            result=[];offset=0
+            for token,value in lex(document.text,lexer):
+                color=style.style_for_token(token)['color']
+                if color:result.append((offset,offset+len(value),color))
+                offset+=len(value)
+            return result
+        def ready(segments,error):
+            if error or navigation!=self.navigation or self.current is not document or self.view!='source':return
+            for start,end,color in segments:
+                tag='syntax'+color;self.source.tag_configure(tag,foreground='#'+color)
+                self.source.tag_add(tag,f'1.0+{start}c',f'1.0+{end}c')
+        self.submit(tokens,ready)
+
+    def draw_image(self):
+        if self.image is None:return
+        size=(max(1,int(self.image.width*self.image_scale)),max(1,int(self.image.height*self.image_scale)))
+        self.image_photo=ImageTk.PhotoImage(self.image.resize(size,Image.Resampling.LANCZOS))
+        self.image_canvas.delete('all');self.image_canvas.create_image(0,0,image=self.image_photo,anchor='nw')
+        self.image_canvas.configure(scrollregion=(0,0,*size))
+
+    def image_wheel(self,event,direction):
+        if event.state & 4:self.zoom(-direction)
+        elif event.state & 1:self.image_canvas.xview_scroll(direction,'units')
+        else:self.image_canvas.yview_scroll(direction,'units')
+        return 'break'
+
+    def zoom(self,direction):
+        if self.current and self.current.kind=='image':
+            self.image_scale=max(.05,min(4,self.image_scale*(1.2 if direction>0 else 1/1.2)));self.draw_image()
+        elif self.view=='source':
+            import tkinter.font as font
+            current=font.Font(font=self.source['font']).actual('size');size=max(7,min(28,current+direction))
+            self.source.configure(font=('JetBrains Mono',size));self.gutter.configure(font=('JetBrains Mono',size));self.update_gutter()
+        elif self.view=='document' and self.current and self.current.kind=='markdown':
+            scale=float(self.html['fontscale']);self.html.configure(fontscale=max(.6,min(2.5,scale+direction*.1)))
+
+    def copy_text(self,text):
+        self.root.clipboard_clear();self.root.clipboard_append(text);self.root.update_idletasks()
+
+    def copy_content(self):
+        if self.current:self.copy_text(self.current.text)
 
     def copy_image(self):
         if self.current and self.current.kind=='image':
-            QtWidgets.QApplication.clipboard().setImage(QtGui.QImage.fromData(self.current.rows))
+            subprocess.run(['xclip','-selection','clipboard','-t','image/png','-i'],input=self.current.rows,timeout=3,check=True)
 
-    def schedule_paste(self):
-        self.pending_image=None
-        self.paste_generation += 1
-        self.generation += 1
-        self.pdf_generation += 1
-        self.paste_timer.start()
-
-    def parse_image(self,image):
-        self.paste_generation += 1
-        self.generation += 1
-        self.pdf_generation += 1
-        generation=self.paste_generation
-        self.paste_timer.stop()
-        self.resolving=True
-        self.status.setText('Reading image…')
-        def read():
-            data=QtCore.QByteArray()
-            buffer=QtCore.QBuffer(data)
-            buffer.open(QtCore.QIODevice.WriteOnly)
-            if not image.save(buffer,'PNG'):
-                raise ValueError('Could not read clipboard image.')
-            png=bytes(data)
-            return image_text(png),png
-        def ready(result,error):
-            if generation!=self.paste_generation:
-                return
-            self.resolving=False
-            if error:
-                self.status.setText('Image could not be read: '+error)
-                return
-            text,png=result
-            if not text.strip():
-                self.status.setText('No readable text in image')
-                return
-            self.pending_image=png
-            self.path_input.blockSignals(True)
-            self.path_input.setPlainText(text)
-            self.path_input.blockSignals(False)
-            self.paste_timer.stop()
-            self.parse_paste()
-        self.submit(read,ready)
-
-    def parse_paste(self):
-        text = self.path_input.toPlainText()
-        if not text.strip():
-            return
-        generation = self.paste_generation
-        image=self.pending_image
-        self.resolving = True
-        self.status.setText('…')
-        def resolve():
-            results = []
-            names=pasted_paths(text)
-            folders=[]
-            for name in names:
-                try:
-                    folders.extend(path for path in self.resolver.resolve(name) if path.is_dir())
-                except (OSError,ValueError):
-                    pass
-            for name in names:
-                try:
-                    matches=self.resolver.resolve(name)
-                    if not matches:
-                        matches=sorted(set(p for folder in folders for p in self.resolver.resolve(name,folder)))
-                    results.append((name,matches))
-                except (OSError, ValueError):
-                    results.append((name, []))
-            # Folder paths contribute their immediate files to the paste group.
-            for folder in sorted(set(folders)):
-                try:
-                    results.append((str(folder),sorted(folder.iterdir(),key=lambda p:(not p.is_dir(),p.name.casefold()))))
-                except OSError:
-                    pass
-            return results
-        def ready(results, error):
-            if generation != self.paste_generation:
-                return
-            self.resolving = False
-            if error:
-                self.status.setText(error)
-                return
-            self.status.clear()
-            if not results:
-                batch=self.history.add(text,[],image)
-                self.batches.insert(0,batch)
-                self.documents[f"dump:{batch['id']}"]=Document(None,'markdown',text)
-                self.select_document_key(f"dump:{batch['id']}")
-                return
-            seen = set()
-            entries=[]
-            for name, matches in results:
-                for path in matches:
-                    if str(path) not in seen:
-                        entries.append(path)
-                        seen.add(str(path))
-            self.batches.insert(0,self.history.add(text,entries,image))
-            self.history_scroll=0
-            self.pending_image=None
-            self.context_stack=[]
-            self.path_input.blockSignals(True)
-            self.path_input.clear()
-            self.path_input.blockSignals(False)
-            self.show_history()
-            if not entries:
-                self.status.setText('No matching paths found')
-        self.submit(resolve, ready)
-
-    def add_file_item(self, path):
-        path = Path(path)
-        try:
-            name = str(path.relative_to(Path.home()))
-        except ValueError:
-            name = str(path)
-        item = QtWidgets.QListWidgetItem(('▸ ' if path.is_dir() else '')+name)
-        item.setForeground(QtGui.QColor('#315443'))
-        item.setData(QtCore.Qt.UserRole, str(path))
-        item.setToolTip(str(path))
-        item.setSizeHint(QtCore.QSize(0,30))
-        self.file_list.addItem(item)
-        return item
-
-    def fit_file_list(self):
-        self.file_list.setVisible(not self.reading.isVisible())
-
-    def show_context(self,entries=None):
-        if entries is not None:
-            self.context_entries=list(entries)
-        self.file_list.blockSignals(True)
-        self.file_list.clear()
-        for path in self.context_entries:
-            self.add_file_item(path)
-        self.file_list.blockSignals(False)
-        self.reading.hide()
-        self.file_list.show()
-        self.path_input.show()
-        self.header.show()
-        self.date.show()
-        self.back_button.setVisible(bool(self.context_stack))
-        self.status.clear()
-        self.browsing_folder=True
-
-    def go_back(self):
-        self.generation+=1
-        self.pdf_generation+=1
-        if self.reading.isVisible():
-            self.show_context() if self.browsing_folder else self.show_history()
-        elif self.context_stack:
-            self.show_context(self.context_stack.pop())
-        else:
-            self.show_history()
-
-    def open_folder(self,path):
-        generation=self.paste_generation
-        self.navigation_generation+=1
-        navigation=self.navigation_generation
-        self.status.setText('…')
-        def ready(entries,error):
-            if generation!=self.paste_generation or navigation!=self.navigation_generation:
-                return
-            if error:
-                self.status.setText(error)
-                return
-            self.context_stack.append(list(self.context_entries))
-            self.show_context(entries)
-            if not entries:
-                self.status.setText('Empty folder')
-        self.submit(lambda:sorted(path.iterdir(),key=lambda p:(not p.is_dir(),p.name.casefold())),ready)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if hasattr(self, 'file_list'):
-            self.fit_file_list()
-
-    def activate_item(self, item, previous=None):
-        if not item:
-            return
-        key = item.data(QtCore.Qt.UserRole)
-        if not key:
-            return
-        if not self.browsing_folder and not self.reading.isVisible():
-            self.history_scroll=self.file_list.verticalScrollBar().value()
-        if key.startswith('context:'):
-            batch=next(b for b in self.batches if key==f"context:{b['id']}")
-            image=self.history.image(batch['id']) if batch['has_image'] else None
-            self.documents[key]=Document(None,'image' if image else 'markdown',batch['source'],rows=image)
-            self.select_document_key(key)
-            return
-        if key.startswith('dump:'):
-            if key not in self.documents:
-                batch=next(b for b in self.batches if key==f"dump:{b['id']}")
-                self.documents[key]=Document(None,'markdown',batch['source'])
-            self.select_document_key(key)
-            return
-        if key and Path(key).is_dir():
-            self.open_folder(Path(key))
-            return
-        if key in self.documents:
-            if self.current is not self.documents[key] or not self.reading.isVisible():
-                self.select_document(item)
-        elif key:
-            self.load_path(Path(key))
-
-    def paste_paths(self):
-        self.path_input.setPlainText(QtWidgets.QApplication.clipboard().text())
-        self.open_paths()
-
-    def choose_files(self):
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, 'Open in Folio', str(Path.home()), 'Documents (*.md *.markdown *.csv *.tsv *.txt *.pdf *.log *.json *.yaml *.toml);;All files (*)')
-        if paths:
-            self.path_input.setPlainText('\n'.join(paths))
-
-    def open_paths(self, text=None, context=None):
-        self.paste_timer.stop()
-        paths = pasted_paths(text if text is not None else self.path_input.toPlainText())
-        if not paths:
-            self.status.setText('Paste a file path first, or use Paste content for Markdown and diagrams.')
-            return
-        self.resolving = True
-        self.status.setText('Resolving paths…')
-        self.submit(lambda:[(name, self.resolver.resolve(name, context)) for name in paths], self.paths_ready)
-
-    def paths_ready(self, results, error):
-        self.resolving = False
-        if error:
-            self.status.setText(error)
-            return
-        missing = []
-        for name, matches in results:
-            if not matches:
-                missing.append(name)
-            elif len(matches) == 1:
-                self.load_path(matches[0])
-            else:
-                path, ok = QtWidgets.QInputDialog.getItem(self, 'Choose the matching file', name, [str(p) for p in matches], editable=False)
-                if ok:
-                    self.load_path(Path(path))
-        if missing:
-            self.status.setText('Not found: ' + ' · '.join(missing))
-
-    def load_path(self, path):
-        if path.is_dir():
-            self.open_folder(path)
-            return
-        key = str(path.resolve())
-        self.navigation_generation+=1
-        navigation=self.navigation_generation
-        if key in self.documents:
-            self.document_ready(self.documents[key], None)
-            return
-        if key in self.loading_paths:
-            return
-        self.loading_paths.add(key)
-        generation = self.paste_generation
-        self.status.setText('Opening ' + path.name + '…')
-        def ready(document,error):
-            self.loading_paths.discard(key)
-            if generation == self.paste_generation and navigation==self.navigation_generation:
-                self.document_ready(document,error)
-        self.submit(lambda:load_document(path), ready)
-
-    def document_ready(self, document, error):
-        if error:
-            self.status.setText('Could not open: ' + error)
-            return
-        key = str(document.path) if document.path else f'paste:{uuid.uuid4().hex}'
-        self.documents[key] = document
-        if document.path:
-            self.history.opened(document.path)
-        if not document.path:
-            self.select_document_key(key)
-            return
-        item = next((self.file_list.item(i) for i in range(self.file_list.count()) if self.file_list.item(i).data(QtCore.Qt.UserRole) == key),None)
-        if item is None:
-            item = self.add_file_item(document.path)
-        self.fit_file_list()
-        self.file_list.setCurrentItem(item)
-        self.select_document(item)
-
-    def select_document_key(self,key):
-        item=QtWidgets.QListWidgetItem()
-        item.setData(QtCore.Qt.UserRole,key)
-        self.select_document(item)
-
-    def select_document(self, item, previous=None):
-        if item is None:
-            self.current = None
-            self.copy_button.setEnabled(False)
-            self.path_button.setEnabled(False)
-            self.source_toggle.setEnabled(False)
-            self.source.clear()
-            self.views.setCurrentWidget(self.source)
-            self.pdf_controls.hide()
-            self.stats.hide()
-            self.location.clear()
-            return
-        self.current = self.documents[item.data(QtCore.Qt.UserRole)]
-        self.stats_generation+=1
-        self.file_list.hide()
-        self.path_input.hide()
-        self.back_button.hide()
-        self.reading.show()
-        self.image_copy_action.setEnabled(self.current.kind=='image')
-        self.header.hide()
-        self.date.hide()
-        self.find.hide()
-        self.status.clear()
-        self.setWindowTitle(self.current.path.name if self.current.path else 'Folio')
-        self.location.setText(str(self.current.path) if self.current.path else '')
-        self.copy_button.setEnabled(True)
-        self.path_button.setEnabled(bool(self.current.path))
-        self.source_toggle.setEnabled(self.current.kind != 'text')
-        self.source_toggle.setChecked(False)
-        self.page_number.blockSignals(True)
-        self.page_number.setRange(1, max(1, self.current.pages))
-        self.page_number.setValue(1)
-        self.page_number.blockSignals(False)
-        self.page_count.setText(f'of {self.current.pages}')
-        self.pdf_image = None
-        self.refresh_view()
-
-    def refresh_view(self):
-        if not self.current:
-            return
-        doc = self.current
-        self.generation += 1
-        generation = self.generation
-        self.pdf_generation += 1
-        source = self.source_toggle.isChecked() or doc.kind == 'text'
-        self.pdf_controls.hide()
-        self.stats.hide()
-        self.status.clear()
-        if source:
-            self.source.setPlainText(doc.text)
-            self.views.setCurrentWidget(self.source)
-        elif doc.kind == 'csv':
-            self.table.setModel(CsvModel(doc.rows))
-            self.table.selectionModel().selectionChanged.connect(self.selection_changed)
-            self.selection_changed()
-            self.views.setCurrentWidget(self.table)
-        elif doc.kind == 'pdf':
-            self.views.setCurrentWidget(self.pdf)
-            self.render_pdf()
-        elif doc.kind == 'image':
-            self.views.setCurrentWidget(self.pdf)
-            self.pdf_image=QtGui.QPixmap()
-            self.pdf_image.loadFromData(doc.rows)
-            self.fit_pdf()
-        else:
-            self.views.setCurrentWidget(self.web)
-            self.status.setText('Rendering…')
-            def ready(value, error):
-                if generation != self.generation:
-                    return
-                if error:
-                    self.status.setText('Could not render: ' + error)
-                    return
-                target = Path(self.temp.name) / f'view-{generation}.html'
-                # A base URL keeps relative report links and images useful.
-                base = doc.path.parent.as_uri() + '/' if doc.path else Path.home().as_uri() + '/'
-                value = value.replace('<head>', '<head><base href="' + base.replace('"', '%22') + '">', 1)
-                target.write_text(value)
-                os.chmod(target, 0o600)
-                self.web.load(QtCore.QUrl.fromLocalFile(str(target)))
-                self.status.clear()
-            self.submit(lambda:document_html(doc.text), ready)
-
-    def render_pdf(self, unused=None):
-        if not self.current or self.current.kind != 'pdf' or self.source_toggle.isChecked():
-            return
-        self.pdf_generation += 1
-        generation = self.pdf_generation
-        doc, page = self.current, self.page_number.value()
-        self.pdf_loaded_page=None
-        self.status.setText(f'Rendering page {page}…')
-        def ready(data, error):
-            if generation != self.pdf_generation:
-                return
-            if error:
-                self.status.setText('PDF: ' + error)
-                return
-            image = QtGui.QPixmap()
-            if not image.loadFromData(data):
-                self.status.setText('PDF page could not be decoded.')
-                return
-            self.pdf_image = image
-            self.pdf_loaded_page=page
-            self.fit_pdf()
-            self.pdf.verticalScrollBar().setValue(0)
-            self.pdf.horizontalScrollBar().setValue(0)
-            self.status.clear()
-        self.submit(lambda:pdf_page(doc.path, page, 144), ready)
-
-    def selection_changed(self, unused=None, previous=None):
-        self.stats_generation += 1
-        generation = self.stats_generation
-        ranges = [(s.top(),s.bottom(),s.left(),s.right()) for s in self.table.selectionModel().selection()]
-        if not ranges:
-            self.stats.clear()
-            self.stats.hide()
-            return
-        rows = self.current.rows
-        self.stats.setText('Calculating selection…')
-        def calculate():
-            return display_summary(selection_summary(rows[r][c] if c<len(rows[r]) else ''
-                for top,bottom,left,right in ranges for r in range(top,bottom+1) for c in range(left,right+1)))
-        def ready(result, error):
-            if generation == self.stats_generation:
-                self.stats.setText(result if not error else 'Statistics: '+error)
-                self.stats.show()
-        self.submit(calculate, ready)
-
-    def scale_pdf(self):
-        if self.pdf_image:
-            size = self.pdf_image.size() * self.pdf_zoom
-            pixmap = self.pdf_image.scaled(size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            self.pdf_label.setPixmap(pixmap)
-            self.pdf_label.resize(pixmap.size())
-
-    def fit_pdf(self):
-        if self.pdf_image:
-            self.pdf_zoom = max(.05, (self.pdf.viewport().width()-32) / self.pdf_image.width())
-            self.scale_pdf()
-
-    def change_page(self, amount):
-        self.page_number.setValue(self.page_number.value() + amount)
-
-    def zoom(self, direction):
-        if self.views.currentWidget() == self.pdf:
-            self.pdf_zoom = min(4, max(.05, self.pdf_zoom * (1.2 if direction > 0 else 1/1.2)))
-            self.scale_pdf()
-        elif self.views.currentWidget() == self.web:
-            self.web.setZoomFactor(min(3, max(.5, self.web.zoomFactor() + direction*.1)))
-        else:
-            widget = self.views.currentWidget()
-            font = widget.font()
-            font.setPointSize(max(7, min(28, font.pointSize()+direction)))
-            widget.setFont(font)
-
-    def find_next(self):
-        term = self.find.text()
-        if not term or not self.current:
-            return
-        widget = self.views.currentWidget()
-        if widget == self.web:
-            self.web.findText(term)
-        elif widget == self.source:
-            if not self.source.find(term):
-                self.source.moveCursor(QtGui.QTextCursor.Start)
-                self.source.find(term)
-        elif widget == self.table:
-            rows = self.current.rows
-            start = self.table.currentIndex().row()+1
-            for row in [*range(start, len(rows)), *range(0, start)]:
-                for col, value in enumerate(rows[row]):
-                    if term.casefold() in value.casefold():
-                        index = self.table.model().index(row, col)
-                        self.table.setCurrentIndex(index)
-                        self.table.scrollTo(index)
-                        return
-        else:
-            self.source_toggle.setChecked(True)
-            self.refresh_view()
-            self.find_next()
-
-    def copy_content(self):
+    def find(self):
         if self.current:
-            QtWidgets.QApplication.clipboard().setText(self.current.text)
-            self.status.setText('Full content copied' if self.current.kind != 'pdf' else 'PDF text copied · Scanned pages need OCR')
+            from tkinter.simpledialog import askstring
+            text=askstring('Find','Find in document:',parent=self.root)
+            if text and self.view=='document' and self.current.kind=='markdown':self.html.find_text(text)
+            elif text:
+                self.show_source();index=self.source.search(text,'1.0',nocase=True)
+                if index:self.source.see(index);self.source.tag_add('sel',index,f'{index}+{len(text)}c')
+        return 'break'
 
-    def copy_path(self):
-        if self.current and self.current.path:
-            QtWidgets.QApplication.clipboard().setText(str(self.current.path))
-            self.status.setText('Full path copied')
+    def menu(self,event):
+        if not self.current:return
+        menu=tk.Menu(self.root,tearoff=False,font=('JetBrains Mono',10))
+        if self.view=='document' and self.current.kind=='markdown':menu.add_command(label='Copy selection',command=lambda:self.copy_text(self.html.get_selection()))
+        menu.add_command(label='Copy content',command=self.copy_content)
+        if self.current.path:menu.add_command(label='Copy path',command=lambda:self.copy_text(str(self.current.path)))
+        if self.current.kind=='image':menu.add_command(label='Copy image',command=self.copy_image)
+        else:menu.add_command(label='Rendered' if self.view=='source' and self.current.kind=='markdown' else 'Source',command=self.return_rendered if self.view=='source' and self.current.kind=='markdown' else self.show_source)
+        menu.add_command(label='Find',command=self.find)
+        menu.add_command(label='Zoom in',command=lambda:self.zoom(1));menu.add_command(label='Zoom out',command=lambda:self.zoom(-1))
+        menu.add_command(label='Back · Esc',command=self.escape);menu.tk_popup(event.x_root,event.y_root)
 
-    def paste_content(self):
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle('Paste into Folio')
-        dialog.resize(720, 520)
-        layout = QtWidgets.QVBoxLayout(dialog)
-        layout.addWidget(QtWidgets.QLabel('Markdown, Mermaid, or LaTeX math — paste below and render.'))
-        editor = QtWidgets.QPlainTextEdit()
-        editor.setFont(QtGui.QFont('JetBrains Mono', 11))
-        editor.setPlainText(QtWidgets.QApplication.clipboard().text())
-        layout.addWidget(editor)
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText('Render')
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        if dialog.exec_() == QtWidgets.QDialog.Accepted and editor.toPlainText().strip():
-            self.document_ready(Document(None, 'markdown', editor.toPlainText()), None)
+    def return_rendered(self):
+        self.view='document';self.render_document()
 
-    def file_menu(self, position):
-        item = self.file_list.itemAt(position)
-        if not item or item.data(QtCore.Qt.UserRole) not in self.documents:
-            return
-        menu = QtWidgets.QMenu(self)
-        reload_action = menu.addAction('Reload file')
-        reload_action.setEnabled(bool(self.documents[item.data(QtCore.Qt.UserRole)].path))
-        close_action = menu.addAction('Close')
-        action = menu.exec_(self.file_list.mapToGlobal(position))
-        key = item.data(QtCore.Qt.UserRole)
-        if action == reload_action:
-            path = self.documents[key].path
-            self.submit(lambda:load_document(path), lambda doc, error:self.reload_ready(key, doc, error))
-        elif action == close_action:
-            self.file_list.takeItem(self.file_list.row(item))
-            self.documents.pop(key, None)
-
-    def reload_ready(self, key, document, error):
-        if error:
-            self.status.setText('Reload failed: ' + error)
-        elif key in self.documents:
-            self.documents[key] = document
-            if self.file_list.currentItem() and self.file_list.currentItem().data(QtCore.Qt.UserRole) == key:
-                self.select_document(self.file_list.currentItem())
-
-    def closeEvent(self, event):
-        self.settings.setValue('geometry', self.saveGeometry())
-        self.closing = True
-        self.paste_timer.stop()
-        self.clock.stop()
-        QtWidgets.QApplication.instance().removeEventFilter(self)
-        self.hide()
-        self.pool.clear()
-        # Workers hold callbacks into this window. Defer deletion until they
-        # finish rather than destroying Qt objects under a running callback.
-        self.pool.waitForDone()
-        self.temp.cleanup()
-        self.history.close()
-        super().closeEvent(event)
+    def close(self):
+        if self.closing:return
+        self.save_settings();self.closing=True
+        for timer in (self.paste_timer,self.clock_timer,self.tick_timer):
+            if timer:self.root.after_cancel(timer)
+        self.executor.shutdown(wait=True,cancel_futures=True)
+        self.callbacks.clear()
+        for table in self.embedded_tables:
+            try:self.html.widget_to_element(table).widget=None
+            except (KeyError,tk.TclError):pass
+        self.history.close();self.temp.cleanup();self.root.destroy()
 
 
 def main():
-    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
-    application = QtWidgets.QApplication(sys.argv)
-    application.setApplicationName('Folio')
-    window = Folio()
-    window.show()
-    if len(sys.argv)==3 and sys.argv[1]=='--read':
-        window.load_path(Path(sys.argv[2]))
-    elif len(sys.argv)==3 and sys.argv[1]=='--image':
-        window.parse_image(QtGui.QImage(sys.argv[2]))
-    elif len(sys.argv) > 1:
-        window.path_input.setPlainText('\n'.join(sys.argv[1:]))
-    return application.exec_()
+    root=tk.Tk(className='Folio');app=Folio(root)
+    if len(sys.argv)==3 and sys.argv[1]=='--read':app.load_path(Path(sys.argv[2]))
+    elif len(sys.argv)==3 and sys.argv[1]=='--image':app.paste(image=Image.open(sys.argv[2]))
+    elif len(sys.argv)>1:app.paste(text='\n'.join(sys.argv[1:]))
+    root.mainloop()
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__=='__main__':main()

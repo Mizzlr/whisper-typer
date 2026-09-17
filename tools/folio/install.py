@@ -4,6 +4,7 @@ import hashlib
 import io
 import os
 import shutil
+import subprocess
 import tarfile
 import urllib.request
 from pathlib import Path
@@ -21,11 +22,20 @@ def install():
     import markdown  # noqa: F401
     from PIL import Image  # noqa: F401
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-    for command in ('pdfinfo', 'pdftoppm', 'pdftotext', 'tesseract'):
+    from PyQt5.QtSvg import QSvgRenderer  # noqa: F401
+    import tkinter  # noqa: F401
+    import pygments  # noqa: F401
+    for command in ('pdfinfo', 'pdftoppm', 'pdftotext', 'tesseract','xvfb-run','xclip','firefox'):
         if not shutil.which(command):
             raise RuntimeError(f'Missing {command}; see README.md dependencies.')
     home = Path.home()
     share = home / '.local/share/folio'
+    python=share/'venv/bin/python'
+    if not python.exists():
+        subprocess.run(['/usr/bin/python3','-m','venv','--system-site-packages',str(share/'venv')],check=True)
+    version=subprocess.run([str(python),'-c','import importlib.metadata; print(importlib.metadata.version("tkinterweb"))'],capture_output=True,text=True)
+    if version.returncode or version.stdout.strip()!='4.25.4':
+        subprocess.run([str(python),'-m','pip','install','tkinterweb==4.25.4','tkinterweb-tkhtml==2.1.1'],check=True)
     for package, version, checksum in PACKAGES:
         destination = share / 'vendor' / package
         marker = destination / '.archive-sha256'
@@ -47,11 +57,11 @@ def install():
     source = Path(__file__).resolve().parent
     library = home / '.local/lib/folio'
     library.mkdir(parents=True, exist_ok=True)
-    for name in ('app.py', 'files.py', 'rendering.py', 'cell_stats.py','history.py'):
+    for name in ('app.py','qt_app.py','tk_widgets.py','render_worker.py','files.py','rendering.py','cell_stats.py','history.py'):
         shutil.copyfile(source / name, library / name)
     executable = home / '.local/bin/folio'
     executable.parent.mkdir(parents=True, exist_ok=True)
-    executable.write_text('#!/bin/sh\nexec /usr/bin/python3 "$HOME/.local/lib/folio/app.py" "$@"\n')
+    executable.write_text('#!/bin/sh\ncase "$1" in\n  --qt) shift; exec /usr/bin/python3 "$HOME/.local/lib/folio/qt_app.py" "$@" ;;\n  *) exec "$HOME/.local/share/folio/venv/bin/python" "$HOME/.local/lib/folio/app.py" "$@" ;;\nesac\n')
     executable.chmod(0o755)
     desktop = home / '.local/share/applications/folio.desktop'
     desktop.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +75,16 @@ Terminal=false
 StartupWMClass=Folio
 Categories=Utility;Office;
 MimeType=text/markdown;text/csv;text/plain;application/pdf;
+''')
+    (desktop.parent/'folio-qt.desktop').write_text(f'''[Desktop Entry]
+Type=Application
+Name=Folio (Qt)
+Comment=Compare the Qt reading interface
+Exec="{executable}" --qt %F
+Icon=accessories-text-editor
+Terminal=false
+StartupWMClass=FolioQt
+Categories=Utility;Office;
 ''')
     print('Installed Folio. Launch from Applications or run: folio')
 

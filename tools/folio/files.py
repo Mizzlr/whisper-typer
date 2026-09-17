@@ -6,13 +6,16 @@ import threading
 import time
 import re
 import subprocess
+import zipfile
+import stat
+import shutil
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 
-EXTENSIONS = r'(?:md|markdown|csv|tsv|txt|log|json|jsonl|yaml|yml|toml|rs|py|html|pdf|sql|sh)'
+EXTENSIONS = r'(?:md|markdown|csv|tsv|txt|log|json|jsonl|yaml|yml|toml|rs|py|html|pdf|sql|sh|zip)'
 
 
 def pasted_paths(text):
@@ -240,7 +243,31 @@ def load_document(path):
             dialect = None
         rows = list(csv.reader(io.StringIO(text), dialect=dialect)) if dialect else list(csv.reader(io.StringIO(text), delimiter=delimiter))
         return Document(path, 'csv', text, rows)
-    return Document(path, 'markdown' if ext in ('.md', '.markdown') else 'text', text)
+    return Document(path, 'markdown' if ext in ('.md', '.markdown', '.txt') else 'text', text)
+
+
+def unzip_contents(path, destination):
+    """Extract ordinary files into an isolated directory, never outside it."""
+    destination=Path(destination).resolve()
+    with zipfile.ZipFile(path) as archive:
+        members=archive.infolist()
+        if len(members)>5000 or sum(m.file_size for m in members)>200*1024*1024:
+            raise ValueError('ZIP is too large to preview (5,000 entries or 200 MB).')
+        targets=[]
+        for member in members:
+            target=(destination/member.filename).resolve()
+            if not target.is_relative_to(destination) or stat.S_ISLNK(member.external_attr>>16):
+                raise ValueError('ZIP contains an unsafe path or symbolic link.')
+            targets.append((member,target))
+        destination.mkdir(parents=True,exist_ok=True)
+        for member,target in targets:
+            if member.is_dir():
+                target.mkdir(parents=True,exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True,exist_ok=True)
+                with archive.open(member) as source,target.open('wb') as output:
+                    shutil.copyfileobj(source,output)
+    return sorted(destination.iterdir(),key=lambda p:(not p.is_dir(),p.name.casefold()))
 
 
 def pdf_page(path, page, dpi):

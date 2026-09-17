@@ -1,82 +1,84 @@
 # Folio
 
-A quick, local reader: paste context, choose a file, read it, press Escape.
-Cream paper and JetBrains Mono throughout. No sidebar, welcome screen, branding
-inside the app, or document toolbar.
+Paste context, choose a file, read it, press Escape. JetBrains Mono, cream paper
+or a dark theme, and a compact top line similar to Whisper Typer.
 
-Install: `/usr/bin/python3 tools/folio/install.py`. Launch **Folio** from
-Applications or run `folio [paths…]`.
+Install: `/usr/bin/python3 tools/folio/install.py`. Launch **Folio** (Tkinter)
+or **Folio (Qt)** from Applications. CLI: `folio [paths…]` or `folio --qt [paths…]`.
+Both interfaces remain available for comparison and share private paste history.
 
 ## Paste and read
 
 Paste text or a clipboard screenshot anywhere. No Open or Parse step is needed.
-A paste replaces the input, extracts paths, and adds a dated group to the list.
-Click a path to read the whole file. Escape closes the document, returns to the
-list, clears the input, and prepares the next paste. Earlier groups stay available.
-Click the date/icon of a group to view its original text or screenshot. Images
-support zoom and horizontal/vertical panning.
+A paste replaces the input, extracts paths, and adds a dated group of plain links.
+Click a path to read. A small file switcher above the document jumps between files
+from the same paste or folder. Back returns to that list; Escape returns to Paths,
+clears the input and prepares the next paste. Earlier groups stay available.
+Click a group's timestamp to view its original dump or screenshot.
 
-Folders list their immediate files and subfolders; click a subfolder to browse.
-Recent shows files opened in Folio. Downloads lists the Downloads folder with
-newest entries first. Escape returns either view to the paste history.
+Top-line controls: **Paths**, **Recent**, **Downloads**, **Ad hoc**, theme, and
+**Top**. Recent lists files opened in Folio. Downloads lists newest downloads first.
+Ad hoc lists the discovered repos' `adhoc` folders. Theme and optional always-on-top
+are saved independently for each interface. Top keeps the window above others
+without repeatedly forcing keyboard focus.
 
-Path resolution understands absolute, home-relative, repo-relative, basename,
+Folders list their files/subfolders. ZIP files open as browsable contents in a
+private temporary directory. Extraction rejects escaping paths, symbolic links,
+more than 5,000 entries or more than 200 MB of uncompressed data. Nothing executes.
+PDFs open in Firefox, preserving its familiar reading/search/zoom controls.
+
+Path lookup understands absolute, home-relative, repo-relative, basename,
 Markdown/backticked and terminal-wrapped paths, including line/column suffixes.
-Home-folder Git repos and repos one level deeper are discovered. Tracked filenames
-and the fourteen latest `adhoc/YYYY-MM-DD` directories are indexed lazily, including
+Home-folder Git repos and repos one level deeper are discovered. Tracked names and
+the fourteen latest `adhoc/YYYY-MM-DD` directories are indexed lazily, including
 untracked reports. Shortened/typo paths use fuzzy filename/suffix matching;
-multiple plausible existing matches are offered as separate entries rather than
-silently choosing one. The index refreshes after thirty seconds when queried.
-Screenshot OCR uses local Tesseract; colored terminal links are enhanced before
-recognition. OCR can still fail on unreadable/cropped images; the original remains
-available after a successful read, and ambiguous matches require selection.
+plausible alternatives are offered separately. The index refreshes after thirty
+seconds when queried. Screenshot OCR uses local Tesseract, enhancing colored
+terminal links. Original screenshots/dumps remain available when OCR is imperfect.
 
-Markdown, Mermaid diagrams, mathematical LaTeX, CSV/TSV, text and PDF render
-locally. Pasted Markdown or bare Mermaid without paths renders directly and is
-also kept in its paste group. TeX is mathematical typesetting inside Markdown,
-not a full LaTeX document compiler.
+Markdown and `.txt` files render as Markdown. Mermaid and mathematical LaTeX use
+local, pinned renderer assets. Tkinter displays the typeset diagrams/math as images
+from a separate worker on an isolated display; Qt renders them in its document
+widget. Full original content remains copyable from the menu. Source files use
+Pygments, theme-aware colors, original line numbers and word wrapping. Other text
+must be UTF-8 or BOM-marked UTF-16; unsupported encodings/binary files report errors.
 
-CSV and Markdown tables support cell/row/column selections, copying and compact
-selection statistics: count, numeric count, sum, average, minimum and maximum.
-CSV: Shift extends, Ctrl adds, row/column headers select, Ctrl+C copies TSV.
-Markdown: click/Shift rectangles/Ctrl cells, header columns, row numbers.
-Calculations use decimals, including standard thousands commas. Labels, empty
-cells, percentages and currency-marked values are excluded rather than assuming
-units; compact statistics show ten significant digits.
+CSV/TSV and Markdown tables support cell/rectangle/row/column selections,
+count, sum, average, minimum and maximum, plus TSV copying. Ctrl/Shift extend
+selections. **Transpose** changes the view without altering the file or full-content
+copy. **Shift + scroll** moves horizontally; ordinary scroll moves vertically.
+Tkinter draws only visible table cells. Statistics use Decimal and exclude unknown
+units such as percentage/currency strings rather than treating them as numbers.
 
-Text/source views wrap to the window width and number original file lines;
-wrapped continuations do not create extra line numbers or change copied text.
+Right-click for source, copying, zoom and search. Ctrl+C copies a selection;
+Ctrl+Shift+C copies full content. Ctrl+F finds; Ctrl+L returns to Paths.
+Ctrl++/Ctrl+- zoom. Screenshot views support two-axis drag/scroll panning.
 
-While reading, only content and requested selection statistics appear. Right-click
-for source, copy selection/content/path, zoom, search and PDF paging. Ctrl+C copies
-selected text/cells; Ctrl+Shift+C copies full contents. Ctrl+F finds; Ctrl+L returns
-to the paste list. Ctrl++/Ctrl+- zoom; Alt+Left/Alt+Right page PDFs. Images/PDFs pan
-by dragging, scrollbar, or Shift+wheel horizontally. PDF search switches to extracted
-text. Scanned PDFs need OCR for searchable/copyable text. PDF images cap at 4096
-pixels. Text must be UTF-8 or BOM-marked UTF-16; unsupported encodings/binary files
-report errors instead of silently changing content.
+## Private data and dependencies
 
-## Data and dependencies
+Paste groups, OCR text, original screenshots and recent paths live in a mode-0600
+SQLite database: `~/.local/share/folio/history.sqlite3`, outside Git. Temporary HTML
+and ZIP contents are removed on normal exit. Tk settings live in
+`~/.config/folio/settings.json`; Qt settings in `~/.config/Folio/Reader.conf`.
+Tests use synthetic temporary fixtures only. Private reports, screenshots, OCR
+output, history and credentials must never become public fixtures or commits.
 
-Paste groups, extracted text, original screenshot PNGs and recently opened paths
-are kept in a private, mode-0600 SQLite database:
-`~/.local/share/folio/history.sqlite3`. Documents are read when clicked. Temporary
-rendered HTML lives in a private temporary directory and is removed on normal exit.
-Window geometry is stored in `~/.config/Folio/Reader.conf`. These private runtime
-files stay outside the repository. Tests use synthetic temporary files and images;
-private screenshots, reports, OCR output and credential files are never fixtures.
+System dependencies: `python3-tk python3-venv python3-pyqt5
+python3-pyqt5.qtwebengine python3-pyqt5.qtsvg python3-markdown python3-bleach
+python3-pil python3-pygments poppler-utils tesseract-ocr xvfb xclip firefox`.
+The installer creates a system-package-enabled local venv with pinned TkinterWeb
+4.25.4/Tkhtml 2.1.1 and installs checksum-pinned Mermaid 10.9.3/MathJax 3.2.2 with
+licenses under `~/.local/share/folio/vendor`. No network is needed for rendering.
+Embedded network resources and untrusted scripts are blocked. Explicitly clicked
+external links open Firefox. Background workers resolve/load/OCR/typeset files.
 
-Dependencies on Debian/Ubuntu: `python3-pyqt5 python3-pyqt5.qtwebengine
-python3-markdown python3-bleach python3-pil poppler-utils tesseract-ocr`.
-The installer downloads checksum-pinned Mermaid 10.9.3 and MathJax 3.2.2 with their
-licenses into `~/.local/share/folio/vendor`. No network is needed for rendering.
-External embedded resources are blocked; explicitly clicked external links open
-your default browser. Background workers load files, resolve paths, OCR images,
-typeset documents and rasterize PDF pages independently of the UI.
+Tests (isolated displays; no desktop input injection):
 
-Tests: run `tools/folio/test_folio.py --render` with system Python under isolated
-Xvfb and software GL. Tests do not inject input into your desktop. No Whisper Typer
-services or pipelines are changed by installing Folio.
+```sh
+xvfb-run -a ~/.local/share/folio/venv/bin/python tools/folio/test_folio.py --render
+xvfb-run -a env QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu QT_QUICK_BACKEND=software /usr/bin/python3 tools/folio/test_folio_qt.py --render
+```
 
-Renderer references: [Mermaid](https://mermaid.js.org/config/usage) and
+[Folio's Tk HTML widget](https://tkinterweb.readthedocs.io/en/latest/api/htmlframe.html),
+[Mermaid](https://mermaid.js.org/config/usage),
 [MathJax](https://docs.mathjax.org/en/v3.2/web/configuration.html).

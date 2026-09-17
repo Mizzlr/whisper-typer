@@ -1,5 +1,6 @@
 """Behavioral checks. Use --render under Xvfb for actual offline JS rendering."""
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -93,6 +94,12 @@ class FilesTests(unittest.TestCase):
         self.assertIsNone(numeric('1,23'))
         self.assertEqual(selection_summary(['9007199254740993','1'])['sum'],Decimal('9007199254740994'))
 
+    def test_dark_theme_preserves_literal_document_colors(self):
+        from rendering import document_html
+        result=document_html('`#fbf8f1` is a literal color.',dark=True)
+        self.assertIn('<code>#fbf8f1</code>',result)
+        self.assertIn('background:#181d23',result)
+
     def test_markdown_math_mermaid_and_sanitization(self):
         body=rendered_body('# Heading\n\n$x_i = \\frac{a}{b}$\n\n```mermaid\nflowchart TD\n A --> B\n```\n\n<script>alert(1)</script>\n<img src="x" onerror="alert(1)">')
         self.assertIn('class="mermaid"',body)
@@ -102,207 +109,150 @@ class FilesTests(unittest.TestCase):
         self.assertIn('$x_i$',rendered_body('`$x_i$`'))
 
 
-class UiTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from PyQt5 import QtCore,QtWidgets
-        QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseSoftwareOpenGL)
-        QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts)
-        cls.application=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
+class TkTests(unittest.TestCase):
     def setUp(self):
+        import tkinter as tk
         from app import Folio
-        self.temp=tempfile.TemporaryDirectory()
-        self.path=Path(self.temp.name)
-        self.window=Folio(self.path/'history.sqlite3')
+        self.temp=tempfile.TemporaryDirectory();self.path=Path(self.temp.name)
+        self.root=tk.Tk(className='Folio');self.window=Folio(self.root,self.path/'history.sqlite3')
+        self.root.update()
 
     def tearDown(self):
-        self.window.close();self.window.deleteLater()
-        from PyQt5 import QtCore
-        QtCore.QCoreApplication.sendPostedEvents(None,QtCore.QEvent.DeferredDelete)
-        self.application.processEvents()
-        self.temp.cleanup()
+        self.window.close();self.temp.cleanup()
 
-    def wait(self, predicate, seconds=20):
+    def wait(self,predicate,seconds=35):
         end=time.monotonic()+seconds
         while time.monotonic()<end:
-            self.application.processEvents()
+            self.root.update()
             if predicate():return
             time.sleep(.02)
-        self.fail('Timed out waiting for background rendering')
+        self.fail('Background operation timed out')
 
-    def js(self, source):
-        result=[]
-        self.window.web.page().runJavaScript(source,lambda value:result.append(value))
-        self.wait(lambda:bool(result))
-        return result[0]
+    def idle(self):
+        self.wait(lambda:not self.window.busy and not self.window.paste_timer)
 
-    def test_csv_selection_stats_copy_and_full_source(self):
-        from PyQt5 import QtCore,QtGui,QtWidgets
-        doc=Document(self.path/'sample.csv','csv','Name,Amount\nA,0.1\nB,0.2\n',[['Name','Amount'],['A','0.1'],['B','0.2']])
-        self.window.document_ready(doc,None)
-        selection=QtCore.QItemSelection(self.window.table.model().index(1,1),self.window.table.model().index(2,1))
-        self.window.table.selectionModel().select(selection,QtCore.QItemSelectionModel.ClearAndSelect)
-        self.wait(lambda:'Sum 0.3' in self.window.stats.text())
-        event=QtGui.QKeyEvent(QtCore.QEvent.KeyPress,QtCore.Qt.Key_C,QtCore.Qt.ControlModifier)
-        self.window.table.keyPressEvent(event)
-        self.assertEqual(QtWidgets.QApplication.clipboard().text(),'0.1\n0.2\n')
-        self.window.copy_content();self.assertEqual(QtWidgets.QApplication.clipboard().text(),doc.text)
-        self.window.source_toggle.setChecked(True);self.window.refresh_view()
-        self.assertEqual(self.window.source.toPlainText(),doc.text)
-        self.assertFalse(self.window.stats.isVisible())
-
-    def test_pasted_path_background_load_and_reopen(self):
-        path=self.path/'a file with spaces.txt'
-        source='Original text\n'+('Full contents, not a preview.\n'*1000)
-        path.write_text(source)
-        self.window.path_input.setPlainText('`'+str(path)+':12`')
-        self.window.open_paths()
-        self.wait(lambda:self.window.current is not None)
-        self.assertEqual(self.window.current.path,path)
-        self.assertEqual(self.window.source.toPlainText(),source)
-        self.window.open_paths(str(path))
-        self.wait(lambda:not self.window.resolving)
-        self.assertEqual(self.window.file_list.count(),1)
-        self.window.copy_path()
-        from PyQt5 import QtWidgets
-        self.assertEqual(QtWidgets.QApplication.clipboard().text(),str(path))
-
-    def test_text_wrap_and_line_numbers_preserve_original_lines(self):
-        from PyQt5 import QtWidgets
-        self.window.show()
-        text=('A long sentence that should wrap naturally. '*80)+'\n'+('x'*800)+'\nLast line.'
-        self.window.document_ready(Document(self.path/'sample.txt','text',text),None)
-        self.application.processEvents()
-        editor=self.window.source
-        self.assertEqual(editor.lineWrapMode(),QtWidgets.QPlainTextEdit.WidgetWidth)
-        self.assertEqual(editor.blockCount(),3)
-        self.assertGreater(editor.document().firstBlock().layout().lineCount(),1)
-        self.assertEqual(editor.horizontalScrollBar().maximum(),0)
-        self.assertTrue(editor.gutter.isVisible())
-        self.assertEqual(editor.viewportMargins().left(),editor.gutter_width())
-        self.assertEqual(editor.toPlainText(),text)
-        self.window.copy_content()
-        self.assertEqual(QtWidgets.QApplication.clipboard().text(),text)
-        width=editor.gutter_width()
-        self.window.zoom(1)
-        self.assertGreaterEqual(editor.gutter_width(),width)
-
-    def paste(self,text):
-        from PyQt5 import QtCore
-        mime=QtCore.QMimeData();mime.setText(text)
-        self.window.path_input.insertFromMimeData(mime)
-        self.wait(lambda:not self.window.resolving and not self.window.paste_timer.isActive())
-
-    def test_auto_paste_group_click_escape_and_old_new_history(self):
-        self.window.show()
-        file=self.path/'first.txt';file.write_text('Just the file content.')
-        second=self.path/'second.csv';second.write_text('name,value\nA,2\n')
-        self.paste('Some unrelated prose.\n('+str(file)+')')
+    def test_paste_history_switcher_back_and_settings(self):
+        a=self.path/'note.txt';a.write_text('# A heading\n\nA short note.')
+        b=self.path/'data.csv';b.write_text('name,value\nA,4\n')
+        self.window.paste(text=f'{a}\n{b}');self.idle()
+        self.assertEqual(self.window.batches[0]['paths'],[str(a),str(b)])
+        self.window.open_group_path(a,self.window.batches[0]);self.idle()
+        self.assertEqual(self.window.current.kind,'markdown')
+        self.assertIn('A heading',self.window.html.document.body.textContent)
+        self.assertEqual(self.window.tab_paths,[a,b])
+        self.assertTrue(self.window.back_button.winfo_ismapped())
+        self.window.load_path(b);self.idle();self.assertEqual(self.window.table.rows[1],['A','4'])
+        self.window.go_back();self.assertEqual(self.window.view,'list')
+        self.window.toggle_top();self.window.toggle_theme()
+        settings=json.loads(self.window.settings_path.read_text())
+        self.assertFalse(settings['top']);self.assertTrue(settings['dark'])
+        self.window.escape();self.assertEqual(self.window.path_input.get('1.0','end-1c'),'')
         self.assertEqual(len(self.window.batches),1)
-        self.assertEqual(self.window.batches[0]['paths'],[str(file)])
-        item=next(self.window.file_list.item(i) for i in range(self.window.file_list.count()) if self.window.file_list.item(i).data(256)==str(file))
-        self.window.activate_item(item)
-        self.wait(lambda:self.window.current is not None)
-        self.assertTrue(self.window.reading.isVisible())
-        self.assertFalse(self.window.header.isVisible());self.assertFalse(self.window.toolbar.isVisible())
-        self.assertEqual(self.window.source.toPlainText(),'Just the file content.')
-        self.window.escape()
-        self.assertTrue(self.window.file_list.isVisible());self.assertEqual(self.window.path_input.toPlainText(),'')
-        item=next(self.window.file_list.item(i) for i in range(self.window.file_list.count()) if self.window.file_list.item(i).data(256)==str(file))
-        self.window.activate_item(item)
-        self.assertTrue(self.window.reading.isVisible())
-        self.window.escape()
-        self.paste(str(second))
-        self.assertEqual(len(self.window.batches),2)
-        self.assertEqual(self.window.batches[1]['paths'],[str(file)])
-        from history import History
-        history=History(self.path/'history.sqlite3')
-        self.assertEqual(len(history.recent()),2)
-        self.assertEqual((self.path/'history.sqlite3').stat().st_mode&0o777,0o600)
-        history.close()
 
-    def test_folder_dump_expands_files_browse_recent_and_downloads(self):
-        self.window.show()
-        folder=self.path/'reports';folder.mkdir()
-        file=folder/'report.txt';file.write_text('A useful report.')
-        self.paste(str(folder))
-        self.assertIn(str(file),self.window.batches[0]['paths'])
-        self.window.open_folder(folder)
-        self.wait(lambda:self.window.browsing_folder)
-        self.assertEqual(self.window.file_list.count(),1)
-        self.window.activate_item(self.window.file_list.item(0))
-        self.wait(lambda:self.window.current is not None)
-        self.window.escape();self.window.show_recent()
-        self.assertEqual(self.window.context_entries,[file])
-        self.window.show_downloads(folder)
-        self.wait(lambda:self.window.context_entries==[file] and self.window.back_button.isVisible())
+    def test_table_selection_transpose_and_shift_scroll(self):
+        from types import SimpleNamespace
+        rows=[['name']+[f'c{i}' for i in range(12)],['A']+[str(i) for i in range(12)],['B']+[str(i+1) for i in range(12)]]
+        self.window.select_document(Document(self.path/'values.csv','csv','original',rows));self.root.update()
+        table=self.window.table
+        table.selected={(1,1),(1,2)};table.update_selection()
+        self.idle()
+        self.assertIn('Sum 1',table.summary['text']);table.copy()
+        self.assertEqual(self.root.clipboard_get(),'0\t1\n')
+        before=table.canvas.xview()[0];table.canvas.event_generate('<Button-5>',state=1);self.root.update()
+        self.assertGreater(table.canvas.xview()[0],before)
+        self.window.transpose();self.assertEqual(table.rows[1],['c0','0','1'])
+        self.window.transpose();self.assertEqual(table.rows,rows)
+        self.assertEqual(self.window.current.text,'original')
 
-    def test_image_paste_keeps_original_and_extracted_text_zoom_and_escape(self):
-        from PyQt5 import QtCore,QtGui,QtWidgets
+    def test_markdown_table_selection_stats_and_transpose(self):
+        self.window.select_document(Document(None,'markdown','| Item | Value |\n| --- | --- |\n| Tea | 0.1 |\n| Coffee | 0.2 |'))
+        self.idle();self.root.update()
+        self.assertEqual(len(self.window.embedded_tables),1)
+        table=self.window.embedded_tables[0];table.selected={(1,1),(2,1)};table.update_selection()
+        self.idle()
+        self.assertIn('Sum 0.3',table.summary['text'])
+        self.window.transpose();self.assertEqual(table.rows[1],['Value','0.1','0.2'])
+        self.window.toggle_theme();self.idle()
+        self.assertTrue(self.window.dark)
+
+    def test_source_syntax_wrapping_and_original_copy(self):
+        source='import os\n# A comment\nvalue = 42\n'+('Long prose should wrap. '*50)
+        self.window.select_document(Document(self.path/'example.py','text',source));self.idle()
+        self.assertEqual(self.window.source['wrap'],'word')
+        self.assertEqual(self.window.source.get('1.0','end-1c'),source)
+        self.assertTrue(any(name.startswith('syntax') and self.window.source.tag_ranges(name) for name in self.window.source.tag_names()))
+        self.window.copy_content();self.assertEqual(self.root.clipboard_get(),source)
+
+    def test_pdf_opens_firefox_without_pdf_rasterization(self):
         from unittest.mock import patch
-        self.window.show()
-        file=self.path/'report.txt';file.write_text('Report content.')
-        image=QtGui.QImage(800,400,QtGui.QImage.Format_RGB32);image.fill(QtGui.QColor('#fbf8f1'))
-        mime=QtCore.QMimeData();mime.setImageData(image)
-        with patch('app.image_text',return_value=str(file)):
-            self.window.path_input.insertFromMimeData(mime)
-            self.wait(lambda:bool(self.window.batches))
-        batch=self.window.batches[0]
-        self.assertTrue(batch['has_image']);self.assertEqual(batch['source'],str(file))
-        self.assertEqual(batch['paths'],[str(file)])
-        self.window.activate_item(self.window.file_list.item(0))
-        self.assertEqual(self.window.current.kind,'image')
-        width=self.window.pdf_label.width();self.window.zoom(1)
-        self.assertGreater(self.window.pdf_label.width(),width)
-        self.window.copy_image();self.assertFalse(QtWidgets.QApplication.clipboard().image().isNull())
-        self.window.escape();self.assertTrue(self.window.file_list.isVisible())
+        pdf=self.path/'sample.pdf';pdf.write_bytes(b'%PDF synthetic browser fixture')
+        with patch('app.subprocess.Popen') as launch:
+            self.window.load_path(pdf)
+            command=launch.call_args[0][0]
+            self.assertIn('firefox',command[0]);self.assertEqual(command[1],pdf.as_uri())
+        self.assertIsNone(self.window.current)
+        self.assertEqual(self.window.history.recent_files(),[pdf])
 
-    def test_pdf_load_extract_page_navigation_zoom_pan(self):
-        from PyQt5 import QtGui,QtCore
-        path=self.path/'sample.pdf'
-        writer=QtGui.QPdfWriter(str(path));painter=QtGui.QPainter(writer)
-        painter.drawText(100,200,'First page');writer.newPage();painter.drawText(100,200,'Second page');painter.end()
-        doc=load_document(path)
-        self.assertEqual(doc.pages,2);self.assertIn('First page',doc.text);self.assertIn('Second page',doc.text)
-        self.window.show();self.window.document_ready(doc,None)
-        self.wait(lambda:self.window.pdf_image is not None)
-        width=self.window.pdf_label.width()
-        self.window.zoom(1);self.assertGreater(self.window.pdf_label.width(),width)
-        for _ in range(7):self.window.zoom(1)
-        self.assertGreater(self.window.pdf.horizontalScrollBar().maximum(),0)
-        self.window.change_page(1)
-        self.wait(lambda:self.window.pdf_loaded_page==2)
+    def test_zip_and_folder_navigation(self):
+        import zipfile
+        archive=self.path/'example.zip'
+        with zipfile.ZipFile(archive,'w') as out:
+            out.writestr('reports/note.md','# From ZIP');out.writestr('data.csv','a,b\n1,2')
+        self.window.load_path(archive);self.idle()
+        self.assertEqual(self.window.context_label,'example.zip')
+        folder=next(p for p in self.window.context_entries if p.is_dir())
+        self.window.load_path(folder);self.idle()
+        file=self.window.context_entries[0];self.window.load_path(file);self.idle()
+        self.assertIn('From ZIP',self.window.html.document.body.textContent)
+        self.window.go_back();self.assertEqual(self.window.context_entries,[file])
+        self.window.go_back();self.assertEqual(self.window.context_label,'example.zip')
 
-    @unittest.skipUnless(RENDER,'Actual WebEngine rendering requires --render under Xvfb')
-    def test_offline_mermaid_math_markdown_tables_and_code_copy(self):
-        self.window.show()
-        source='# A clearer view\n\nLocal documents, diagrams and mathematics.\n\n$$E = mc^2$$\n\n```mermaid\nflowchart LR\n Paths --> Folio --> Reading\n```\n\n| Item | Amount |\n| --- | ---: |\n| Tea | 0.1 |\n| Coffee | 0.2 |\n\n```python\nprint("hello")\n```'
-        self.window.document_ready(Document(None,'markdown',source),None)
-        end=time.monotonic()+30
-        while time.monotonic()<end:
-            if self.js("Boolean(document.querySelector('.mermaid svg') && document.querySelector('mjx-container') && document.documentElement.dataset.folioReady)"):break
-            time.sleep(.1)
-        else:self.fail('Offline rendering failed: '+str(self.js("({ready:document.documentElement.dataset.folioReady,mermaid:!!document.querySelector('.mermaid svg'),math:!!document.querySelector('mjx-container'),error:document.querySelector('.render-error')?.textContent,mathjax:typeof MathJax,channel:typeof QWebChannel,body:document.body.innerText.slice(0,800)})")))
-        self.assertEqual(self.js("document.querySelectorAll('article table').length"),1)
-        self.assertIn('Tea',self.js("document.querySelector('article table').innerText"))
-        self.assertIn('Coffee',self.js("document.querySelector('article table').innerText"))
-        self.js("document.querySelectorAll('article table tbody tr')[0].cells[2].click()")
-        self.wait(lambda:True,.1)
-        self.js("document.querySelectorAll('article table tbody tr')[1].cells[2].dispatchEvent(new MouseEvent('click',{ctrlKey:true}))")
-        for _ in range(20):
-            if 'Sum 0.3' in self.js("document.querySelector('.table-stats').textContent"):break
-            self.application.processEvents();time.sleep(.05)
-        self.assertIn('Sum 0.3',self.js("document.querySelector('.table-stats').textContent"))
-        self.js("document.querySelector('pre button.copy-code').click()")
-        from PyQt5 import QtWidgets
-        self.wait(lambda:'print("hello")' in QtWidgets.QApplication.clipboard().text())
-        artifact=os.environ.get('FOLIO_PREVIEW')
-        if artifact:
-            from PyQt5 import QtTest
-            QtTest.QTest.qWait(500)  # Allow Chromium's compositor to finish painting.
-            self.window.grab().save(artifact)
+    def test_ad_hoc_tab_and_recent_downloads(self):
+        repo=self.path/'repo';(repo/'adhoc'/'2000-01-01').mkdir(parents=True)
+        self.window.resolver.repos=[repo];self.window.show_adhoc()
+        self.assertEqual(self.window.context_entries,[repo/'adhoc'])
+        self.window.load_path(repo/'adhoc');self.idle()
+        self.assertEqual(self.window.context_entries,[repo/'adhoc'/'2000-01-01'])
+        downloads=self.path/'Downloads';downloads.mkdir();file=downloads/'note.txt';file.write_text('Hello')
+        self.window.show_downloads(downloads);self.idle();self.assertEqual(self.window.context_entries,[file])
+        self.window.load_path(file);self.idle();self.window.show_recent();self.assertEqual(self.window.context_entries,[file])
+
+    @unittest.skipUnless(RENDER,'Run --render for local math/diagram worker')
+    def test_tk_math_and_mermaid_are_typeset(self):
+        from app import typeset
+        body=typeset('# Diagram\n\n$x_i = \\frac{a}{b}$\n\n```mermaid\nflowchart LR\n A --> B\n```')
+        self.assertEqual(body.count('data:image/png;base64,'),2)
+        import re
+        sizes=re.findall(r'width="(\d+)" height="(\d+)"',body)
+        self.assertLess(int(sizes[0][0]),200)
+        self.assertLess(int(sizes[0][1]),100)
+        self.window.select_document(Document(None,'markdown','placeholder'))
+        self.idle();self.window.show_html(body);self.root.update()
+        self.assertIn('Diagram',self.window.html.document.body.textContent)
 
 
-if __name__=='__main__':
-    unittest.main()
+class ArchiveTests(unittest.TestCase):
+    def test_reject_traversal_symlinks_and_oversized_archives_before_writes(self):
+        import zipfile,stat
+        from files import unzip_contents
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for name in ('../escaped.txt','/absolute.txt'):
+                archive=root/'unsafe.zip'
+                with zipfile.ZipFile(archive,'w') as out:out.writestr(name,'unsafe')
+                with self.assertRaises(ValueError):unzip_contents(archive,root/'preview')
+                self.assertFalse((root/'preview').exists())
+            with zipfile.ZipFile(root/'link.zip','w') as out:
+                info=zipfile.ZipInfo('link');info.external_attr=(stat.S_IFLNK|0o777)<<16;out.writestr(info,'../outside')
+            with self.assertRaises(ValueError):unzip_contents(root/'link.zip',root/'preview')
+            with zipfile.ZipFile(root/'large.zip','w') as out:
+                for i in range(5001):out.writestr(str(i),'')
+            with self.assertRaises(ValueError):unzip_contents(root/'large.zip',root/'preview')
+
+    def test_embedded_resources_reject_network(self):
+        from app import local_resource
+        with self.assertRaises(ValueError):local_resource('https://example.com/image.png')
+        with self.assertRaises(ValueError):local_resource('file://remote/private.png')
+
+
+if __name__=='__main__':unittest.main()

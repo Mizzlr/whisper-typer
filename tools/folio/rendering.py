@@ -61,10 +61,10 @@ def rendered_body(source):
     return body
 
 
-def document_html(source):
+def document_html(source, dark=False):
     mermaid = (VENDOR/'mermaid/dist/mermaid.min.js').as_uri()
     mathjax = (VENDOR/'mathjax/es5/tex-svg.js').as_uri()
-    return '''<!doctype html><html><head><meta charset="utf-8">
+    output = '''<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: qrc: 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src file: data:; font-src file: data:; connect-src 'none'">
 <style>''' + CSS + '''</style>
 <script>
@@ -88,7 +88,7 @@ if(!Array.prototype.at)Array.prototype.at=function(i){i=Math.trunc(i)||0;return 
 </script>
 <script>window.MathJax={tex:{inlineMath:[['$','$'],['\\\\(','\\\\)']],displayMath:[['$$','$$'],['\\\\[','\\\\]']]},options:{enableMenu:false},svg:{fontCache:'local'}};</script>
 <script defer src="''' + mathjax + '''"></script>
-<script defer src="''' + mermaid + '''"></script></head><body><article>''' + rendered_body(source) + '''</article>
+<script defer src="''' + mermaid + '''"></script></head><body><article>''' + 'FOLIO_DOCUMENT_BODY' + '''</article>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded',async()=>{
@@ -102,6 +102,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
   b.onclick=()=>{bridge.copy((block.querySelector('code')||block).textContent);b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1000);};
   block.prepend(b);
  }
+ const originals=new WeakMap(),transposed=new WeakMap();
+ function initializeTables() {
  for (const table of document.querySelectorAll('article table')) {
   const rows=Array.from(table.rows);let anchor=null;let revision=0;
   const status=document.createElement('div');status.className='table-stats';
@@ -125,6 +127,37 @@ document.addEventListener('DOMContentLoaded',async()=>{
    };
   }
  }
+ }
+ initializeTables();
+ window.folioTranspose=()=>{
+  for(const table of document.querySelectorAll('article table')){
+   if(!originals.has(table))originals.set(table,Array.from(table.rows).map(row=>Array.from(row.cells).filter(cell=>!cell.classList.contains('row-grip')).map(cell=>cell.textContent)));
+   const original=originals.get(table),next=!transposed.get(table);transposed.set(table,next);
+   const width=Math.max(0,...original.map(row=>row.length));
+   const values=next?Array.from({length:width},(_,c)=>original.map(row=>row[c]||'')):original;
+   if(table.nextElementSibling?.classList.contains('table-stats'))table.nextElementSibling.remove();
+   table.innerHTML='';
+   values.forEach((row,r)=>{const tr=table.insertRow();row.forEach(value=>{const cell=document.createElement(r===0?'th':'td');cell.textContent=value;tr.appendChild(cell);});});
+  }
+  initializeTables();
+ };
  document.documentElement.dataset.folioReady='true';
 });
 </script></body></html>'''
+
+    return theme_colors(output,dark).replace('FOLIO_DOCUMENT_BODY',rendered_body(source),1)
+
+
+def theme_colors(text,dark):
+    if not dark:return text
+    colors={'#fbf8f1':'#181d23','#fffdf8':'#20262e','#353b33':'#e2e7eb','#302f2b':'#e2e7eb','#263e35':'#c1e4cb',
+            '#356b58':'#aadbbd','#315443':'#aadbbd','#315543':'#aadbbd','#526b56':'#aadbbd','#263d2b':'#dbf0df',
+            '#858879':'#91a0b0','#8e9383':'#91a0b0','#949b8b':'#91a0b0','#f4f1e8':'#252d36','#f0ede4':'#252d36',
+            '#f2f0e7':'#252d36','#f0eee5':'#252d36','#f4f1e9':'#252d36','#eeede3':'#252d36','#eeeae0':'#20262e',
+            '#f5f2e9':'#252d36','#dedbce':'#343e49','#e1ddcf':'#343e49','#dddccd':'#343e49','#dedbcd':'#343e49',
+            '#e5e2d8':'#343e49','#e5e0d4':'#343e49','#687469':'#a8b6aa','#dfddcf':'#343e49',
+            '#ddd8ca':'#343e49','#e6ede2':'#2d4437','#e1ebdc':'#2d4437','#e9eee2':'#2d4437','#dfe8d9':'#375645',
+            '#bed5af':'#375645','#17271a':'#f0fff4','#2b4d37':'#f0fff4','#3f5143':'#aadbbd','#435240':'#aadbbd',
+            '#e8eee4':'#2d4437','#cfe0c7':'#375645','#304439':'#e2e7eb','#e7eee2':'#2d4437'}
+    import re
+    return re.sub(r'#[0-9a-fA-F]{6}',lambda m:colors.get(m[0].lower(),m[0]),text).replace('color-scheme:light','color-scheme:dark')

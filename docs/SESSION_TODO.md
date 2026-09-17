@@ -218,3 +218,26 @@ was used in the regression fixture or preview.
 Plain-list batch: three relevant group/folder/image interaction checks passed in
 isolated Xvfb; synthetic list preview verified without private data. History view
 also resets the window title after leaving a document.
+
+Folio interface follow-up (keep both Tkinter and Qt for comparison):
+- [x] Keep Tkinter as the default and offer a separate Qt launcher; preserve private paste history.
+- [x] Compact top-line Paths / Recent / Downloads / Ad hoc controls and same-paste/folder file switching.
+- [x] Back at the top right, Escape to history, saved light/dark and Top toggles.
+- [x] Open PDFs in Firefox and render .txt files as Markdown, with original source available.
+- [x] Browse ZIP contents safely without executing files.
+- [x] Syntax highlighting and original line numbers for source files.
+- [x] Transpose CSV and Markdown tables using a small top control; retain cell statistics/copying.
+- [x] Repair horizontal table scrolling and verify it in both interfaces.
+- [x] Validate both interfaces using synthetic fixtures and isolated displays before deployment/publication.
+
+Interface-comparison batch: 21 Tkinter and 21 Qt checks passed under isolated
+Xvfb (Qt full suite plus targeted reruns after renderer changes). Coverage includes
+real Shift+wheel event delivery, table transpose/statistics/copy, source highlighting,
+light/dark and Top toggles, same-group switching, ZIP navigation and unsafe ZIP
+rejection, Firefox PDF invocation, and local math/diagram rendering. Synthetic
+previews checked light/dark and typesetting. Table statistics run off the Tk UI
+thread; workers return identifiers/data so Tk callbacks stay on the main thread.
+Both launchers are installed, Tkinter is the running default, and all eight installed
+module hashes match source with zero service restarts and no recent runtime errors.
+Requested preferences were saved in a separate memory update note; private runtime
+data remains outside Git.
