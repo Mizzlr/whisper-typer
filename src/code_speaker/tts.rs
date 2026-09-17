@@ -207,7 +207,7 @@ impl KokoroTtsEngine {
         let _guard = self.speak_lock.lock().await;
 
         // Bail if explicitly cancelled while waiting for lock (hotkey press).
-        if self.cancel_flag.load(Ordering::Relaxed) {
+        if self.cancel_flag.load(Ordering::Relaxed) || crate::recording::active() {
             info!("TTS skipped — cancelled while waiting for lock");
             self.cancel_flag.store(false, Ordering::Relaxed);
             return SpeakResult {
@@ -220,7 +220,7 @@ impl KokoroTtsEngine {
         // Wait for voice input to be idle (user not actively recording).
         // Check cancel_flag periodically so a hotkey press can bail us out.
         while !self.voice_idle.load(Ordering::Relaxed) {
-            if self.cancel_flag.load(Ordering::Relaxed) {
+            if self.cancel_flag.load(Ordering::Relaxed) || crate::recording::active() {
                 info!("TTS skipped — cancelled while waiting for voice idle");
                 self.cancel_flag.store(false, Ordering::Relaxed);
                 return SpeakResult {
@@ -264,7 +264,7 @@ impl KokoroTtsEngine {
 
         for (i, sentence) in sentences.iter().enumerate() {
             // Check cancel or voice gate closed (user started recording)
-            if self.cancel_flag.load(Ordering::Relaxed) || !self.voice_idle.load(Ordering::Relaxed)
+            if self.cancel_flag.load(Ordering::Relaxed) || !self.voice_idle.load(Ordering::Relaxed) || crate::recording::active()
             {
                 cancelled = true;
                 info!("Cancelled before sentence {}/{}", i + 1, sentences.len());
@@ -284,7 +284,7 @@ impl KokoroTtsEngine {
             total_gen_ms += gen_ms;
 
             // Check cancel or voice gate closed after generation
-            if self.cancel_flag.load(Ordering::Relaxed) || !self.voice_idle.load(Ordering::Relaxed)
+            if self.cancel_flag.load(Ordering::Relaxed) || !self.voice_idle.load(Ordering::Relaxed) || crate::recording::active()
             {
                 cancelled = true;
                 info!(
@@ -449,7 +449,7 @@ impl KokoroTtsEngine {
                 }
 
                 // Check cancel flag (HTTP /cancel) or voice gate closed (user recording)
-                if cancel_flag.load(Ordering::Relaxed) || !voice_idle.load(Ordering::Relaxed) {
+                if cancel_flag.load(Ordering::Relaxed) || !voice_idle.load(Ordering::Relaxed) || crate::recording::active() {
                     if let Some(sink) = active_sink.lock().unwrap().take() {
                         sink.stop();
                     }

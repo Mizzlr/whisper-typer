@@ -141,6 +141,11 @@ pub struct OllamaConfig {
     pub skip_threshold: usize,
     /// When true, bypass Whisper and send audio directly to Ollama (requires audio-capable model).
     pub audio_mode: bool,
+    pub grammar_gate: GrammarGateConfig,
+    /// Total budget for a correction, including any retry (gate is separate).
+    pub correction_timeout_ms: u64,
+    /// Paste immediately and save grammar suggestions for the dictation window.
+    pub background_review: bool,
 }
 
 impl Default for OllamaConfig {
@@ -152,6 +157,67 @@ impl Default for OllamaConfig {
             keep_alive: 3600,
             skip_threshold: 0,
             audio_mode: false,
+            grammar_gate: GrammarGateConfig::default(),
+            correction_timeout_ms: 5_000,
+            background_review: false,
+        }
+    }
+}
+
+/// Optional small-model decision before the existing grammar corrector.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GrammarGateConfig {
+    pub enabled: bool,
+    /// "ollama", "typesafe", or "race" (first valid judgment).
+    pub provider: String,
+    /// Ollama output contract: "structured" or the short "pass_repair" classifier.
+    pub decision_format: String,
+    /// Explicit model selection; no model is downloaded or guessed.
+    pub model: String,
+    pub host: String,
+    pub timeout_ms: u64,
+    /// Private credential file, never the credential itself.
+    pub api_key_file: String,
+    /// Skip rewriting only when Jev's error probability is at most this value.
+    pub clean_threshold: f64,
+    /// Remove a proposed prefix only with this probability or higher.
+    pub fragment_threshold: f64,
+}
+
+impl Default for GrammarGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "ollama".into(),
+            decision_format: "structured".into(),
+            model: String::new(),
+            host: "http://127.0.0.1:11434".into(),
+            timeout_ms: 250,
+            api_key_file: "~/.config/typesafe/api-key".into(),
+            clean_threshold: 0.2,
+            fragment_threshold: 0.9,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SpellingConfig {
+    pub enabled: bool,
+    pub aff_path: String,
+    pub dic_path: String,
+    /// Optional word-frequency data supplementing the Hunspell stems.
+    pub frequency_path: String,
+}
+
+impl Default for SpellingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            aff_path: "/usr/share/hunspell/en_US.aff".into(),
+            dic_path: "/usr/share/hunspell/en_US.dic".into(),
+            frequency_path: "~/.config/whisper-typer/frequency_dictionary_en_82_765.txt".into(),
         }
     }
 }
@@ -167,6 +233,20 @@ impl Default for TyperConfig {
         Self {
             backend: "xdotool".into(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { enabled: false, endpoint: "http://127.0.0.1:8768/events".into(), timeout_ms: 200 }
     }
 }
 
@@ -272,6 +352,7 @@ impl Default for CorrectionsConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub ui: UiConfig,
     pub hotkey: HotkeyConfig,
     pub audio: AudioConfig,
     pub recording: RecordingConfig,
@@ -286,6 +367,7 @@ pub struct Config {
     pub tts: TTSConfig,
     pub mcp: McpConfig,
     pub corrections: CorrectionsConfig,
+    pub spelling: SpellingConfig,
 }
 
 impl Config {
@@ -331,6 +413,45 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.ollama.correction_timeout_ms == 0 {
+            return Err(ConfigError(
+                "ollama.correction_timeout_ms must be greater than zero".into(),
+            ));
+        }
+        if self.ollama.grammar_gate.enabled {
+            let gate = &self.ollama.grammar_gate;
+            if !matches!(gate.provider.as_str(), "ollama" | "typesafe" | "race") {
+                return Err(ConfigError("unknown grammar gate provider".into()));
+            }
+            if !matches!(gate.decision_format.as_str(), "structured" | "pass_repair") {
+                return Err(ConfigError("unknown grammar gate decision format".into()));
+            }
+            if matches!(gate.provider.as_str(), "typesafe" | "race") {
+                let url = reqwest::Url::parse(&gate.host)
+                    .map_err(|_| ConfigError("invalid TypeSafe host".into()))?;
+                if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+                    return Err(ConfigError("TypeSafe host must use HTTPS without embedded credentials".into()));
+                }
+                if gate.api_key_file.trim().is_empty()
+                    || !gate.clean_threshold.is_finite()
+                    || !(0.0..0.5).contains(&gate.clean_threshold)
+                    || !gate.fragment_threshold.is_finite()
+                    || !(0.5..=1.0).contains(&gate.fragment_threshold)
+                {
+                    return Err(ConfigError("invalid TypeSafe credential path or probability thresholds".into()));
+                }
+            }
+            if self.ollama.grammar_gate.model.trim().is_empty() {
+                return Err(ConfigError(
+                    "ollama.grammar_gate.model must be set when the gate is enabled".into(),
+                ));
+            }
+            if self.ollama.grammar_gate.timeout_ms == 0 {
+                return Err(ConfigError(
+                    "ollama.grammar_gate.timeout_ms must be greater than zero".into(),
+                ));
+            }
+        }
         if self.audio.sample_rate != 16_000 {
             return Err(ConfigError(format!(
                 "audio.sample_rate must be 16000, got {}",
@@ -408,6 +529,25 @@ mod tests {
     #[test]
     fn accepts_default_configuration() {
         assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn gate_requires_explicit_model_and_nonzero_budgets() {
+        let mut config = Config::default();
+        config.ollama.grammar_gate.enabled = true;
+        assert!(config.validate().is_err());
+        config.ollama.grammar_gate.model = "configured-model".into();
+        assert!(config.validate().is_ok());
+        config.ollama.grammar_gate.timeout_ms = 0;
+        assert!(config.validate().is_err());
+        config.ollama.grammar_gate.timeout_ms = 250;
+        config.ollama.grammar_gate.decision_format = "pass_repair".into();
+        assert!(config.validate().is_ok());
+        config.ollama.grammar_gate.decision_format = "invalid".into();
+        assert!(config.validate().is_err());
+        config.ollama.grammar_gate.decision_format = "structured".into();
+        config.ollama.correction_timeout_ms = 0;
+        assert!(config.validate().is_err());
     }
 
     #[test]

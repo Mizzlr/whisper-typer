@@ -51,12 +51,14 @@ Two invariants come from that diagram:
    (a Solaar paste rule, or a mouse mapping that emits `KEY_F24`) makes one press
    emit two hotkeys and dictation flaps. The daemon emits no `KEY_F24` at all.
 
-Holding the gesture button holds `F24` down in X, and X re-enables auto-repeat
-for that keycode whenever the keymap is reloaded (layout switch, `setxkbmap`, or
-Input Remapper refreshing its mapping). A repeating `F24` flickers in the focused
-application, so `whisper-hotkey-daemon` re-asserts `xset -r 202` at start-up,
-before every press, and on a five-second idle tick. `whisper-f24-no-repeat.service`
-still applies the same setting once at session start.
+`whisper-hotkey-daemon` disables only its dedicated `whisper-gesture-keyboard`
+in X. Whisper Typer reads that device directly through evdev, so press/release
+still activate dictation while desktop apps receive no F24. This avoids
+Terminator's hide-pointer-on-keypress behavior and held-key flicker. The guard
+runs at start-up, before each press, and on a five-second idle tick so it recovers
+after X/device changes. If X isolation cannot be applied, `xset -r 202` prevents
+F24 auto-repeat as a fallback. `whisper-f24-no-repeat.service` still applies that
+repeat setting once at session start.
 
 ## The daemon
 

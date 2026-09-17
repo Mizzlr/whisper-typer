@@ -1,5 +1,10 @@
 # Whisper Input Configuration
 
+ui:
+  enabled: true
+  endpoint: "http://127.0.0.1:8768/events"
+  timeout_ms: 200
+
 hotkey:
   # Primary hotkey: Win+Alt
   combo:
@@ -37,12 +42,24 @@ punctuation:
   timeout_ms: 1000
 
 ollama:
-  enabled: false
-  model: "granite4.2:3b"
-  host: "http://127.0.0.1:11434"
-  keep_alive: 3600          # Keep model loaded for 1 hour after each request
-  skip_threshold: 5
+  enabled: true
+  model: "granite4.1:3b"
+  host: "http://192.168.0.103:11434"
+  keep_alive: -1            # Keep both White Wolf models resident in GPU memory.
+  skip_threshold: 0             # Short fragments also need the grammar gate.
+  correction_timeout_ms: 3000   # Includes retry; keep cleaned text on timeout.
   audio_mode: false             # Deprecated compatibility key; Whisper is always used for ASR.
+  background_review: true  # Paste now; review/copy suggestions in the floating window.
+  grammar_gate:
+    enabled: false
+    provider: "ollama"
+    decision_format: "pass_repair"
+    model: "granite4:350m"
+    host: "http://192.168.0.103:11434"
+    api_key_file: "~/.config/typesafe/api-key"  # Private file outside this repository.
+    timeout_ms: 500
+    clean_threshold: 0.2        # Uncertain results also receive a correction pass.
+    fragment_threshold: 0.9
 
 typer:
   backend: "xdotool"      # xdotool for X11 (respects keyboard layout)
@@ -50,6 +67,12 @@ typer:
 corrections:
   enabled: true
   path: "~/.config/whisper-typer/corrections.tsv"  # Local typo corrections, not committed
+
+spelling:
+  enabled: true                 # Offline, generic duplicated-letter correction.
+  aff_path: "/usr/share/hunspell/en_US.aff"
+  dic_path: "/usr/share/hunspell/en_US.dic"
+  frequency_path: "~/.config/whisper-typer/frequency_dictionary_en_82_765.txt"
 
 feedback:                       # Deprecated compatibility block; currently ignored.
   notifications: false

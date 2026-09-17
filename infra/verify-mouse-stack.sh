@@ -122,9 +122,14 @@ check "thumb wheel diverted" "printf '%s' \"\$show\" | grep -q 'Thumb Wheel Dive
 check "main wheel free-spinning" "printf '%s' \"\$show\" | grep -q 'Scroll Wheel Ratcheted *: Freespinning'"
 
 echo "gesture hotkey hygiene"
+check "gesture keyboard isolated from desktop apps" \
+  "xinput list-props 'whisper-gesture-keyboard' | grep -Eq 'Device Enabled.*:[[:space:]]*0$'"
 python3 - <<'PY'
-import os, sys
+import os, re, subprocess, sys
 keycode = int(os.environ.get("WHISPER_F24_KEYCODE", "202"))
+props = subprocess.run(['xinput', 'list-props', 'whisper-gesture-keyboard'], capture_output=True, text=True)
+if props.returncode == 0 and re.search(r'Device Enabled.*:\s*0$', props.stdout, re.MULTILINE):
+    print("  [PASS] F24 cannot repeat into apps while its device is isolated"); sys.exit(0)
 try:
     from Xlib import display
 except Exception:

@@ -18,6 +18,19 @@ build/
 # Local config (user may customize)
 # config.yaml
 
+# Local API credentials; commit only placeholder examples.
+.env
+.env.*
+!.env.example
+credentials.json
+credentials.yaml
+credentials.yml
+credentials.toml
+secrets.json
+secrets.yaml
+secrets.yml
+secrets.toml
+
 # Logs
 *.log
 .grepai/

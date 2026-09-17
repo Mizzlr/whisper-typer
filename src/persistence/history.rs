@@ -43,7 +43,19 @@ pub struct TranscriptionRecord {
     pub ollama_text: Option<String>,
     pub final_text: String,
     pub output_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_review: Option<bool>,
     pub whisper_latency_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spelling_latency_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spelling_edits: Vec<crate::spelling::SpellingEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grammar_gate_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grammar_gate_latency_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grammar_gate_provider: Option<String>,
     pub ollama_latency_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correction_accepted: Option<bool>,

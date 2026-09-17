@@ -120,7 +120,217 @@ The hotkey and focused-window paste paths are deliberately conservative because
 they sit directly in the text-input path. Grammar correction is advisory: if
 Ollama times out, produces malformed JSON, repeats text, removes a URL or
 number, changes a protected project name, or rewrites too aggressively, the
-service types the original Whisper transcription instead.
+service keeps the cleaned, punctuated transcript instead.
+
+Offline spelling cleanup uses `symspell` to propose candidates and `spellbook`
+to validate English word forms from the system Hunspell dictionary. It runs
+before punctuation and does not maintain typo-to-word mappings. Currently only
+an unambiguous deletion of an accidentally duplicated letter is applied:
+`dataaset` becomes `dataset`, while valid inflections such as `fills` and
+`trees` stay unchanged. Code, paths, URLs, numbers, acronyms, and existing local
+protection rules are preserved. Install `hunspell-en-us` and enable `spelling`
+in the config to use it. Missing data disables this advisory pass with a warning.
+Leading doubled letters and rare short candidate words are deferred to context.
+Candidates shorter than six letters require at least 100,000 occurrences in the
+optional frequency data; longer valid stems can work without that supplement.
+
+Enable `ollama.background_review: true` for immediate paste and optional grammar
+suggestions. The fast spelling and punctuation output pastes first; a bounded
+background queue runs the configured grammar corrector directly, without a judge.
+Each dictation keeps its own timestamped result, so continuing to talk preserves
+earlier suggestions. Closing the review window does not stop dictation or review.
+
+The Python Tkinter floating window (`infra/dictation-window.py`) compares the
+already-pasted text with background grammar corrections using `difflib`:
+red for removed words and green for added words. Punctuation and capitalization
+alone are ignored. Unchanged dictations show one text row; grammar edits show
+original and corrected rows. All **Copy** buttons align on the right of the timestamp.
+Click Copy, then paste wherever you want. It does not replace text in another application or
+change the clipboard when new suggestions arrive. The window has a **Keep on top** toggle,
+is movable and resizable, and remembers its position.
+Triage Desk's milky cream light theme is the default; the **◐** button switches
+between light and dark without rebuilding cards or changing the reading position.
+The choice is saved with the window settings. The initial view contains
+the last 15 minutes. Scrolling down appends older entries in batches of 30;
+unchanged cards and thumbnails are reused across updates. Returning to the top
+releases older cards and archive days, keeping the live view small.
+archive days load only as needed. Raw ASR remains in history; historical entries without a
+separate pre-grammar baseline show their final text without an inferred diff.
+Each compact header shows a gray dot for no grammar edit, green for a word edit,
+and amber while checking, followed by time until paste / grammar round trip in
+milliseconds. Background grammar time is separate from paste latency because
+review starts after paste. Detailed judge outcomes/timings remain in history.
+The top row shows today's date and a live clock updated each second. Entries
+show only their time; older days get a single date heading when scrolling back.
+Dictations show a stable daily `#N`. Hover the outcome dot for details. A
+validated suggestion that was rejected is distinguished from an unavailable
+model; the original pasted text remains unchanged.
+
+The **Dictations**, **Recordings**, and **Clipboard** buttons independently
+show or hide each category and remember their settings. Hiding recordings
+does not stop capture. Controls wrap below the clock in narrower windows.
+Each enabled category falls back to older items when it has no recent entries,
+so recent clipboard copies do not hide recordings or block dictation history.
+The **Clipboard** toggle adds text copies and clickable
+image thumbnails to the same timeline. Copies are deduplicated; immediate
+dictation pastes appear once. Copying a matching dictation preserves its full
+card: the original/corrected diff, daily number, and latency statistics remain
+visible. Dictation/recording text stays in its own category, including copies
+captured by the clipboard monitor when that category is hidden. Text previews
+are compact, but Copy restores the full exact text.
+Clicking an image thumbnail opens a viewer inside the app. Use +/− or the
+wheel to zoom, drag to pan, and Fit (or 0) to reset. Shift+wheel or Left/Right
+pans horizontally; arrow keys and both scrollbars also pan the image. Close or Escape returns
+to the timeline. Copy is available inside the viewer too and restores the
+original full-resolution image, including parts outside the current view. Capturing/history updates never overwrite it.
+Images have their own daily `#N`. Recopies preserve their first-capture time,
+number, and position; dictations also stay in their original timeline order.
+New captures and recent images from the last 15 minutes are named and described
+in the background by Qwen3 VL 2B on
+White Wolf. The thumbnail stays on the left; its screen title and one or two
+sentences appear on the right. **Describe** beside Copy runs this on demand
+for historical images. It reads **Describing…** while processing and
+**Described** afterward. Already described or currently processing images do not
+queue another model call. Cached descriptions
+survive restarts. The original image and clipboard stay intact if vision is
+unavailable. Existing images are numbered during migration; older images are described on demand.
+The choice is remembered. Capture continues with the toggle off, while the
+window is running. It starts with the current clipboard; past unrecorded text
+cannot be recovered. Recent saved screenshots (last 24 hours) from
+`~/Pictures/Screenshots` and `/tmp/codex-clipboard-*.png` are also imported.
+
+The recent history window covers the last 24 hours without deleting saved dictations.
+The window initially shows the last 15 minutes; if that view is empty, it
+automatically searches older history to show up to 20 items from the selected
+categories. Scrolling can continue into earlier archives. Finished sessions with no accepted transcript are labeled
+**Empty recording** and omit the unused transcript pane. Scrolling progressively loads
+12 nearby entries in either direction, with at most 100 cards mounted; distant
+widgets are destroyed. An ongoing recording remains available past the cutoff.
+
+Clipboard ownership notifications are asynchronous, serviced every 20 ms;
+image encoding, thumbnails, and persistence use a bounded background worker.
+New clipboard copies take priority over screenshot imports. Imported file
+signatures survive restarts, and cached image thumbnails are reused.
+Screenshot discovery runs every 2 seconds. A private SQLite database at
+`~/.cache/whisper-typer/clipboard/history.sqlite` holds the latest 200 unique
+items, with private PNGs under `clipboard/images`. No clipboard content is sent
+to grammar models. The module requires system `python3-gi`, GTK 3 introspection,
+`python3-pil`, and `python3-xlib` for returning keyboard focus after image viewing. GUI/clipboard tests use an isolated `xvfb-run` display.
+
+Rust pushes dictations and grammar results to `http://127.0.0.1:8768/events`
+through a bounded background queue and persistent HTTP connection. Incoming
+messages wake Tk's event loop through a socket; normal updates do not wait for a
+file poll. The JSONL files remain authoritative for startup and five-second
+recovery checks. `GET /health` exposes delivery counts and dispatch timing,
+without transcript text. This loopback endpoint rejects browser-origin writes.
+Configure `ui.enabled` and `ui.endpoint` to enable pushes.
+
+The small red **Record** button starts hands-free, copy-only dictation. Voice
+Journal's VAD splits speech at pauses or every 25 seconds and reuses the existing
+ASR servers, spelling rules, and punctuator. It does not load another Whisper
+model or paste chunks into the active app. **Stop** ends microphone capture and
+finishes pending chunks; a single card and **Copy** button contain the full
+session. Sessions are private JSONL under `~/.cache/whisper-typer/recordings`.
+Completed sessions survive window restarts; failed transcriptions retain their
+private WAV for recovery. Closing the window also stops session capture.
+The existing ambient Voice Journal service runs independently.
+Recording panes fit their displayed content, occupy at most about half the window height, and scroll
+independently. New segments follow the tail unless you scroll back to read.
+The live status shows Listening, Speaking, Silence (milliseconds), and
+Transcribing; segment timestamps indicate the audio boundary and its reason
+(pause, 25-second limit, or Stop). Silero receives the preceding 64 samples
+required by its model wrapper; its speech score takes priority over loudness.
+Confident non-speech frames update a noise floor for adaptive energy fallback.
+Recordings use the same configured hallucination filters as Voice Journal,
+retaining filtered raw text only in the unfiltered journal/session evidence.
+**Download** saves the complete timestamped transcript unchanged. **Summarize**
+processes a snapshot with the configured Ollama model in a background worker;
+long meetings use bounded portions and a merged summary. Summary view shows the
+whether newer transcript text is missing from the summary and can copy the result. Summarize also generates a
+short 3–5 word topic title beside the Summary tab, saved with the summary;
+completed visible recordings without titles are named automatically in a bounded
+background queue, including historical sessions, without re-summarizing. Topic
+titles are cached privately under `recordings/titles`. Private summaries persist
+under `recordings/summaries`; summary failure leaves capture and text intact.
+During an explicit session its capture is paused to avoid duplicate audio.
+The recorder also appends tagged session chunks to `~/voice-journal/journal_DATE.md`
+and raw chunks to `journal_DATE.unfiltered.md`, then pushes them into the window.
+Recording temporarily suppresses hook announcements and TTS playback, discards
+pending speech, and preserves the user's existing TTS enabled/disabled preference.
+A process-held OS lock clears automatically on Stop, normal exit, or crash.
+The window appears in GNOME overview as a normal app and declines automatic focus
+requests; Copy and mouse scrolling still work without activating it during
+workspace changes. Tooltips also decline focus.
+Install `infra/dictation-window-show.py` as `~/.local/bin/whisper-typer-window`
+and `infra/whisper-typer-window.desktop` under `~/.local/share/applications/`.
+Search for **Whisper Typer** with Super to open/reveal the existing instance.
+
+Install `infra/dictation-window.py`, `infra/clipboard_history.py`,
+`infra/ui_events.py`, `infra/recording_session.py`, `infra/recording_view.py`,
+`infra/recording_summary.py`, `infra/image_caption.py`, and `infra/image_view.py` under
+`~/.local/lib/whisper-typer/` and install
+the release `voice-journal` binary there as `voice-journal-recorder`. Install
+`infra/systemd/whisper-dictation-window.service` as a user unit. Start/reopen with
+`systemctl --user start whisper-dictation-window.service`. It uses system Python
+and Tkinter, plus PyYAML and python3-xlib for summaries and launcher activation.
+Original history remains in `~/.whisper-typer-history`; background
+results are private JSONL in `~/.cache/whisper-typer/grammar-review.jsonl`.
+Set `ollama.background_review: false` to restore synchronous correction; the
+pre-deployment binary/config are also saved for a complete revert.
+
+An optional `ollama.grammar_gate` asks TypeSafe's Jev (`provider: typesafe`)
+for typed error probabilities via `/v1/systemone`. Rust skips rewriting only
+when the probability of a required repair is at most `clean_threshold` (0.2).
+Uncertain, failed, or timed-out judgments use the existing validated Granite
+correction pass. Jev never generates replacement text. With `provider: race`, Jev and the configured `ollama.model` on `ollama.host`
+judge concurrently. The first valid decision wins; a fast failed response does
+not win. The pending request is dropped, though a provider may finish already
+accepted work. If both judges fail, the normal correction pass runs. History
+records `grammar_gate_provider` so the winner is observable. A legacy
+`provider: ollama` gate remains available for offline setups.
+For a fast local Granite 350M judge, set `provider: ollama`, `model: granite4:350m`,
+`host` to its Ollama endpoint, and `decision_format: pass_repair`. This short
+classifier returns PASS or REPAIR; PASS keeps the input unchanged, while REPAIR
+runs the separately configured `ollama.model` corrector. It does not authorize
+direct prefix removal. Invalid or timed-out decisions also run the corrector.
+Use `keep_alive: -1` and an Ollama loaded-model limit of at least two to keep
+the judge and corrector hot together. The White Wolf warm unit preloads both.
+
+The TypeSafe key is read at startup from `api_key_file`, normally
+`~/.config/typesafe/api-key`; keep this private file outside the repository.
+Only its path belongs in configuration. TypeSafe receives the cleaned,
+punctuated transcript and any proposed prefix candidate, not audio.
+See [TypeSafe's API reference](https://docs.typesafe.ai/api).
+The judge has its own timeout; `ollama.correction_timeout_ms` bounds the entire
+correction including a retry. The gate only runs when Ollama processing and an
+Ollama/both output mode are enabled. A model's decision is advisory and can miss
+an error or flag acceptable text; no dictionary/model files are fetched during
+dictation.
+For a repeated single-letter opening followed by a sentence-capitalized word,
+Rust proposes its exact removal. The judge
+must explicitly confirm that it is an artifact before Rust executes the edit;
+if the remaining text is clean, no longer rewrite call is needed. The model
+cannot request arbitrary edits through this mechanism. Initials, language names,
+and shortcut keys require contextual preservation.
+
+History preserves raw ASR and records spelling edits, spelling latency, the
+judge decision/latency, and whether correction was accepted. Replay history
+without microphone capture or focused-window typing:
+
+```bash
+cargo run --release --example spelling_benchmark -- --date-prefix 2026-09-
+cargo run --release --example spelling_benchmark -- --text 'S Summarize the progress.' --grammar
+```
+
+The optional `--report /absolute/private/path.json` saves edit evidence with
+mode 0600 and refuses to overwrite an existing report. Whole-text replay latency
+and candidate-generator comparisons are reported separately. The default
+generator comparison uses the same Hunspell stems for both libraries; Spellbook
+also understands affixes and performs a broader suggestion search. These are
+different algorithms, so the timing comparison does not imply equal accuracy.
+The optional frequency file can be provisioned with
+`python3 infra/fetch-spelling-data.py`; its source revision and checksum are
+pinned. Hunspell stems are sufficient without this extra file.
 
 ## Configuration
 
@@ -136,6 +346,22 @@ ollama:
   host: "http://127.0.0.1:11434"
   keep_alive: 3600
   skip_threshold: 5              # skip Ollama on utterances ≤ N words
+  correction_timeout_ms: 5000     # correction + retry budget; cleaned text on timeout
+  grammar_gate:
+    enabled: false
+    provider: "race"             # first valid Jev/Granite judgment wins
+    model: "jev-latest"
+    host: "https://api.typesafe.ai"
+    api_key_file: "~/.config/typesafe/api-key"
+    timeout_ms: 1500
+    clean_threshold: 0.2
+    fragment_threshold: 0.9
+
+spelling:
+  enabled: false
+  aff_path: "/usr/share/hunspell/en_US.aff"
+  dic_path: "/usr/share/hunspell/en_US.dic"
+  frequency_path: ""             # optional external word-frequency data
 
 whisper:
   model: "models/ggml-distil-large-v3.bin"
@@ -147,6 +373,8 @@ tts:
   speed: 1.0
   api_port: 8767
 ```
+
+Set `ollama.skip_threshold: 0` when the judge should assess short utterances too.
 
 ## MCP integration
 
@@ -358,3 +586,28 @@ adding any hosted model backend.
 ## License
 
 MIT.
+
+Compare the shipping judges on a private sample of today's history (half spread
+since 06:00 local, half most recent). Both receive identical domain-corrected,
+spell-cleaned, punctuated inputs; clients retain their connections across runs:
+
+```bash
+cargo run --release --example judge_benchmark -- --date 2026-09-17 --samples 24 --repeats 3 --report ~/.cache/whisper-typer/judge-benchmark.json
+```
+
+The private report includes each input, decision, elapsed time, observed race
+winner and disagreements. These are judge timings, not full transcription or
+typing timings; no labeled accuracy is implied. The benchmark uses a 5-second
+observation budget per judge so slower replies remain visible.
+
+Compare other local judges using the exact inputs from that report:
+
+```bash
+cargo run --release --example judge_benchmark -- --date 2026-09-17 --model-input-report ~/.cache/whisper-typer/judge-benchmark.json --models qwen3.5:0.8b --models smollm2:360m --models granite4.1:3b --repeats 3 --report ~/.cache/whisper-typer/small-judge-benchmark.json
+```
+
+Use `--model-host` to select an isolated Ollama server. Confirm all models remain
+resident on the GPU before measuring; a server configured for one loaded model
+will otherwise include repeated loading costs. This comparison runs candidates
+sequentially in rotating order and includes 16 separately labeled policy checks.
+Repeated-input caching affects later rounds, which are reported separately.

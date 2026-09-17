@@ -1,3 +1,8 @@
+ui:
+  enabled: false # Enable after installing the dictation window.
+  endpoint: "http://127.0.0.1:8768/events"
+  timeout_ms: 200
+
 hotkey:
   combo: [KEY_LEFTMETA, KEY_LEFTALT]
   alt_combos: []
@@ -33,6 +38,18 @@ ollama:
   host: "http://127.0.0.1:11434"
   keep_alive: 3600
   skip_threshold: 5
+  correction_timeout_ms: 5000
+  background_review: false # Enable after installing the dictation window.
+  grammar_gate:
+    enabled: false
+    provider: "race"            # Jev races the ollama.model judge.
+    decision_format: "structured" # Use pass_repair for Granite 350M.
+    model: "jev-latest"
+    host: "https://api.typesafe.ai"
+    api_key_file: "~/.config/typesafe/api-key"  # Store the key outside the repo.
+    timeout_ms: 1500
+    clean_threshold: 0.2
+    fragment_threshold: 0.9
 
 typer:
   backend: "xdotool"
@@ -40,6 +57,12 @@ typer:
 corrections:
   enabled: true
   path: "~/.config/whisper-typer/corrections.tsv"
+
+spelling:
+  enabled: false                # Enable after installing hunspell-en-us.
+  aff_path: "/usr/share/hunspell/en_US.aff"
+  dic_path: "/usr/share/hunspell/en_US.dic"
+  frequency_path: ""            # Optional external word-frequency file.
 
 silence:
   threshold: 0.01

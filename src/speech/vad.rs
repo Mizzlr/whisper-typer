@@ -9,15 +9,15 @@
 //!
 //! Model contract (v5):
 //!   inputs:
-//!     - input  f32 [batch=1, 512]    — 32 ms of 16 kHz mono PCM
+//!     - input  f32 [batch=1, 576]    — 64 context + 512 new samples at 16 kHz
 //!     - state  f32 [2, 1, 128]       — LSTM hidden state, persists across frames
 //!     - sr     i64 scalar            — 16000
 //!   outputs:
 //!     - output f32 [1, 1]            — speech probability in [0, 1]
 //!     - stateN f32 [2, 1, 128]       — next LSTM state
 //!
-//! Frame size for 16 kHz must be exactly 512 samples; the model rejects
-//! anything else. Callers buffer audio and emit one prediction per 32 ms frame.
+//! Callers supply exactly 512 new samples (32 ms). Silero's official v5 wrapper
+//! prepends the preceding 64 samples; omitting this context suppresses scores.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -31,18 +31,68 @@ pub const SAMPLE_RATE: i64 = 16_000;
 
 pub struct SileroVad {
     session: Mutex<Session>,
-    state: Mutex<Array3<f32>>,
+    state: Mutex<RecurrentState>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn silence_and_reset_use_context_correctly() {
+        let path = Path::new("models/silero_vad.onnx");
+        if !path.exists() {
+            return;
+        }
+        let vad = SileroVad::load(path).unwrap();
+        assert!(vad.predict(&[0.0; 511]).is_err());
+        let initial = vad.predict(&[0.0; FRAME_SAMPLES]).unwrap();
+        for _ in 0..40 {
+            assert!(vad.predict(&[0.0; FRAME_SAMPLES]).unwrap() < 0.5);
+        }
+        vad.reset_state();
+        assert_eq!(initial, vad.predict(&[0.0; FRAME_SAMPLES]).unwrap());
+    }
+    #[test]
+    fn known_speech_reaches_threshold_with_official_context() {
+        let Ok(path) = std::env::var("WHISPER_VAD_TEST_WAV") else {
+            return;
+        };
+        let vad = SileroVad::load(Path::new("models/silero_vad.onnx")).unwrap();
+        let mut wav = hound::WavReader::open(path).unwrap();
+        assert_eq!(wav.spec().sample_rate, 16000);
+        let samples: Vec<_> = wav
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32768.0)
+            .collect();
+        let probabilities: Vec<_> = samples
+            .chunks_exact(FRAME_SAMPLES)
+            .map(|s| vad.predict(s).unwrap())
+            .collect();
+        assert!(!probabilities.is_empty());
+        assert!(probabilities.iter().filter(|p| **p >= 0.5).count() * 5 > probabilities.len());
+    }
+}
+struct RecurrentState {
+    hidden: Array3<f32>,
+    context: [f32; 64],
 }
 
 impl SileroVad {
     pub fn load(path: &Path) -> Result<Self, String> {
         let session = Session::builder()
             .map_err(|e| format!("ort builder: {e}"))?
+            .with_intra_threads(1)
+            .map_err(|e| format!("ort intra threads: {e}"))?
+            .with_inter_threads(1)
+            .map_err(|e| format!("ort inter threads: {e}"))?
             .commit_from_file(path)
             .map_err(|e| format!("commit_from_file({}): {e}", path.display()))?;
         Ok(Self {
             session: Mutex::new(session),
-            state: Mutex::new(Array3::<f32>::zeros((2, 1, 128))),
+            state: Mutex::new(RecurrentState {
+                hidden: Array3::<f32>::zeros((2, 1, 128)),
+                context: [0.0; 64],
+            }),
         })
     }
 
@@ -56,11 +106,14 @@ impl SileroVad {
             ));
         }
 
-        let input = Array2::from_shape_vec((1, FRAME_SAMPLES), samples.to_vec())
+        let mut recurrent = self.state.lock().unwrap();
+        let mut contextual_samples = recurrent.context.to_vec();
+        contextual_samples.extend_from_slice(samples);
+        let input = Array2::from_shape_vec((1, FRAME_SAMPLES + 64), contextual_samples)
             .map_err(|e| format!("input shape: {e}"))?;
         let sr = Array1::from_elem(1, SAMPLE_RATE);
 
-        let state_in = self.state.lock().unwrap().clone();
+        let state_in = recurrent.hidden.clone();
         let input_t = Tensor::from_array(input).map_err(|e| format!("input tensor: {e}"))?;
         let state_t = Tensor::from_array(state_in).map_err(|e| format!("state tensor: {e}"))?;
         let sr_t = Tensor::from_array(sr).map_err(|e| format!("sr tensor: {e}"))?;
@@ -88,9 +141,13 @@ impl SileroVad {
         let next_state = outputs["stateN"]
             .try_extract_array::<f32>()
             .map_err(|e| format!("extract stateN: {e}"))?;
-        *self.state.lock().unwrap() = next_state.to_owned().into_dimensionality().map_err(|e| {
-            format!("stateN dimensionality: {e}")
-        })?;
+        recurrent.hidden = next_state
+            .to_owned()
+            .into_dimensionality()
+            .map_err(|e| format!("stateN dimensionality: {e}"))?;
+        recurrent
+            .context
+            .copy_from_slice(&samples[FRAME_SAMPLES - 64..]);
 
         Ok(prob)
     }
@@ -99,6 +156,7 @@ impl SileroVad {
     /// from one utterance doesn't bleed into the next.
     pub fn reset_state(&self) {
         let mut s = self.state.lock().unwrap();
-        s.fill(0.0);
+        s.hidden.fill(0.0);
+        s.context.fill(0.0);
     }
 }

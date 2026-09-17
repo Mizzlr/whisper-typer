@@ -139,6 +139,7 @@ struct UserInputRequest {
 #[derive(Serialize)]
 struct StatusResponse {
     enabled: bool,
+    recording: bool,
     speaking: bool,
     voice: String,
     model_loaded: bool,
@@ -194,6 +195,27 @@ pub fn router(state: TtsApiState) -> Router {
 
 /// Start the TTS API server and queue consumer as background tokio tasks.
 pub async fn start_tts_api(state: TtsApiState, port: u16, queue_rx: mpsc::Receiver<SpeakJob>) {
+    // Recording is an independent inhibition, not a user DND preference.
+    // Dropping the recorder's OS lock automatically restores the prior setting.
+    let monitor = state.clone();
+    tokio::spawn(async move {
+        let mut was_recording = false;
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(20));
+        loop {
+            tick.tick().await;
+            let recording = crate::recording::active();
+            if recording && !was_recording {
+                let cutoff = monitor.generation.fetch_add(1, Ordering::SeqCst)+1;
+                monitor.discard_before.store(cutoff, Ordering::SeqCst);
+                monitor.tts.cancel();
+                for job in monitor.deferred.lock().unwrap().drain(..) {
+                    finish_notification(&job.notification,"discarded");
+                }
+                info!("Explicit recording: TTS suppressed; pending speech discarded");
+            }
+            was_recording = recording;
+        }
+    });
     spawn_queue_consumer(
         queue_rx,
         state.tts.clone(),
@@ -234,6 +256,7 @@ fn spawn_queue_consumer(
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
             if !enabled.load(Ordering::SeqCst)
+                || crate::recording::active()
                 || job.generation < discard_before.load(Ordering::SeqCst)
             {
                 finish_notification(&job.notification, "discarded");
@@ -339,8 +362,10 @@ fn finish_notification(event: &Option<Notification>, delivery: &str) {
 // --- Handlers ---
 
 async fn handle_status(State(state): State<TtsApiState>) -> Json<StatusResponse> {
+    let recording = crate::recording::active();
     Json(StatusResponse {
-        enabled: state.enabled.load(Ordering::Relaxed),
+        enabled: state.enabled.load(Ordering::Relaxed) && !recording,
+        recording,
         speaking: state.tts.is_speaking(),
         voice: state.tts.current_voice(),
         model_loaded: state.tts.is_loaded(),
@@ -356,7 +381,7 @@ async fn handle_speak(
     if req.text.trim().is_empty() {
         return Json(SimpleResponse::err("empty text"));
     }
-    let enabled = state.enabled.load(Ordering::SeqCst);
+    let enabled = state.enabled.load(Ordering::SeqCst) && !crate::recording::active();
     let mut notification = req.notification.unwrap_or_else(|| Notification {
         event_id: notifications::unique_id(),
         session_id: req.session_id.clone(),
@@ -460,7 +485,7 @@ async fn handle_user_input(
     State(state): State<TtsApiState>,
     Json(req): Json<UserInputRequest>,
 ) -> Json<SimpleResponse> {
-    if !state.enabled.load(Ordering::SeqCst) {
+    if !state.enabled.load(Ordering::SeqCst) || crate::recording::active() {
         for job in state.deferred.lock().unwrap().drain(..) {
             finish_notification(&job.notification, "discarded");
         }
@@ -708,7 +733,7 @@ async fn do_speak(
     // Without this, a previous cancel() (hotkey when nothing was playing) poisons
     // the next speak with an immediate bail.
     tts.clear_cancel();
-    if !enabled.load(Ordering::SeqCst) || generation < discard_before.load(Ordering::SeqCst) {
+    if !enabled.load(Ordering::SeqCst) || crate::recording::active() || generation < discard_before.load(Ordering::SeqCst) {
         return (true, "discarded");
     }
 

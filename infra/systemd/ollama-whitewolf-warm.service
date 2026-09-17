@@ -1,5 +1,5 @@
 [Unit]
-Description=Warm the White Wolf resident Ollama grammar model
+Description=Warm White Wolf Ollama judgment, grammar and Qwen vision models
 After=network-online.target ollama.service
 Wants=network-online.target
 Requires=ollama.service
@@ -7,7 +7,9 @@ PartOf=ollama.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused --max-time 120 --header "Content-Type: application/json" --data-binary "{\"model\":\"granite4.2:3b\",\"prompt\":\"Return exactly READY\",\"stream\":false,\"think\":false,\"keep_alive\":-1,\"options\":{\"temperature\":0,\"num_predict\":16}}" http://192.168.0.103:11434/api/generate
+ExecStart=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused --max-time 120 --header "Content-Type: application/json" --data-binary "{\"model\":\"granite4:350m\",\"prompt\":\"Return exactly READY\",\"stream\":false,\"think\":false,\"keep_alive\":-1,\"options\":{\"temperature\":0,\"num_predict\":16,\"num_ctx\":4096}}" http://192.168.0.103:11434/api/generate
+ExecStart=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused --max-time 120 --header "Content-Type: application/json" --data-binary "{\"model\":\"granite4.1:3b\",\"prompt\":\"Return exactly READY\",\"stream\":false,\"think\":false,\"keep_alive\":-1,\"options\":{\"temperature\":0,\"num_predict\":16,\"num_ctx\":4096}}" http://192.168.0.103:11434/api/generate
+ExecStart=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused --max-time 120 --header "Content-Type: application/json" --data-binary "{\"model\":\"qwen3-vl:2b-instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"Return exactly READY.\",\"images\":[\"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAYElEQVR4nO3PQQ0AIBDAMMC/50MEj4ZkVbDtmVk/OzrgVQNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgPaBXKqA31N0fbGAAAAAElFTkSuQmCC\"]}],\"stream\":false,\"think\":false,\"keep_alive\":-1,\"options\":{\"temperature\":0,\"num_predict\":8,\"num_ctx\":4096}}" http://192.168.0.103:11434/api/chat
 RemainAfterExit=yes
 
 [Install]

@@ -26,6 +26,9 @@ use serde_json::json;
 
 use whisper_typer_rs::vad::{self, SileroVad};
 
+#[path = "voice_journal/ui_recorder.rs"]
+mod ui_recorder;
+
 const LOCAL_TRANSCRIBE_URL: &str = "http://127.0.0.1:8767/transcribe";
 const TRANSCRIBE_URL_ENV: &str = "WHISPER_VOICE_JOURNAL_ASR_URL";
 const LOCAL_PUNCTUATION_URL: &str = "http://127.0.0.1:8770/punctuate";
@@ -353,7 +356,8 @@ fn output_file_for_session() -> io::Result<PathBuf> {
 /// bootstrap handle before reopening so the header bytes are visible to any
 /// concurrent appender.
 fn open_or_bootstrap(path: &Path, header: &str) -> io::Result<File> {
-    match OpenOptions::new().create_new(true).write(true).open(path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    match OpenOptions::new().create_new(true).write(true).mode(0o600).open(path) {
         Ok(mut bootstrap) => {
             bootstrap.write_all(header.as_bytes())?;
             bootstrap.flush()?;
@@ -407,7 +411,10 @@ struct RotatingJournalWriter {
 
 impl RotatingJournalWriter {
     fn open_today() -> io::Result<Self> {
-        let base_dir = voice_journal_dir();
+        Self::open_at(voice_journal_dir())
+    }
+
+    fn open_at(base_dir: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&base_dir)?;
         let date = current_date_string();
         let (journal, unfiltered) = Self::open_pair(&base_dir, &date)?;
@@ -1076,11 +1083,24 @@ fn start_capture(
     // they reach Whisper.
     let mut voiced_samples_in_utt: usize = 0;
     let min_voiced_samples = ms_to_samples(MIN_VOICED_MS);
+    let mut explicit_recording = false;
 
     let stream = device
         .build_input_stream(
             &cfg,
             move |data: &[f32], _| {
+                if whisper_typer_rs::recording::active() {
+                    if !explicit_recording {
+                        utterance.clear(); pre_roll.clear(); frame_buf.clear();
+                        in_speech = false; silence_run_samples = 0;
+                        voiced_samples_in_utt = 0; voiced_streak = 0; speech_hold_frames = 0;
+                        if let VadMode::Silero { detector, .. } = &vad_mode { detector.reset_state(); }
+                        explicit_recording = true;
+                        if let Ok(mut s) = status.lock() { *s = "Explicit journal recording".into(); }
+                    }
+                    return;
+                }
+                explicit_recording = false;
                 if paused.load(Ordering::Relaxed) {
                     if let Ok(mut s) = status.lock() {
                         *s = "Paused".to_string();
@@ -1519,8 +1539,10 @@ fn spawn_transcriber(
             }
         };
         for chunk in rx {
+            if whisper_typer_rs::recording::active() { continue; }
             match transcribe(&remote_asr_client, &local_asr_client, &chunk) {
                 Ok(text) if !text.trim().is_empty() => {
+                    if whisper_typer_rs::recording::active() { continue; }
                     let trimmed = text.trim();
                     let ts = Local::now().format("%H:%M:%S");
                     if is_hallucination(trimmed, &hallucination_filters) {
@@ -1671,6 +1693,12 @@ fn build_vad_mode() -> VadMode {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|arg|arg=="--filter-recordings") {
+        return ui_recorder::filter_recordings();
+    }
+    if std::env::args().any(|arg| arg == "--ui-session") {
+        return ui_recorder::run();
+    }
     // Bootstrap today's files (idempotent under racing threads via create_new)
     // and hand the long-lived append handles to spawn_transcriber. The tailer
     // recomputes paths each poll, so it doesn't need the writer.

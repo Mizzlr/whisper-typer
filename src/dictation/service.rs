@@ -25,8 +25,11 @@ use crate::punctuation::PunctuationClient;
 use crate::recorder::AudioRecorder;
 use crate::remote_asr::RemoteAsrClient;
 use crate::runtime_settings::{OutputMode, RuntimeSettings};
+use crate::spelling::SpellCorrector;
 use crate::transcriber::WhisperTranscriber;
 use crate::typer::TextTyper;
+use super::review::{BackgroundReviewer, ReviewJob};
+use super::ui::UiPublisher;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
@@ -123,7 +126,7 @@ fn strip_trailing_hallucination(text: &str) -> &str {
 }
 
 #[derive(Clone, Default)]
-struct VoiceCorrections {
+pub struct VoiceCorrections {
     replacements: Vec<VoiceReplacement>,
     protectors: Vec<Regex>,
 }
@@ -135,7 +138,7 @@ struct VoiceReplacement {
 }
 
 impl VoiceCorrections {
-    fn load(config: &Config) -> Self {
+    pub fn load(config: &Config) -> Self {
         if !config.corrections.enabled {
             return Self::default();
         }
@@ -206,7 +209,7 @@ impl VoiceCorrections {
         corrections
     }
 
-    fn apply(&self, text: &str) -> String {
+    pub fn apply(&self, text: &str) -> String {
         let mut corrected = text.to_string();
         for replacement in &self.replacements {
             let protected_spans = self.protected_spans(&corrected);
@@ -226,6 +229,10 @@ impl VoiceCorrections {
                 .into_owned();
         }
         corrected
+    }
+
+    pub fn protectors(&self) -> &[Regex] {
+        &self.protectors
     }
 
     fn protected_spans(&self, text: &str) -> Vec<(usize, usize)> {
@@ -262,6 +269,9 @@ pub struct DictationService {
     voice_gate: VoiceGate,
     tts_cancel_client: reqwest::Client,
     voice_corrections: VoiceCorrections,
+    spell_corrector: Option<SpellCorrector>,
+    background_reviewer: Option<BackgroundReviewer>,
+    ui_publisher: UiPublisher,
 }
 
 impl DictationService {
@@ -279,6 +289,7 @@ impl DictationService {
         let typer = TextTyper::new(&config.typer);
         let voice_gate = VoiceGate::new();
         let voice_corrections = VoiceCorrections::load(&config);
+        let spell_corrector = SpellCorrector::load(&config.spelling);
         let remote_asr = if config.remote_asr.enabled {
             match RemoteAsrClient::new(config.remote_asr.clone()) {
                 Ok(client) => Some(client),
@@ -321,6 +332,9 @@ impl DictationService {
             voice_gate,
             tts_cancel_client,
             voice_corrections,
+            spell_corrector,
+            background_reviewer: None,
+            ui_publisher: UiPublisher::default(),
         }
     }
 
@@ -348,6 +362,7 @@ impl DictationService {
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.ui_publisher = UiPublisher::new(&self.config.ui);
         // Open audio stream; retry because PipeWire/WirePlumber may not finish
         // routing before this service starts, even with After=pipewire.service.
         for attempt in 1u32..=12 {
@@ -362,6 +377,17 @@ impl DictationService {
         }
 
         // Create hotkey channel
+        if self.config.ollama.background_review {
+            let runtime=self.runtime_settings.clone();
+            let corrections=self.voice_corrections.clone();
+            self.background_reviewer=Some(BackgroundReviewer::new(
+                self.config.ollama.clone(),
+                Arc::new(move || {let settings=runtime.snapshot();settings.ollama_enabled && settings.output_mode==OutputMode::Ollama}),
+                Arc::new(move |s|corrections.apply(strip_trailing_hallucination(s))),
+                self.ui_publisher.clone(),
+            ));
+            info!("Immediate paste with background grammar suggestions enabled");
+        }
         let (hotkey_tx, mut hotkey_rx) = mpsc::channel::<HotkeyEvent>(16);
 
         // Start hotkey monitor in background
@@ -478,7 +504,17 @@ impl DictationService {
             None
         };
 
-        let (raw_text, t_whisper, t_punctuation, t_ollama, processed_text, ollama_text);
+        let (
+            raw_text,
+            raw_clean,
+            t_whisper,
+            t_spelling,
+            t_punctuation,
+            t_ollama,
+            processed_text,
+            ollama_text,
+        );
+        let spelling_edits;
         let mut correction_metadata: Option<CorrectionMetadata> = None;
         // The deprecated Ollama audio mode intentionally follows this reliable
         // Whisper path. No utterance may be dropped merely because an
@@ -568,12 +604,35 @@ impl DictationService {
                 return;
             }
 
+            // Domain rules and offline spelling run before punctuation/grammar.
+            // Keep raw ASR unchanged in history for attribution and replay.
+            let spelling_start = Instant::now();
+            let domain_clean = self
+                .voice_corrections
+                .apply(strip_trailing_hallucination(&raw_text));
+            (raw_clean, spelling_edits) = match &self.spell_corrector {
+                Some(corrector) => {
+                    let cleaned =
+                        corrector.apply(&domain_clean, &self.voice_corrections.protectors);
+                    (cleaned.text.into_owned(), cleaned.edits)
+                }
+                None => (domain_clean, Vec::new()),
+            };
+            t_spelling = spelling_start.elapsed().as_secs_f64() * 1000.0;
+            if !spelling_edits.is_empty() {
+                info!(
+                    "Offline spelling applied {} edit(s) in {:.3}ms",
+                    spelling_edits.len(),
+                    t_spelling
+                );
+            }
+
             // Restore punctuation and truecasing after ASR. Failure is
             // deliberately fail-open: typing the raw transcript is better
             // than dropping or delaying the user's dictation.
             let t_punctuation_start = Instant::now();
             let punctuated_text = match self.punctuation.clone() {
-                Some(client) => match client.process(&raw_text).await {
+                Some(client) => match client.process(&raw_clean).await {
                     Ok(result) => {
                         info!(
                             "Punctuation succeeded in {:.0}ms (fallback={}): \"{}\"",
@@ -583,10 +642,10 @@ impl DictationService {
                     }
                     Err(error) => {
                         warn!("Punctuation failed; using raw ASR text: {error}");
-                        raw_text.clone()
+                        raw_clean.clone()
                     }
                 },
-                None => raw_text.clone(),
+                None => raw_clean.clone(),
             };
             t_punctuation = t_punctuation_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -597,12 +656,24 @@ impl DictationService {
             let (pt, ot) = match output_mode {
                 OutputMode::Whisper => (Some(punctuated_text.clone()), None),
                 _ if !runtime.ollama_enabled => (Some(punctuated_text.clone()), None),
+                _ if self.config.ollama.background_review && output_mode==OutputMode::Ollama => (Some(punctuated_text.clone()), None),
                 _ if skip_threshold > 0 && word_count <= skip_threshold => {
                     info!("Skipped Ollama ({word_count} words <= {skip_threshold} threshold)");
                     (Some(punctuated_text.clone()), None)
                 }
                 OutputMode::Ollama | OutputMode::Both => {
                     let correction = self.processor.process(&punctuated_text).await;
+                    if let Some(decision) = &correction.metadata.grammar_gate_decision {
+                        info!(
+                            "Grammar gate [{}]: {} ({:.1}ms)",
+                            correction.metadata.grammar_gate_provider.as_deref().unwrap_or("unknown"),
+                            decision,
+                            correction
+                                .metadata
+                                .grammar_gate_latency_ms
+                                .unwrap_or_default()
+                        );
+                    }
                     info!(
                         "Ollama correction accepted={}: \"{}\"",
                         correction.metadata.accepted, correction.text
@@ -618,9 +689,6 @@ impl DictationService {
         }
 
         // Strip trailing hallucination phrases — common speech artifacts when user ends dictation
-        let raw_clean = self
-            .voice_corrections
-            .apply(strip_trailing_hallucination(&raw_text));
         let processed_clean = processed_text
             .as_deref()
             .map(strip_trailing_hallucination)
@@ -652,8 +720,8 @@ impl DictationService {
         let t_total = t_start.elapsed().as_secs_f64() * 1000.0;
 
         info!(
-            "  ASR: {:.0}ms | Punctuation: {:.0}ms | Ollama: {:.0}ms | Typing: {:.0}ms | Total: {:.0}ms | Audio: {:.1}s | Speed: {:.1}x",
-            t_whisper, t_punctuation, t_ollama, t_type, t_total, audio_duration,
+            "  ASR: {:.0}ms | Spelling: {:.3}ms | Punctuation: {:.0}ms | Ollama: {:.0}ms | Typing: {:.0}ms | Total: {:.0}ms | Audio: {:.1}s | Speed: {:.1}x",
+            t_whisper, t_spelling, t_punctuation, t_ollama, t_type, t_total, audio_duration,
             if t_total > 0.0 { (audio_duration * 1000.0) / t_total } else { 0.0 }
         );
 
@@ -672,7 +740,19 @@ impl DictationService {
             ollama_text,
             final_text: final_text.clone(),
             output_mode: output_mode.as_str().to_string(),
+            background_review: (self.config.ollama.background_review && runtime.ollama_enabled && output_mode==OutputMode::Ollama).then_some(true),
             whisper_latency_ms: t_whisper as i64,
+            spelling_latency_ms: self.spell_corrector.as_ref().map(|_| t_spelling),
+            spelling_edits,
+            grammar_gate_decision: correction_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.grammar_gate_decision.clone()),
+            grammar_gate_latency_ms: correction_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.grammar_gate_latency_ms),
+            grammar_gate_provider: correction_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.grammar_gate_provider.clone()),
             ollama_latency_ms: correction_metadata.as_ref().map(|_| t_ollama as i64),
             correction_accepted: correction_metadata
                 .as_ref()
@@ -703,6 +783,12 @@ impl DictationService {
             audio_bytes: audio_artifact.as_ref().map(|artifact| artifact.bytes),
         };
         history::save_record(&record);
+        self.ui_publisher.publish("dictation", &record);
+        if runtime.ollama_enabled && output_mode==OutputMode::Ollama {
+            if let Some(reviewer)=&self.background_reviewer {
+                reviewer.enqueue(ReviewJob {timestamp:record.timestamp.clone(),original:record.whisper_text.clone(),pasted:final_text.clone()});
+            }
+        }
 
         self.transition_to_idle();
     }

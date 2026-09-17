@@ -5,12 +5,11 @@ Creates a persistent uinput virtual keyboard supporting KEY_F24 and listens on a
 local Unix socket for press/release triggers from Solaar. Whisper Typer watches
 the virtual keyboard for push-to-talk press and release.
 
-It also keeps X's auto-repeat disabled for the F24 keycode. X re-enables repeat
-whenever the keymap is reloaded (a layout switch, `setxkbmap`, or Input Remapper
-refreshing its mapping), and once it is back on, holding the gesture button
-repeats F24 roughly 30 times a second, which shows up as flicker in the focused
-application. So the guard is applied at start-up, before every press, and on an
-idle tick.
+The dedicated keyboard is disabled in X only. Whisper Typer still reads its
+evdev events directly, but desktop applications no longer receive F24 and hide
+the mouse pointer as if the user had typed. If X isolation is unavailable,
+disable F24 auto-repeat as a fallback against flicker. Reapply the guard at
+start-up, before every press, and on an idle tick for device/keymap changes.
 """
 
 import os
@@ -27,6 +26,25 @@ F24_KEYCODE = int(os.environ.get("WHISPER_F24_KEYCODE", "202"))
 
 # How often the idle loop re-asserts the repeat guard.
 GUARD_INTERVAL = 5.0
+
+
+def guard_hotkey_device(device_name="whisper-gesture-keyboard") -> bool:
+    """Keep the dedicated hotkey out of X; leave direct evdev readers intact."""
+    if not os.environ.get("DISPLAY"):
+        return False
+    try:
+        result = subprocess.run(
+            ["xinput", "disable", device_name],
+            timeout=2,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return disable_f24_repeat()
 
 
 def disable_f24_repeat() -> bool:
@@ -70,20 +88,20 @@ def main() -> None:
     os.chmod(SOCKET_PATH, 0o600)
     server.settimeout(GUARD_INTERVAL)
 
-    disable_f24_repeat()
+    guard_hotkey_device()
 
     try:
         while True:
             try:
                 data, _ = server.recvfrom(64)
             except socket.timeout:
-                disable_f24_repeat()
+                guard_hotkey_device()
                 continue
             msg = data.decode().strip()
             if msg in ("1", "press", "down"):
-                # Re-assert before the hold starts: this is the moment the
-                # repeat would become audible/visible in the focused app.
-                disable_f24_repeat()
+                # X must stop consuming this device before emitting the key;
+                # Whisper Typer's direct evdev reader still receives it.
+                guard_hotkey_device()
                 ui.write(evdev.ecodes.EV_KEY, evdev.ecodes.KEY_F24, 1)
                 ui.syn()
             elif msg in ("0", "release", "up"):

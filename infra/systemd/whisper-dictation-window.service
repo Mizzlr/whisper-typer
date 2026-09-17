@@ -1,0 +1,13 @@
+[Unit]
+Description=Whisper Typer floating dictations, grammar suggestions and clipboard history
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/lib/whisper-typer/dictation-window.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

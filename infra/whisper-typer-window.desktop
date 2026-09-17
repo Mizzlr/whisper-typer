@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Whisper Typer
+Comment=Dictations, clipboard and meeting recordings
+Exec=/home/mizzlr/.local/bin/whisper-typer-window
+Icon=audio-input-microphone
+Terminal=false
+StartupWMClass=Whispertyper
+Categories=Utility;

@@ -153,6 +153,17 @@ impl RuntimeSettings {
         self.persist();
     }
 
+    /// Keep the recent entry aligned with an explicitly applied review, without
+    /// changing original ASR/history evidence or overwriting a newer dictation.
+    pub fn replace_last_transcription(&self, original:&str, candidate:&str) {
+        let mut state=self.state.write().unwrap_or_else(|p|p.into_inner());
+        if let Some(last)=state.recent_transcriptions.last_mut() {
+            if last==original {*last=candidate.into();}
+        }
+        drop(state);
+        self.persist();
+    }
+
     fn persist(&self) {
         let _persist_guard = self
             .persist_lock
