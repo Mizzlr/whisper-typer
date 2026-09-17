@@ -170,3 +170,9 @@ ui-optimization-benchmark-final.json and grammar-person-percent-check.json.
 Automatic movement remains unconfirmed pending whether it is workspace or
 content scrolling. Brief Terminator activations from configuration reload
 attempts were disclosed and stopped; no speculative mouse remapping was made.
+
+- [x] Show a muted, disabled Summarized action for current recording summaries; re-enable Summarize when new transcript chunks arrive.
+
+Summary-action batch: 38 UI checks passed, including historical reload, stale
+summary recovery and unchanged summary text with advancing coverage. The UI
+helper was deployed independently; existing recordings and summaries are preserved.

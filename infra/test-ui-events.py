@@ -382,6 +382,10 @@ class PushTests(unittest.TestCase):
         self.assertEqual(row['summary'],'Action: review the release tomorrow.')
         self.assertEqual(row['summary_seq'],1)
         self.assertEqual(row['summary_title'],'Release Review Planning')
+        summary_action=self.app.row_blocks['recording:summary']['actions']['Summarize']
+        self.assertEqual(summary_action.cget('text'),'Summarized')
+        self.assertEqual(summary_action.cget('state'),'disabled')
+        self.assertEqual(summary_action.cget('disabledforeground'),self.app.METADATA)
         self.assertEqual(self.app.row_blocks['recording:summary']['view'].topic.cget('text'),'Release Review Planning')
         path=self.path/'recordings/summaries/summary.json';self.assertEqual(path.stat().st_mode&0o777,0o600)
         self.assertEqual(json.loads(path.read_text())['title'],'Release Review Planning')
@@ -393,6 +397,18 @@ class PushTests(unittest.TestCase):
         view=self.app.row_blocks['recording:summary']['view'];self.assertEqual(view.note.cget('text'),'')
         sessions.receive({'session_id':'summary','timestamp':stamp,'status':'chunk','seq':2,'text':'Also review the tests.'})
         self.app.render();self.assertEqual(view.note.cget('text'),'Summary is behind')
+        self.assertEqual(summary_action.cget('text'),'Summarize')
+        self.assertEqual(summary_action.cget('state'),'normal')
+        # The summary can remain identical while its coverage advances.
+        sessions.receive({'session_id':'summary','timestamp':stamp,'status':'summary_ready',
+                          'text':row['summary'],'through_seq':2,'title':row['summary_title']})
+        self.app.render()
+        self.assertEqual(summary_action.cget('text'),'Summarized')
+        self.assertEqual(summary_action.cget('state'),'disabled')
+        self.assertEqual(view.note.cget('text'),'')
+        restored.sessions['summary']['status']='stopped'
+        self.app.recordings=restored;self.app.render()
+        self.assertEqual(self.app.row_blocks['recording:summary']['actions']['Summarize'].cget('text'),'Summarized')
 
     def test_download_saves_whole_transcript_and_summary_failure_keeps_capture_active(self):
         from unittest.mock import patch

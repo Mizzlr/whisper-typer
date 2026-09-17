@@ -777,7 +777,7 @@ class DictationWindow:
         signature = [(r.get('key',r['timestamp']), r['original'], r['corrected'], r['status'], r['timings'],
                       r.get('reason'), r.get('number'), r.get('_heading'),
                       tuple((s['seq'],s['timestamp'],s['text'],s.get('end_reason')) for s in r.get('segments',[])),
-                      r.get('summary'),r.get('summary_title'),r.get('title_busy'),r.get('summary_busy'),r.get('summary_error'),r.get('image_title'),r.get('image_description'),r.get('image_busy')) for r in visible]
+                      r.get('summary'),r.get('summary_seq'),r.get('summary_title'),r.get('title_busy'),r.get('summary_busy'),r.get('summary_error'),r.get('image_title'),r.get('image_description'),r.get('image_busy')) for r in visible]
         if signature == self.rendered:
             self.record_render_metrics(started)
             return
@@ -890,12 +890,13 @@ class DictationWindow:
             for label,command in (('Download',lambda r=row:self.download_recording(r)),
                                   ('Summarize',lambda r=row:self.summarize_recording(r))):
                 action=tk.Button(header,text=label,font=(self.FONT,9),bg=self.BG,fg=self.MUTED,
+                                 disabledforeground=self.METADATA,
                                  activebackground=self.PANEL,activeforeground=self.FG,relief='flat',
                                  padx=3,pady=1,takefocus=False,command=command)
                 action.pack(side='right',padx=3)
                 recording_actions[label]=action
             recording_actions['Download'].configure(state='normal' if row['corrected'] else 'disabled')
-            recording_actions['Summarize'].configure(state='normal' if row['corrected'] and not row.get('summary_busy') else 'disabled')
+            self.configure_summary_action(recording_actions['Summarize'],row)
         changed = grammar_changed(row['original'], row['corrected'])
         color = self.SUCCESS if changed else self.WARNING if row['status'].startswith('Checking') else self.MUTED
         if row['status'].startswith(('Grammar unavailable', 'Grammar skipped', 'No grammar result')):
@@ -999,11 +1000,20 @@ class DictationWindow:
         button = self.copy_buttons[row['key']]
         button.configure(state='normal' if row['corrected'] else 'disabled',command=lambda r=row,b=button:self.copy(r,b))
         block['actions']['Download'].configure(state='normal' if row['corrected'] else 'disabled',command=lambda r=row:self.download_recording(r))
-        block['actions']['Summarize'].configure(state='normal' if row['corrected'] and not row.get('summary_busy') else 'disabled',command=lambda r=row:self.summarize_recording(r))
+        self.configure_summary_action(block['actions']['Summarize'],row)
         return True
 
     def copy_summary(self,text):
         self.root.clipboard_clear();self.root.clipboard_append(text)
+
+    def configure_summary_action(self,button,row):
+        segments=row.get('segments',[])
+        through=row.get('summary_seq')
+        current=bool(row.get('summary')) and (not segments or not isinstance(through,int) or through>=segments[-1]['seq'])
+        busy=row.get('summary_busy')
+        button.configure(text='Summarizing…' if busy else 'Summarized' if current else 'Summarize',
+                         state='disabled' if busy or current or not row['corrected'] else 'normal',
+                         disabledforeground=self.METADATA,command=lambda r=row:self.summarize_recording(r))
 
     def summarize_recording(self,row):
         if not self.recordings:return
