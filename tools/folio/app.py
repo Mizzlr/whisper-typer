@@ -22,7 +22,7 @@ from urllib.parse import urlparse, unquote
 
 from PIL import Image, ImageTk, ImageGrab
 from tkinterweb import HtmlFrame
-from files import Document, PathResolver, load_document, pasted_paths, image_text, unzip_contents
+from files import Document, PathResolver, load_document, pasted_paths, image_text, unzip_contents, pretty_json
 from rendering import CSS, rendered_body
 from history import History
 from tk_widgets import Table, LIGHT, DARK
@@ -88,10 +88,12 @@ class Folio:
         self.frame=tk.Frame(root);self.frame.pack(fill='both',expand=True,padx=16,pady=10)
         self.nav=tk.Frame(self.frame);self.nav.pack(fill='x',pady=(0,8))
         self.date=tk.Label(self.nav,font=('JetBrains Mono',9),anchor='w');self.date.pack(side='left')
-        self.top_button=self.button(self.nav,'Top',self.toggle_top);self.top_button.pack(side='right')
-        self.theme_button=self.button(self.nav,'◐',self.toggle_theme);self.theme_button.pack(side='right',padx=(0,6))
-        self.back_button=self.button(self.nav,'← Back',self.go_back)
-        self.transpose_button=self.button(self.nav,'Transpose',self.transpose)
+        self.top_button=self.button(self.nav,'Top',self.toggle_top);self.top_button.configure(width=5);self.top_button.pack(side='right')
+        self.back_button=self.button(self.nav,'← Back',self.go_back);self.back_button.configure(width=7);self.back_button.pack(side='right',padx=5)
+        self.copy_button=self.button(self.nav,'Copy',self.copy_visible);self.copy_button.configure(width=5);self.copy_button.pack(side='right',padx=(0,5))
+        self.theme_button=self.button(self.nav,'◐',self.toggle_theme);self.theme_button.configure(width=2);self.theme_button.pack(side='right',padx=(0,6))
+        self.prettify_button=self.button(self.nav,'Prettify',self.toggle_prettify)
+        self.pretty=False
         self.switcher=tk.Frame(self.nav)
         self.tab_buttons={}
         for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Ad hoc',self.show_adhoc)]:
@@ -267,11 +269,10 @@ class Folio:
         self.view='list';self.show_list_controls();self.render_list()
 
     def show_list_controls(self):
-        self.transpose_button.pack_forget()
+        self.prettify_button.pack_forget()
         self.root.title('Folio');self.reader_tabs.pack_forget();self.switcher.pack(side='right',padx=7)
         self.date.pack(side='left');self.input_frame.pack(fill='x',before=self.content,pady=(0,10))
-        if self.context_label=='Paths':self.back_button.pack_forget()
-        else:self.back_button.pack(side='right',padx=5,before=self.theme_button)
+        self.back_button.configure(state='disabled' if self.context_label=='Paths' else 'normal')
         self.update_buttons();self.hide_views();self.list_frame.pack(fill='both',expand=True);self.status.configure(text='')
 
     def label_path(self,path):
@@ -402,11 +403,12 @@ class Folio:
         self.submit(lambda:load_document(path),ready)
 
     def select_document(self,document):
-        self.navigation+=1;self.current=document;self.view='document'
+        self.navigation+=1;self.current=document;self.view='document';self.pretty=False
+        self.prettify_button.pack_forget()
         if document.path and not document.path.is_relative_to(Path(self.temp.name)):self.history.opened(document.path)
         self.root.title(document.path.name if document.path else 'Folio')
         self.input_frame.pack_forget();self.date.pack_forget();self.switcher.pack_forget()
-        self.back_button.pack(side='right',padx=5,before=self.theme_button)
+        self.back_button.configure(state='normal')
         self.populate_tabs();self.status.configure(text='');self.render_document()
 
     def populate_tabs(self):
@@ -432,7 +434,6 @@ class Folio:
     def render_document(self):
         if not self.current:return
         self.hide_views();document=self.current;p=self.palette;navigation=self.navigation
-        self.transpose_button.pack_forget()
         if self.table:self.table.destroy();self.table=None
         if document.kind=='image':
             self.image=Image.open(io.BytesIO(document.rows)).copy();self.image_scale=min(1.,max(100,self.content.winfo_width()-20)/self.image.width)
@@ -440,7 +441,7 @@ class Folio:
         if document.kind=='text':self.show_source();return
         if document.kind=='csv':
             self.table=Table(self.content,document.rows,p,self.copy_text,self.submit);self.table.pack(fill='both',expand=True)
-            self.transpose_button.pack(side='right',padx=5,before=self.back_button);return
+            return
         self.html.pack(fill='both',expand=True)
         key=(str(document.path),document.text,self.dark)
         if key in self.rendered:self.show_html(self.rendered[key]);return
@@ -461,8 +462,10 @@ class Folio:
         self.embedded_tables=[];rows=[]
         def replace(match):
             parser=TableParser();parser.feed(match[0]);rows.append(parser.rows)
-            height=min(360,30*(len(parser.rows)+1)+40)
+            height=min(360,30*(len(parser.rows)+1)+70)
             return f'<object id="folio-table-{len(rows)-1}" style="width:100%;height:{height}px"></object>'
+        body=re.sub(r'<div class="(?:table-controls|table-stats)"[^>]*>[\s\S]*?</div>','',body)
+        body=re.sub(r'<t[dh] class="row-grip"[^>]*>[\s\S]*?</t[dh]>','',body)
         body=re.sub(r'<table\b[^>]*>[\s\S]*?</table>',replace,body)
         body=re.sub(r'<button\b[^>]*>[\s\S]*?</button>','',body)
         css=CSS.replace('article','.article').replace(':root {color-scheme:light}','')
@@ -477,7 +480,6 @@ class Folio:
             table=Table(self.html,values,self.palette,self.copy_text,self.submit)
             self.html.document.getElementById('folio-table-'+str(index)).widget=table
             self.embedded_tables.append(table)
-        if rows:self.transpose_button.pack(side='right',padx=5,before=self.back_button)
 
     def transpose(self):
         for table in ([self.table] if self.table else self.embedded_tables):table.transpose()
@@ -506,10 +508,20 @@ class Folio:
 
     def show_source(self):
         self.view='source';self.hide_views();self.source_frame.pack(fill='both',expand=True)
-        self.transpose_button.pack_forget()
-        self.source.configure(state='normal');self.source.delete('1.0','end');self.source.insert('1.0',self.current.text);self.source.configure(state='disabled')
+        text=self.current.text
+        if self.pretty:
+            try:text=pretty_json(text)
+            except (ValueError,RecursionError) as exc:self.pretty=False;self.status.configure(text='Cannot prettify: '+str(exc))
+        self.source.configure(state='normal');self.source.delete('1.0','end');self.source.insert('1.0',text);self.source.configure(state='disabled')
+        if self.current.path and self.current.path.suffix.lower()=='.json':
+            self.prettify_button.configure(text='Original' if self.pretty else 'Prettify')
+            self.prettify_button.pack(side='right',padx=5,after=self.theme_button)
+        else:self.prettify_button.pack_forget()
         self.root.after_idle(self.update_gutter)
         self.highlight_source()
+
+    def toggle_prettify(self):
+        self.pretty=not self.pretty;self.show_source()
 
     def highlight_source(self):
         if not self.current.path:return
@@ -521,15 +533,16 @@ class Folio:
         except ClassNotFound:return
         style=get_style_by_name('monokai' if self.dark else 'friendly')
         document=self.current;navigation=self.navigation
+        text=self.source.get('1.0','end-1c')
         def tokens():
             result=[];offset=0
-            for token,value in lex(document.text,lexer):
+            for token,value in lex(text,lexer):
                 color=style.style_for_token(token)['color']
                 if color:result.append((offset,offset+len(value),color))
                 offset+=len(value)
             return result
         def ready(segments,error):
-            if error or navigation!=self.navigation or self.current is not document or self.view!='source':return
+            if error or navigation!=self.navigation or self.current is not document or self.view!='source' or self.source.get('1.0','end-1c')!=text:return
             for start,end,color in segments:
                 tag='syntax'+color;self.source.tag_configure(tag,foreground='#'+color)
                 self.source.tag_add(tag,f'1.0+{start}c',f'1.0+{end}c')
@@ -560,6 +573,16 @@ class Folio:
 
     def copy_text(self,text):
         self.root.clipboard_clear();self.root.clipboard_append(text);self.root.update_idletasks()
+
+    def copy_visible(self):
+        if self.view!='list' and self.current:
+            if self.current.kind=='image' and self.view=='document':self.copy_image()
+            else:self.copy_content()
+        else:
+            paths=[str(p) for batch in self.batches for p in batch['paths']] if self.context_label=='Paths' else [str(p) for p in self.context_entries]
+            text='\n'.join(dict.fromkeys(paths))
+            if not text and self.context_label=='Paths' and self.batches:text=self.batches[0]['source']
+            if text:self.copy_text(text)
 
     def copy_content(self):
         if self.current:self.copy_text(self.current.text)

@@ -26,13 +26,16 @@ def selection_summary(values):
             lowest = min(n.as_tuple().exponent for n in numbers)
             ctx.prec = max(50, highest-lowest+len(str(len(numbers)))+4)
             total = sum(numbers, Decimal(0))
-            result.update(sum=total, average=total/len(numbers), minimum=min(numbers), maximum=max(numbers))
+            ordered=sorted(numbers)
+            middle=len(ordered)//2
+            median=ordered[middle] if len(ordered)%2 else (ordered[middle-1]+ordered[middle])/2
+            result.update(sum=total, average=total/len(numbers), median=median, minimum=ordered[0], maximum=ordered[-1])
     return result
 
 
 def display_summary(result):
     parts = [f"{result['cells']:,} cells", f"{result['numeric']:,} numeric"]
-    for key, label in [('sum','Sum'),('average','Avg'),('minimum','Min'),('maximum','Max')]:
+    for key, label in [('sum','Sum'),('average','Avg'),('median','Median'),('minimum','Min'),('maximum','Max')]:
         if key in result:
             parts.append(f'{label} {result[key]:,.10g}')
     return '  ·  '.join(parts)

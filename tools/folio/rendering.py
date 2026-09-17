@@ -29,6 +29,7 @@ button.copy-code {float:right;color:#527564;border:1px solid #cad5c8;border-radi
 pre:hover button.copy-code,.table-stats:hover button.copy-code {opacity:1}
 td.folio-selected,th.folio-selected {background:#cfe0c7!important;outline:1px solid #95b08a}
 table td,table th {cursor:cell;user-select:none} .row-grip {cursor:pointer;color:#89927f;font-size:11px;width:28px}
+.table-controls {text-align:right;margin:8px 0} .table-controls button {font:12px "JetBrains Mono",monospace;color:#527564;border:1px solid #cad5c8;background:#fbf8f1;padding:4px 8px;cursor:pointer}
 .table-stats {font-size:12px;color:#6b7b64;line-height:1.6;margin:8px 0 28px}
 '''
 
@@ -103,8 +104,12 @@ document.addEventListener('DOMContentLoaded',async()=>{
   block.prepend(b);
  }
  const originals=new WeakMap(),transposed=new WeakMap();
- function initializeTables() {
- for (const table of document.querySelectorAll('article table')) {
+ function initializeTables(tables=document.querySelectorAll('article table')) {
+ for (const table of tables) {
+  if(table.previousElementSibling?.classList.contains('table-controls'))table.previousElementSibling.remove();
+  const controls=document.createElement('div');controls.className='table-controls';
+  const transpose=document.createElement('button');transpose.textContent='Transpose';transpose.onclick=()=>window.transposeTable(table);
+  controls.append(transpose);table.before(controls);
   const rows=Array.from(table.rows);let anchor=null;let revision=0;
   const status=document.createElement('div');status.className='table-stats';
   const output=document.createElement('span');status.append(output);
@@ -129,8 +134,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
  }
  }
  initializeTables();
- window.folioTranspose=()=>{
-  for(const table of document.querySelectorAll('article table')){
+ window.transposeTable=table=>{
    if(!originals.has(table))originals.set(table,Array.from(table.rows).map(row=>Array.from(row.cells).filter(cell=>!cell.classList.contains('row-grip')).map(cell=>cell.textContent)));
    const original=originals.get(table),next=!transposed.get(table);transposed.set(table,next);
    const width=Math.max(0,...original.map(row=>row.length));
@@ -138,9 +142,9 @@ document.addEventListener('DOMContentLoaded',async()=>{
    if(table.nextElementSibling?.classList.contains('table-stats'))table.nextElementSibling.remove();
    table.innerHTML='';
    values.forEach((row,r)=>{const tr=table.insertRow();row.forEach(value=>{const cell=document.createElement(r===0?'th':'td');cell.textContent=value;tr.appendChild(cell);});});
-  }
-  initializeTables();
+  initializeTables([table]);
  };
+ window.folioTranspose=()=>{for(const table of document.querySelectorAll('article table'))window.transposeTable(table);};
  document.documentElement.dataset.folioReady='true';
 });
 </script></body></html>'''

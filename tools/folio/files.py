@@ -9,6 +9,8 @@ import subprocess
 import zipfile
 import stat
 import shutil
+import json
+from decimal import Decimal
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -268,6 +270,28 @@ def unzip_contents(path, destination):
                 with archive.open(member) as source,target.open('wb') as output:
                     shutil.copyfileobj(source,output)
     return sorted(destination.iterdir(),key=lambda p:(not p.is_dir(),p.name.casefold()))
+
+
+def pretty_json(source):
+    """Indent JSON while preserving literal numbers, key order and strings."""
+    def invalid_constant(value):raise ValueError('Invalid JSON constant: '+value)
+    json.loads(source,parse_float=Decimal,parse_int=Decimal,parse_constant=invalid_constant)
+    tokens=re.findall(r'"(?:\\.|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+',source)
+    result=[];depth=0
+    for index,token in enumerate(tokens):
+        previous=tokens[index-1] if index else None
+        following=tokens[index+1] if index+1<len(tokens) else None
+        if token in ('{','['):
+            result.append(token);depth+=1
+            if following not in ('}',']'):result.append('\n'+'  '*depth)
+        elif token in ('}',']'):
+            depth-=1
+            if previous not in ('{','['):result.append('\n'+'  '*depth)
+            result.append(token)
+        elif token==',':result.append(',\n'+'  '*depth)
+        elif token==':':result.append(': ')
+        else:result.append(token)
+    return ''.join(result)
 
 
 def pdf_page(path, page, dpi):

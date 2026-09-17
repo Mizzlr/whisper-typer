@@ -17,7 +17,7 @@ from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineProfile, QWebEngineView
 
-from files import Document, PathResolver, load_document, pasted_paths, pdf_page, image_text, unzip_contents
+from files import Document, PathResolver, load_document, pasted_paths, pdf_page, image_text, unzip_contents, pretty_json
 from rendering import VENDOR, document_html, theme_colors
 from cell_stats import selection_summary, display_summary
 from history import History
@@ -317,7 +317,7 @@ class Folio(QtWidgets.QMainWindow):
         self.path_input.setFixedHeight(48)
         header=QtWidgets.QHBoxLayout()
         self.back_button=self.button('← Back',self.go_back)
-        self.back_button.hide()
+        self.back_button.setEnabled(False)
         header.addWidget(self.path_input,1)
         header.addStretch()
         self.header=QtWidgets.QWidget()
@@ -333,8 +333,11 @@ class Folio(QtWidgets.QMainWindow):
         for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Ad hoc',self.show_adhoc)]:
             root_buttons.addWidget(self.button(label,callback))
         self.nav.addWidget(self.root_controls)
+        self.pretty=False
+        self.prettify_button=self.button('Prettify',self.toggle_prettify)
+        self.nav.addWidget(self.prettify_button)
+        self.prettify_button.hide()
         self.transpose_button=self.button('Transpose',self.transpose)
-        self.nav.addWidget(self.transpose_button)
         self.transpose_button.hide()
         self.nav.addWidget(self.back_button)
         self.theme_button=self.button('◐',self.toggle_theme)
@@ -408,8 +411,11 @@ class Folio(QtWidgets.QMainWindow):
         menu.addSeparator()
         menu.addAction('Close · Esc',self.escape)
         menu.addAction('Open file…', self.choose_files)
-        self.copy_button = self.button('Copy', self.copy_content)
-        actions.addWidget(self.copy_button)
+        self.copy_button = self.button('Copy', self.copy_visible)
+        self.nav.insertWidget(self.nav.indexOf(self.back_button),self.copy_button)
+        self.nav.removeWidget(self.theme_button)
+        self.nav.insertWidget(self.nav.indexOf(self.copy_button),self.theme_button)
+        for button,width in [(self.copy_button,64),(self.back_button,80),(self.theme_button,32),(self.top_button,64)]:button.setFixedWidth(width)
         more = QtWidgets.QToolButton()
         more.setText('…')
         more.setMenu(menu)
@@ -461,12 +467,18 @@ class Folio(QtWidgets.QMainWindow):
         self.table.setSortingEnabled(False)
         self.table.horizontalHeader().setDefaultSectionSize(190)
         self.table.verticalHeader().setDefaultSectionSize(32)
+        self.csv_view=QtWidgets.QWidget()
+        csv_layout=QtWidgets.QVBoxLayout(self.csv_view)
+        csv_layout.setContentsMargins(0,0,0,0)
+        csv_controls=QtWidgets.QHBoxLayout()
+        csv_controls.addStretch();csv_controls.addWidget(self.transpose_button)
+        csv_layout.addLayout(csv_controls);csv_layout.addWidget(self.table)
         self.pdf = PdfScroll()
         self.pdf_label = QtWidgets.QLabel()
         self.pdf_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
         self.pdf.setWidget(self.pdf_label)
         for widget in (self.web, self.source, self.table, self.pdf):
-            self.views.addWidget(widget)
+            self.views.addWidget(self.csv_view if widget is self.table else widget)
             widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
             widget.customContextMenuRequested.connect(lambda pos,w=widget:self.viewer_menu.exec_(w.mapToGlobal(pos)))
         reader.addWidget(self.views, 1)
@@ -521,6 +533,9 @@ QTabBar::tab:hover {background:#f0eee5}
         self.show_history()
         self.file_list.verticalScrollBar().valueChanged.connect(self.load_more_history)
 
+    def toggle_prettify(self):
+        self.pretty=not self.pretty;self.refresh_view()
+
     def toggle_top(self):
         geometry=self.geometry()
         self.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint,self.top_button.isChecked())
@@ -545,7 +560,7 @@ QTabBar::tab:hover {background:#f0eee5}
     def show_adhoc(self):
         self.context_stack=[]
         self.show_context([repo/'adhoc' for repo in self.resolver.repos if (repo/'adhoc').is_dir()])
-        self.back_button.show()
+        self.back_button.setEnabled(True)
 
     def open_zip(self,path):
         if path in self.zip_roots:self.open_folder(self.zip_roots[path]);return
@@ -559,7 +574,7 @@ QTabBar::tab:hover {background:#f0eee5}
         self.submit(lambda:unzip_contents(path,destination),ready)
 
     def transpose(self):
-        if self.views.currentWidget()==self.table:
+        if self.views.currentWidget()==self.csv_view:
             self.transposed=not self.transposed
             rows=self.current.rows
             if self.transposed:
@@ -647,10 +662,12 @@ QTabBar::tab:hover {background:#f0eee5}
         self.header.show()
         self.date.show()
         self.root_controls.show()
+        self.prettify_button.hide()
         self.file_tabs.hide()
         self.transpose_button.hide()
-        self.back_button.hide()
+        self.back_button.setEnabled(False)
         self.status.clear()
+        self.copy_button.setEnabled(True)
         self.setWindowTitle('Folio')
         self.file_list.verticalScrollBar().setValue(self.history_scroll)
 
@@ -673,7 +690,7 @@ QTabBar::tab:hover {background:#f0eee5}
     def show_recent(self):
         self.context_stack=[]
         self.show_context(self.history.recent_files())
-        self.back_button.show()
+        self.back_button.setEnabled(True)
 
     def show_downloads(self,folder=None):
         folder=Path(folder) if folder else Path.home()/'Downloads'
@@ -687,19 +704,19 @@ QTabBar::tab:hover {background:#f0eee5}
                     self.status.setText(error)
                     return
                 self.show_context(entries)
-                self.back_button.show()
+                self.back_button.setEnabled(True)
             self.submit(lambda:sorted(folder.iterdir(),key=lambda p:p.stat().st_mtime,reverse=True),ready)
         else:
             self.show_context([])
             self.status.setText('No Downloads folder')
-            self.back_button.show()
+            self.back_button.setEnabled(True)
 
     def copy_selection(self):
         if self.views.currentWidget()==self.web:
             QtWidgets.QApplication.clipboard().setText(self.web.page().selectedText())
         elif self.views.currentWidget()==self.source:
             self.source.copy()
-        elif self.views.currentWidget()==self.table:
+        elif self.views.currentWidget()==self.csv_view:
             self.table.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress,QtCore.Qt.Key_C,QtCore.Qt.ControlModifier))
 
     def copy_image(self):
@@ -846,11 +863,13 @@ QTabBar::tab:hover {background:#f0eee5}
         self.header.show()
         self.date.show()
         self.root_controls.show()
+        self.prettify_button.hide()
         self.file_tabs.hide()
         self.transpose_button.hide()
-        self.back_button.setVisible(bool(self.context_stack))
+        self.back_button.setEnabled(bool(self.context_stack))
         self.status.clear()
         self.browsing_folder=True
+        self.copy_button.setEnabled(True)
 
     def go_back(self):
         self.generation+=1
@@ -1019,10 +1038,11 @@ QTabBar::tab:hover {background:#f0eee5}
             self.location.clear()
             return
         self.current = self.documents[item.data(QtCore.Qt.UserRole)]
+        self.pretty=False
         self.stats_generation+=1
         self.file_list.hide()
         self.path_input.hide()
-        self.back_button.show()
+        self.back_button.setEnabled(True)
         self.root_controls.hide()
         self.reading.show()
         self.image_copy_action.setEnabled(self.current.kind=='image')
@@ -1091,9 +1111,17 @@ QTabBar::tab:hover {background:#f0eee5}
         self.pdf_controls.hide()
         self.stats.hide()
         self.transpose_button.hide()
+        self.prettify_button.hide()
         self.status.clear()
         if source:
-            self.source.setPlainText(doc.text)
+            text=doc.text
+            if self.pretty:
+                try:text=pretty_json(text)
+                except (ValueError,RecursionError) as exc:self.pretty=False;self.status.setText('Cannot prettify: '+str(exc))
+            self.source.setPlainText(text)
+            if doc.path and doc.path.suffix.lower()=='.json':
+                self.prettify_button.setText('Original' if self.pretty else 'Prettify')
+                self.prettify_button.show()
             if hasattr(self,'highlighter'):self.highlighter.setDocument(None);self.highlighter.deleteLater()
             self.highlighter=SourceHighlight(self.source.document(),doc.path,self.dark)
             self.views.setCurrentWidget(self.source)
@@ -1103,7 +1131,7 @@ QTabBar::tab:hover {background:#f0eee5}
             self.transpose_button.show()
             self.table.selectionModel().selectionChanged.connect(self.selection_changed)
             self.selection_changed()
-            self.views.setCurrentWidget(self.table)
+            self.views.setCurrentWidget(self.csv_view)
         elif doc.kind == 'pdf':
             self.views.setCurrentWidget(self.pdf)
             self.render_pdf()
@@ -1121,7 +1149,6 @@ QTabBar::tab:hover {background:#f0eee5}
                 if error:
                     self.status.setText('Could not render: ' + error)
                     return
-                self.transpose_button.setVisible('<table>' in value)
                 target = Path(self.temp.name) / f'view-{generation}.html'
                 # A base URL keeps relative report links and images useful.
                 base = doc.path.parent.as_uri() + '/' if doc.path else Path.home().as_uri() + '/'
@@ -1215,7 +1242,7 @@ QTabBar::tab:hover {background:#f0eee5}
             if not self.source.find(term):
                 self.source.moveCursor(QtGui.QTextCursor.Start)
                 self.source.find(term)
-        elif widget == self.table:
+        elif widget == self.csv_view:
             rows = self.table.model().rows
             start = self.table.currentIndex().row()+1
             for row in [*range(start, len(rows)), *range(0, start)]:
@@ -1229,6 +1256,16 @@ QTabBar::tab:hover {background:#f0eee5}
             self.source_toggle.setChecked(True)
             self.refresh_view()
             self.find_next()
+
+    def copy_visible(self):
+        if self.reading.isVisible() and self.current:
+            if self.current.kind=='image':self.copy_image()
+            else:self.copy_content()
+        else:
+            paths=[str(p) for p in self.context_entries] if self.browsing_folder else [p for batch in self.batches for p in batch['paths']]
+            text='\n'.join(dict.fromkeys(paths))
+            if not text and not self.browsing_folder and self.batches:text=self.batches[0]['source']
+            if text:QtWidgets.QApplication.clipboard().setText(text)
 
     def copy_content(self):
         if self.current:

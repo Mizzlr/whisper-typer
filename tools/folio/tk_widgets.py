@@ -27,12 +27,18 @@ class Table(tk.Frame):
         self.canvas=tk.Canvas(self,bg=palette['panel'],highlightthickness=0)
         self.vertical=ttk.Scrollbar(self,orient='vertical',command=self.yview)
         self.horizontal=ttk.Scrollbar(self,orient='horizontal',command=self.xview)
-        self.canvas.grid(row=0,column=0,sticky='nsew')
-        self.vertical.grid(row=0,column=1,sticky='ns')
-        self.horizontal.grid(row=1,column=0,sticky='ew')
+        self.controls=tk.Frame(self,bg=palette['bg'])
+        self.controls.grid(row=0,column=0,columnspan=2,sticky='ew',pady=(0,5))
+        self.transpose_button=tk.Button(self.controls,text='Transpose',command=self.transpose,font=('JetBrains Mono',9),
+                                       relief='solid',bd=1,padx=7,pady=3,bg=palette['bg'],fg=palette['green'],
+                                       activebackground=palette['button'],activeforeground=palette['fg'],takefocus=False)
+        self.transpose_button.pack(side='right')
+        self.canvas.grid(row=1,column=0,sticky='nsew')
+        self.vertical.grid(row=1,column=1,sticky='ns')
+        self.horizontal.grid(row=2,column=0,sticky='ew')
         self.summary=tk.Label(self,bg=palette['bg'],fg=palette['green'],font=('JetBrains Mono',9),anchor='w')
-        self.summary.grid(row=2,column=0,sticky='ew',pady=5)
-        self.rowconfigure(0,weight=1);self.columnconfigure(0,weight=1)
+        self.summary.grid(row=3,column=0,sticky='ew',pady=5)
+        self.rowconfigure(1,weight=1);self.columnconfigure(0,weight=1)
         self.canvas.configure(xscrollcommand=lambda a,b:self.scrollbar(self.horizontal,a,b),yscrollcommand=lambda a,b:self.scrollbar(self.vertical,a,b),
                               scrollregion=(0,0,self.columns*self.cell_width+42,(len(rows)+1)*self.row_height))
         self.canvas.bind('<Configure>',lambda e:self.draw())

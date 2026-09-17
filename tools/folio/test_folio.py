@@ -94,6 +94,20 @@ class FilesTests(unittest.TestCase):
         self.assertIsNone(numeric('1,23'))
         self.assertEqual(selection_summary(['9007199254740993','1'])['sum'],Decimal('9007199254740994'))
 
+    def test_median_odd_even_and_exact_json_prettify(self):
+        from files import pretty_json
+        self.assertEqual(selection_summary(['9','label','1','5'])['median'],Decimal('5'))
+        self.assertEqual(selection_summary(['0.1','0.2','20%'])['median'],Decimal('0.15'))
+        self.assertNotIn('median',selection_summary(['text']))
+        source='{"amount":1.12345678901234567890123456789,"name":"a, b", "empty":{},"items":[1,2],"amount":2}'
+        result=pretty_json(source)
+        self.assertIn('1.12345678901234567890123456789',result)
+        self.assertEqual(result.count('"amount"'),2)
+        self.assertIn('"name": "a, b"',result)
+        self.assertIn('"empty": {}',result)
+        with self.assertRaises(ValueError):pretty_json('{invalid}')
+        with self.assertRaises(ValueError):pretty_json('{"value":NaN}')
+
     def test_dark_theme_preserves_literal_document_colors(self):
         from rendering import document_html
         result=document_html('`#fbf8f1` is a literal color.',dark=True)
@@ -149,6 +163,25 @@ class TkTests(unittest.TestCase):
         self.window.escape();self.assertEqual(self.window.path_input.get('1.0','end-1c'),'')
         self.assertEqual(len(self.window.batches),1)
 
+    def test_copy_and_back_positions_stay_fixed_between_home_and_documents(self):
+        self.root.update()
+        buttons=[self.window.top_button,self.window.back_button,self.window.copy_button,self.window.theme_button]
+        initial=[b.winfo_rootx() for b in buttons]
+        self.assertEqual(self.window.back_button['state'],'disabled')
+        file=self.path/'note.txt';file.write_text('Original file contents.')
+        batch=self.window.history.add('original dump',[file]);self.window.batches.insert(0,batch)
+        self.window.show_history();self.window.copy_button.invoke()
+        self.assertEqual(self.root.clipboard_get(),str(file))
+        self.window.open_group_path(file,batch);self.idle();self.root.update()
+        self.window.copy_button.invoke();self.assertEqual(self.root.clipboard_get(),'Original file contents.')
+        self.assertEqual([b.winfo_rootx() for b in buttons],initial)
+        self.assertEqual(self.window.back_button['state'],'normal')
+        self.window.select_document(Document(self.path/'data.csv','csv','a,b',[['a','b'],['1','2']]))
+        self.root.update();self.assertEqual([b.winfo_rootx() for b in buttons],initial)
+        self.window.escape();self.root.update()
+        self.assertEqual([b.winfo_rootx() for b in buttons],initial)
+        self.window.copy_button.invoke();self.assertEqual(self.root.clipboard_get(),str(file))
+
     def test_table_selection_transpose_and_shift_scroll(self):
         from types import SimpleNamespace
         rows=[['name']+[f'c{i}' for i in range(12)],['A']+[str(i) for i in range(12)],['B']+[str(i+1) for i in range(12)]]
@@ -170,10 +203,26 @@ class TkTests(unittest.TestCase):
         self.assertEqual(len(self.window.embedded_tables),1)
         table=self.window.embedded_tables[0];table.selected={(1,1),(2,1)};table.update_selection()
         self.idle()
-        self.assertIn('Sum 0.3',table.summary['text'])
+        self.assertIn('Sum 0.3',table.summary['text']);self.assertIn('Median 0.15',table.summary['text'])
         self.window.transpose();self.assertEqual(table.rows[1],['Value','0.1','0.2'])
         self.window.toggle_theme();self.idle()
         self.assertTrue(self.window.dark)
+
+    def test_table_local_transpose_and_json_display_only_prettify(self):
+        source='| Name | Value |\n| --- | --- |\n| A | 1 |\n| B | 2 |\n\n| Label | Amount |\n| --- | --- |\n| C | 3 |'
+        self.window.select_document(Document(None,'markdown',source));self.idle()
+        first,second=self.window.embedded_tables
+        self.assertEqual(first.transpose_button.master,first.controls)
+        original=[list(row) for row in second.rows]
+        first.transpose_button.invoke();self.assertEqual(len(first.rows),2);self.assertEqual(second.rows,original)
+        file=self.path/'example.json';raw='{"value":1.12345678901234567890123456789,"items":[1,2]}'
+        file.write_text(raw);self.window.load_path(file);self.idle()
+        self.assertTrue(self.window.prettify_button.winfo_ismapped())
+        self.window.prettify_button.invoke();self.idle()
+        self.assertIn('\n  "value": 1.12345678901234567890123456789',self.window.source.get('1.0','end-1c'))
+        self.window.copy_button.invoke();self.assertEqual(self.root.clipboard_get(),raw)
+        self.assertEqual(file.read_text(),raw)
+        self.window.prettify_button.invoke();self.idle();self.assertEqual(self.window.source.get('1.0','end-1c'),raw)
 
     def test_source_syntax_wrapping_and_original_copy(self):
         source='import os\n# A comment\nvalue = 42\n'+('Long prose should wrap. '*50)

@@ -241,3 +241,19 @@ Both launchers are installed, Tkinter is the running default, and all eight inst
 module hashes match source with zero service restarts and no recent runtime errors.
 Requested preferences were saved in a separate memory update note; private runtime
 data remains outside Git.
+
+- [x] Add a visible Copy control to Folio's reader and home/list views in both interfaces.
+- [x] Keep Back visible but disabled at home and give right-side controls fixed widths/positions.
+
+Copy/navigation batch: position and clipboard tests passed in both interfaces
+across home, Markdown/text reading, CSV/Transpose visibility and Escape. Copy on
+a list uses listed paths rather than a stale previously opened document.
+
+- [x] Move Transpose directly above each CSV/Markdown table at its top right; each Markdown button affects only that table.
+- [x] Include an exact Decimal median in selection statistics, ignoring non-numeric cells.
+- [x] Add reversible JSON Prettify/Original display, preserving numeric literals, strings, key order and duplicate keys; full-content copying retains the original.
+
+Table/JSON follow-up: all 24 Tkinter and 24 Qt checks passed under isolated Xvfb.
+Coverage includes independent table buttons, median for odd/even selections,
+fixed Copy/Back positions, preserved file/content copying, exact JSON numeric
+formatting, invalid JSON, existing syntax/theme/navigation, and diagram/math output.

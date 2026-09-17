@@ -12,7 +12,9 @@ Both interfaces remain available for comparison and share private paste history.
 Paste text or a clipboard screenshot anywhere. No Open or Parse step is needed.
 A paste replaces the input, extracts paths, and adds a dated group of plain links.
 Click a path to read. A small file switcher above the document jumps between files
-from the same paste or folder. Back returns to that list; Escape returns to Paths,
+from the same paste or folder. Copy copies the document (or the original image); on a list it copies the listed
+paths. Back stays in the same top-right position and is disabled at home.
+Back returns to that list; Escape returns to Paths,
 clears the input and prepares the next paste. Earlier groups stay available.
 Click a group's timestamp to view its original dump or screenshot.
 
@@ -40,13 +42,14 @@ Markdown and `.txt` files render as Markdown. Mermaid and mathematical LaTeX use
 local, pinned renderer assets. Tkinter displays the typeset diagrams/math as images
 from a separate worker on an isolated display; Qt renders them in its document
 widget. Full original content remains copyable from the menu. Source files use
-Pygments, theme-aware colors, original line numbers and word wrapping. Other text
-must be UTF-8 or BOM-marked UTF-16; unsupported encodings/binary files report errors.
+Pygments, theme-aware colors, original line numbers and word wrapping. JSON has a reversible **Prettify / Original** display control. Prettifying keeps
+exact number/string literals and does not change the file or full-content copy.
+Other text must be UTF-8 or BOM-marked UTF-16; unsupported encodings/binary files report errors.
 
 CSV/TSV and Markdown tables support cell/rectangle/row/column selections,
-count, sum, average, minimum and maximum, plus TSV copying. Ctrl/Shift extend
-selections. **Transpose** changes the view without altering the file or full-content
-copy. **Shift + scroll** moves horizontally; ordinary scroll moves vertically.
+count, sum, average, median, minimum and maximum, plus TSV copying. Ctrl/Shift extend
+selections. **Transpose**, directly above each table at its top right, changes only that
+table without altering the file or full-content copy. **Shift + scroll** moves horizontally; ordinary scroll moves vertically.
 Tkinter draws only visible table cells. Statistics use Decimal and exclude unknown
 units such as percentage/currency strings rather than treating them as numbers.
 

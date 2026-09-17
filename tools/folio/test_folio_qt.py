@@ -281,6 +281,51 @@ class UiTests(unittest.TestCase):
         self.window.copy_image();self.assertFalse(QtWidgets.QApplication.clipboard().image().isNull())
         self.window.escape();self.assertTrue(self.window.file_list.isVisible())
 
+    def test_copy_and_back_positions_stay_fixed_between_home_and_documents(self):
+        self.window.show();self.application.processEvents()
+        buttons=[self.window.top_button,self.window.back_button,self.window.copy_button,self.window.theme_button]
+        initial=[b.mapToGlobal(b.rect().topLeft()).x() for b in buttons]
+        self.assertTrue(self.window.back_button.isVisible());self.assertFalse(self.window.back_button.isEnabled())
+        file=self.path/'note.txt';file.write_text('Original file contents.')
+        batch=self.window.history.add('original dump',[file]);self.window.batches.insert(0,batch)
+        self.window.show_history();self.window.copy_button.click()
+        from PyQt5 import QtWidgets
+        self.assertEqual(QtWidgets.QApplication.clipboard().text(),str(file))
+        self.window.load_path(file);self.wait(lambda:self.window.current is not None)
+        self.application.processEvents();self.window.copy_button.click()
+        self.assertEqual(QtWidgets.QApplication.clipboard().text(),'Original file contents.')
+        self.assertEqual([b.mapToGlobal(b.rect().topLeft()).x() for b in buttons],initial)
+        self.window.document_ready(Document(self.path/'data.csv','csv','a,b',[['a','b'],['1','2']]),None)
+        self.application.processEvents()
+        self.assertEqual([b.mapToGlobal(b.rect().topLeft()).x() for b in buttons],initial)
+        self.window.escape();self.application.processEvents()
+        self.assertEqual([b.mapToGlobal(b.rect().topLeft()).x() for b in buttons],initial)
+        self.window.copy_button.click();self.assertEqual(QtWidgets.QApplication.clipboard().text(),str(file))
+
+    def test_json_prettify_is_reversible_and_preserves_copy_and_file(self):
+        from PyQt5 import QtWidgets
+        self.window.show()
+        file=self.path/'example.json';raw='{"value":1.12345678901234567890123456789,"items":[1,2]}'
+        file.write_text(raw);self.window.load_path(file);self.wait(lambda:self.window.current is not None)
+        self.application.processEvents();self.assertTrue(self.window.prettify_button.isVisible())
+        self.window.prettify_button.click()
+        self.assertIn('\n  "value": 1.12345678901234567890123456789',self.window.source.toPlainText())
+        self.window.copy_button.click();self.assertEqual(QtWidgets.QApplication.clipboard().text(),raw)
+        self.assertEqual(file.read_text(),raw)
+        self.window.prettify_button.click();self.assertEqual(self.window.source.toPlainText(),raw)
+
+    @unittest.skipUnless(RENDER,'Actual browser table controls require --render')
+    def test_markdown_transpose_buttons_are_per_table(self):
+        self.window.show()
+        source='| Name | Value |\n| --- | --- |\n| A | 1 |\n| B | 2 |\n\n| Label | Amount |\n| --- | --- |\n| C | 3 |'
+        self.window.document_ready(Document(None,'markdown',source),None)
+        self.wait(lambda:self.js("document.documentElement.dataset.folioReady==='true'"))
+        self.assertEqual(self.js("document.querySelectorAll('.table-controls button').length"),2)
+        self.js("document.querySelector('.table-controls button').click()")
+        self.assertEqual(self.js("document.querySelectorAll('article table')[0].rows.length"),2)
+        self.assertEqual(self.js("document.querySelectorAll('article table')[1].rows[1].cells.length"),3)
+        self.assertEqual(self.js("document.querySelectorAll('article table')[1].rows[1].cells[1].textContent"),'C')
+
     def test_csv_transpose_shift_wheel_and_syntax_theme(self):
         from PyQt5 import QtCore,QtGui
         self.window.show()
