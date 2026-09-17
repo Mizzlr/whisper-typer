@@ -20,12 +20,14 @@ from pathlib import Path
 from tkinter import ttk
 from urllib.parse import urlparse, unquote
 
-from PIL import Image, ImageTk, ImageGrab
+from PIL import Image, ImageTk
 from tkinterweb import HtmlFrame
 from files import Document, PathResolver, load_document, pasted_paths, image_text, unzip_contents, pretty_json
-from rendering import CSS, rendered_body
+from rendering import CSS, rendered_body, theme_colors
+from clipboard import read_clipboard
 from history import History
 from tk_widgets import Table, LIGHT, DARK
+from syntax import syntax_safe, source_style
 
 
 class TableParser(HTMLParser):
@@ -104,6 +106,7 @@ class Folio:
         self.path_input=tk.Text(self.input_frame,height=2,wrap='word',font=('JetBrains Mono',10),bd=1,relief='solid',padx=10,pady=8,undo=True)
         self.path_input.pack(fill='x')
         self.path_input.bind('<<Modified>>',self.input_changed)
+        for key in ('<Control-v>','<Control-V>','<Shift-Insert>','<<Paste>>'):self.path_input.bind(key,self.paste)
         self.content=tk.Frame(self.frame);self.content.pack(fill='both',expand=True)
         self.list_frame=tk.Frame(self.content)
         self.list_text=tk.Text(self.list_frame,wrap='none',font=('JetBrains Mono',10),cursor='hand2',bd=0,padx=5,pady=2)
@@ -137,6 +140,7 @@ class Folio:
         self.table=None;self.embedded_tables=[]
         self.status=tk.Label(self.frame,font=('JetBrains Mono',9),anchor='w');self.status.pack(fill='x')
         root.bind('<Control-v>',self.paste);root.bind('<Control-V>',self.paste)
+        root.bind('<Shift-Insert>',self.paste);root.bind('<<Paste>>',self.paste)
         root.bind('<Escape>',lambda e:self.escape());root.bind('<Control-l>',lambda e:self.escape())
         root.bind('<Control-f>',lambda e:self.find());root.bind('<Control-Shift-C>',lambda e:self.copy_content())
         root.bind('<Control-plus>',lambda e:self.zoom(1));root.bind('<Control-minus>',lambda e:self.zoom(-1))
@@ -220,18 +224,23 @@ class Folio:
 
     def paste(self,event=None,text=None,image=None):
         if image is None and text is None:
-            try:text=self.root.clipboard_get()
-            except tk.TclError:
-                try:image=ImageGrab.grabclipboard()
-                except (OSError,NotImplementedError):image=None
+            self.paste_generation+=1;generation=self.paste_generation
+            if self.paste_timer:self.root.after_cancel(self.paste_timer);self.paste_timer=None
+            self.status.configure(text='Reading clipboard…')
+            def ready(value,error):
+                if generation!=self.paste_generation:return
+                if error:self.status.configure(text=error);return
+                text,image=value;self.paste(text=text,image=image)
+            self.submit(read_clipboard,ready)
+            return 'break'
         self.escape()
         if isinstance(image,Image.Image):
             data=io.BytesIO();image.save(data,'PNG');png=data.getvalue()
             self.paste_generation+=1;generation=self.paste_generation;self.status.configure(text='Reading image…')
             def ready(value,error):
                 if generation!=self.paste_generation:return
-                if error:self.status.configure(text=error);return
-                self.resolve_dump(value,png)
+                warning='Image saved; text could not be read.' if error else 'Image saved; no readable text.' if not value.strip() else None
+                self.resolve_dump(value or '',png,warning)
             self.submit(lambda:image_text(png),ready)
         elif text is not None:
             self.path_input.delete('1.0','end');self.path_input.insert('1.0',text)
@@ -242,7 +251,7 @@ class Folio:
         text=self.path_input.get('1.0','end-1c').strip()
         if text:self.resolve_dump(text)
 
-    def resolve_dump(self,source,image=None):
+    def resolve_dump(self,source,image=None,warning=None):
         self.paste_generation+=1;generation=self.paste_generation
         self.status.configure(text='Finding files…')
         resolver=self.resolver
@@ -256,9 +265,13 @@ class Folio:
             return list(dict.fromkeys(paths))
         def ready(paths,error):
             if generation!=self.paste_generation:return
-            if error:self.status.configure(text=error);return
+            notice=warning
+            if error:
+                if image is None:self.status.configure(text=error);return
+                paths=[];notice='Image saved; paths could not be resolved.'
             batch=self.history.add(source,paths,image);self.batches.insert(0,batch)
             self.show_history()
+            if notice:self.status.configure(text=notice)
         self.submit(resolve,ready)
 
     def hide_views(self):
@@ -294,7 +307,7 @@ class Folio:
         if self.context_label=='Paths':
             for batch in self.batches:
                 item(('◩ ' if batch['has_image'] else '≡ ')+batch['stamp'],lambda b=batch:self.open_dump(b),True)
-                for path in batch['paths']:item(self.label_path(path),lambda p=path,b=batch:self.open_group_path(p,b))
+                for path in batch['paths']:item(('▸ ' if Path(path).is_dir() else '')+self.label_path(path),lambda p=path,b=batch:self.open_group_path(p,b))
                 if not batch['paths']:item('Pasted content',lambda b=batch:self.open_dump(b))
         else:
             for path in self.context_entries:item(('▸ ' if path.is_dir() else '')+self.label_path(path),lambda p=path:self.load_path(p))
@@ -471,9 +484,7 @@ class Folio:
         css=CSS.replace('article','.article').replace(':root {color-scheme:light}','')
         # Tkhtml renders conservative HTML/CSS; advanced scripts never run here.
         css+='\n.article {padding:25px 36px;max-width:1000px} object {display:block} img {max-width:100%}\n'
-        if self.dark:
-            mapping={'#fbf8f1':'#181d23','#302f2b':'#e2e7eb','#263e35':'#c1e4cb','#356b58':'#aadbbd','#f0ede4':'#252d36','#e1ddcf':'#343e49','#687469':'#a8b6aa','#fffdf8':'#20262e','#dfddcf':'#343e49','#f4f1e9':'#252d36','#ddd8ca':'#343e49'}
-            for old,new in mapping.items():css=css.replace(old,new)
+        css=theme_colors(css,self.dark)
         base=self.current.path.parent.as_uri()+'/' if self.current.path else Path.home().as_uri()+'/'
         self.html.load_html('<html><head><style>'+css+'</style></head><body><div class="article">'+body+'</div></body></html>',base_url=base)
         for index,values in enumerate(rows):
@@ -525,13 +536,16 @@ class Folio:
 
     def highlight_source(self):
         if not self.current.path:return
+        text=self.source.get('1.0','end-1c')
+        if not syntax_safe(text):
+            self.status.configure(text='Raw text · syntax coloring skipped for large files or long lines.')
+            return
         from pygments import lex
         from pygments.lexers import get_lexer_for_filename
-        from pygments.styles import get_style_by_name
         from pygments.util import ClassNotFound
         try:lexer=get_lexer_for_filename(self.current.path.name)
         except ClassNotFound:return
-        style=get_style_by_name('monokai' if self.dark else 'friendly')
+        style=source_style(self.dark)
         document=self.current;navigation=self.navigation
         text=self.source.get('1.0','end-1c')
         def tokens():

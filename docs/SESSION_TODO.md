@@ -257,3 +257,17 @@ Table/JSON follow-up: all 24 Tkinter and 24 Qt checks passed under isolated Xvfb
 Coverage includes independent table buttons, median for odd/even selections,
 fixed Copy/Back positions, preserved file/content copying, exact JSON numeric
 formatting, invalid JSON, existing syntax/theme/navigation, and diagram/math output.
+
+- [x] Prefer clipboard image data over alternate text; consume Tk input paste events before default text insertion.
+- [x] Retain original screenshots on empty/failed OCR and show folder arrows consistently.
+- [x] Use pure black/white reader backgrounds and Coldark-inspired source colors in both interfaces.
+- [x] Skip tokenization for large source files or very long lines, preserving complete raw display and copying.
+
+Clipboard/source follow-up: isolated tests cover a real clipboard owner offering
+both image and text, keyboard/virtual paste events, encoded image MIME, empty and
+failed OCR, path-resolution failure, folder arrows and large/long-line raw source.
+Folio was explicitly closed at the user's request and will remain closed after
+installation; changes take effect on the next launch.
+Validation: 27 Tkinter checks and 26 Qt checks passed, including the corrected
+isolated source/theme regression. All ten installed modules match source, and
+the Folio service remains inactive with no running main process.

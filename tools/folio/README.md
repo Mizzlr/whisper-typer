@@ -85,3 +85,15 @@ xvfb-run -a env QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu QT_QUICK_BACKEND=softwa
 [Folio's Tk HTML widget](https://tkinterweb.readthedocs.io/en/latest/api/htmlframe.html),
 [Mermaid](https://mermaid.js.org/config/usage),
 [MathJax](https://docs.mathjax.org/en/v3.2/web/configuration.html).
+
+Image pastes prefer image data when the clipboard also offers alternate text.
+Encoded PNG/JPEG/BMP/TIFF/WebP formats are supported. Tk reads the X11 selection
+in a worker with bounded subprocess waits; Qt accepts both native and encoded
+image MIME data. Original images remain in private history even when OCR yields
+no text or fails. Folder links carry a small ▸ arrow.
+
+Both interfaces use white/light and black/dark backgrounds, neutral controls and
+[Coldark-inspired syntax colors](https://github.com/PrismJS/prism-themes).
+Source views skip tokenization for files above 150,000 characters or lines above
+2,000 characters, displaying the complete raw text instead. Full-content Copy
+always retains the original. This bounds syntax work, not file contents.

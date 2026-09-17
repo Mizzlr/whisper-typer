@@ -153,15 +153,18 @@ document.addEventListener('DOMContentLoaded',async()=>{
 
 
 def theme_colors(text,dark):
-    if not dark:return text
-    colors={'#fbf8f1':'#181d23','#fffdf8':'#20262e','#353b33':'#e2e7eb','#302f2b':'#e2e7eb','#263e35':'#c1e4cb',
-            '#356b58':'#aadbbd','#315443':'#aadbbd','#315543':'#aadbbd','#526b56':'#aadbbd','#263d2b':'#dbf0df',
-            '#858879':'#91a0b0','#8e9383':'#91a0b0','#949b8b':'#91a0b0','#f4f1e8':'#252d36','#f0ede4':'#252d36',
-            '#f2f0e7':'#252d36','#f0eee5':'#252d36','#f4f1e9':'#252d36','#eeede3':'#252d36','#eeeae0':'#20262e',
-            '#f5f2e9':'#252d36','#dedbce':'#343e49','#e1ddcf':'#343e49','#dddccd':'#343e49','#dedbcd':'#343e49',
-            '#e5e2d8':'#343e49','#e5e0d4':'#343e49','#687469':'#a8b6aa','#dfddcf':'#343e49',
-            '#ddd8ca':'#343e49','#e6ede2':'#2d4437','#e1ebdc':'#2d4437','#e9eee2':'#2d4437','#dfe8d9':'#375645',
-            '#bed5af':'#375645','#17271a':'#f0fff4','#2b4d37':'#f0fff4','#3f5143':'#aadbbd','#435240':'#aadbbd',
-            '#e8eee4':'#2d4437','#cfe0c7':'#375645','#304439':'#e2e7eb','#e7eee2':'#2d4437'}
-    import re
-    return re.sub(r'#[0-9a-fA-F]{6}',lambda m:colors.get(m[0].lower(),m[0]),text).replace('color-scheme:light','color-scheme:dark')
+    from tk_widgets import LIGHT, DARK
+    p=DARK if dark else LIGHT
+    groups={
+        'bg':['#fbf8f1'], 'panel':['#fffdf8','#eeeae0'],
+        'fg':['#353b33','#302f2b','#263e35','#263d2b','#304439'],
+        'green':['#356b58','#315443','#315543','#526b56','#3f5143','#435240','#527564','#6b7b64','#6c8d64'],
+        'muted':['#858879','#8e9383','#949b8b','#687469','#89927f','#aaa99e'],
+        'alt':['#f4f1e8','#f0ede4','#f2f0e7','#f0eee5','#f4f1e9','#eeede3','#f5f2e9'],
+        'line':['#dedbce','#e1ddcf','#dddccd','#dedbcd','#e5e2d8','#e5e0d4','#dfddcf','#ddd8ca','#dedacc','#c4d5c8','#93b19e','#cad5c8','#95b08a','#a8b8a1','#b0c1a8','#9eb493','#789181'],
+        'button':['#e6ede2','#e1ebdc','#e9eee2','#e8eee4','#e7eee2'],
+        'selected':['#dfe8d9','#bed5af','#cfe0c7'], 'selected_fg':['#17271a','#2b4d37'],
+    }
+    colors={color:p[key] for key,values in groups.items() for color in values}
+    result=re.sub(r'#[0-9a-fA-F]{6}',lambda m:colors.get(m[0].lower(),m[0]),text)
+    return result.replace('color-scheme:light','color-scheme:dark') if dark else result

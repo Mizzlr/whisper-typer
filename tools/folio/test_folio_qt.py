@@ -366,6 +366,40 @@ class UiTests(unittest.TestCase):
         self.window.resolver.repos=[repo];self.window.show_adhoc()
         self.assertEqual(self.window.context_entries,[repo/'adhoc'])
 
+    def test_long_line_and_large_source_skip_tokenization_preserve_copy_and_theme(self):
+        from unittest.mock import patch
+        self.window.show()
+        for source in ('<div data-value="'+'x'*6000+'">text</div>', 'value = 1\n'*20000):
+            with patch('pygments.lex',side_effect=AssertionError('Large source must not be tokenized')) as tokenize:
+                self.window.document_ready(Document(self.path/'large.html','text',source),None)
+                self.application.processEvents();tokenize.assert_not_called()
+            self.assertEqual(self.window.source.toPlainText(),source)
+            self.assertIn('Raw text',self.window.status.text())
+            self.window.copy_content();self.assertEqual(self.application.clipboard().text(),source)
+        self.window.document_ready(Document(self.path/'small.py','text','import os\nvalue = 42'),None)
+        self.application.processEvents()
+        formats=self.window.source.document().firstBlock().layout().formats()
+        self.assertEqual(formats[0].format.foreground().color().name(),'#a04900')
+        self.window.toggle_theme();self.application.processEvents()
+        formats=self.window.source.document().firstBlock().layout().formats()
+        self.assertEqual(formats[0].format.foreground().color().name(),'#e9ae7e')
+        self.assertIn('background:#000000',self.window.styleSheet())
+
+    def test_encoded_image_with_text_and_ocr_empty_or_failure_stays_in_history(self):
+        from unittest.mock import patch
+        from PyQt5 import QtCore,QtGui
+        image=QtGui.QImage(30,20,QtGui.QImage.Format_RGB32);image.fill(QtGui.QColor('green'))
+        encoded=QtCore.QByteArray();buffer=QtCore.QBuffer(encoded);buffer.open(QtCore.QIODevice.WriteOnly);image.save(buffer,'PNG')
+        for outcome in ('',RuntimeError('synthetic OCR failure')):
+            mime=QtCore.QMimeData();mime.setData('image/png',encoded);mime.setText('alternate clipboard text')
+            with patch('qt_app.image_text',side_effect=outcome if isinstance(outcome,Exception) else None,return_value=''):
+                self.window.path_input.insertFromMimeData(mime)
+                self.wait(lambda:not self.window.resolving)
+            batch=self.window.batches[0];self.assertTrue(batch['has_image'])
+            self.assertEqual(self.window.history.image(batch['id']),bytes(encoded))
+        folder=self.path/'folder';folder.mkdir()
+        item=self.window.add_file_item(folder);self.assertTrue(item.text().startswith('▸ '))
+
     def test_pdf_load_extract_page_navigation_zoom_pan(self):
         from PyQt5 import QtGui,QtCore
         path=self.path/'sample.pdf'

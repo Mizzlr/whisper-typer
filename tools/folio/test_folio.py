@@ -112,7 +112,7 @@ class FilesTests(unittest.TestCase):
         from rendering import document_html
         result=document_html('`#fbf8f1` is a literal color.',dark=True)
         self.assertIn('<code>#fbf8f1</code>',result)
-        self.assertIn('background:#181d23',result)
+        self.assertIn('background:#000000',result)
 
     def test_markdown_math_mermaid_and_sanitization(self):
         body=rendered_body('# Heading\n\n$x_i = \\frac{a}{b}$\n\n```mermaid\nflowchart TD\n A --> B\n```\n\n<script>alert(1)</script>\n<img src="x" onerror="alert(1)">')
@@ -231,6 +231,59 @@ class TkTests(unittest.TestCase):
         self.assertEqual(self.window.source.get('1.0','end-1c'),source)
         self.assertTrue(any(name.startswith('syntax') and self.window.source.tag_ranges(name) for name in self.window.source.tag_names()))
         self.window.copy_content();self.assertEqual(self.root.clipboard_get(),source)
+
+    def test_long_line_and_large_source_skip_tokenization_preserve_copy_and_theme(self):
+        from unittest.mock import patch
+        for source in ('<div data-value="'+'x'*6000+'">text</div>', 'value = 1\n'*20000):
+            with patch('pygments.lex',side_effect=AssertionError('Large source must not be tokenized')) as tokenize:
+                self.window.select_document(Document(self.path/'large.html','text',source));self.idle()
+                tokenize.assert_not_called()
+            self.assertEqual(self.window.source.get('1.0','end-1c'),source)
+            self.window.copy_content();self.assertEqual(self.root.clipboard_get(),source)
+            self.assertIn('Raw text',self.window.status['text'])
+        self.window.select_document(Document(self.path/'small.py','text','import os\nvalue = 42'));self.idle()
+        self.assertEqual(self.window.source['bg'],'#ffffff')
+        self.assertIn('syntaxa04900',self.window.source.tag_names('1.0'))
+        self.window.toggle_theme();self.idle()
+        self.assertEqual(self.window.source['bg'],'#000000')
+        self.assertIn('syntaxe9ae7e',self.window.source.tag_names('1.0'))
+
+    def test_image_ocr_empty_and_failure_preserve_original_and_folder_arrow(self):
+        from unittest.mock import patch
+        from PIL import Image
+        image=Image.new('RGB',(40,30),'green')
+        for outcome in ('',RuntimeError('synthetic OCR failure')):
+            with patch('app.image_text',side_effect=outcome if isinstance(outcome,Exception) else None,return_value=''):
+                self.window.paste(image=image);self.idle()
+            batch=self.window.batches[0]
+            self.assertTrue(batch['has_image']);self.assertTrue(self.window.history.image(batch['id']))
+        with patch('app.image_text',return_value='reports/note.md'), patch.object(self.window.resolver,'resolve',side_effect=RuntimeError('synthetic resolution failure')):
+            self.window.paste(image=image);self.idle()
+        self.assertTrue(self.window.batches[0]['has_image'])
+        folder=self.path/'folder';folder.mkdir()
+        self.window.batches.insert(0,self.window.history.add(str(folder),[folder]))
+        self.window.show_history()
+        self.assertIn('▸ '+str(folder),self.window.list_text.get('1.0','end'))
+
+    def test_real_clipboard_image_with_text_via_ctrl_v_and_virtual_paste(self):
+        from unittest.mock import patch
+        from PIL import Image
+        png=self.path/'synthetic.png';Image.new('RGB',(30,20),'green').save(png)
+        # A separate Qt owner offers both text and image on this isolated Xvfb.
+        code="from PyQt5 import QtCore,QtGui,QtWidgets; import sys; app=QtWidgets.QApplication([]); data=QtCore.QMimeData(); data.setImageData(QtGui.QImage(sys.argv[1])); data.setText('alternate clipboard text'); app.clipboard().setMimeData(data); print('ready',flush=True); app.exec_()"
+        owner=subprocess.Popen(['/usr/bin/python3','-c',code,str(png)],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+        try:
+            self.assertEqual(owner.stdout.readline().strip(),'ready')
+            from clipboard import read_clipboard
+            text,image=read_clipboard();self.assertIsNone(text);self.assertEqual(image.size,(30,20))
+            with patch('app.image_text',return_value=''):
+                self.window.path_input.focus_force();self.root.update()
+                self.window.path_input.event_generate('<Control-v>');self.idle()
+                self.assertEqual(len(self.window.batches),1);self.assertTrue(self.window.batches[0]['has_image'])
+                self.window.path_input.event_generate('<<Paste>>');self.idle()
+                self.assertEqual(len(self.window.batches),2);self.assertTrue(self.window.batches[0]['has_image'])
+        finally:
+            owner.terminate();owner.wait(timeout=5);owner.stdout.close()
 
     def test_pdf_opens_firefox_without_pdf_rasterization(self):
         from unittest.mock import patch

@@ -21,6 +21,7 @@ from files import Document, PathResolver, load_document, pasted_paths, pdf_page,
 from rendering import VENDOR, document_html, theme_colors
 from cell_stats import selection_summary, display_summary
 from history import History
+from syntax import syntax_safe, source_style
 
 
 class Signals(QtCore.QObject):
@@ -91,7 +92,7 @@ class CsvModel(QtCore.QAbstractTableModel):
             row = self.rows[index.row()]
             return row[index.column()] if index.column() < len(row) else ''
         if role == QtCore.Qt.BackgroundRole and index.row() == 0:
-            return QtGui.QColor('#2d4437' if self.dark else '#e6ede2')
+            return QtGui.QColor('#202020' if self.dark else '#eeeeee')
 
     def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):
         if role == QtCore.Qt.DisplayRole:
@@ -165,9 +166,15 @@ class PasteInput(QtWidgets.QPlainTextEdit):
     image_pasted = QtCore.pyqtSignal(object)
 
     def insertFromMimeData(self, source):
+        image=QtGui.QImage()
         if source.hasImage():
-            image=source.imageData()
-            image=image.toImage() if isinstance(image,QtGui.QPixmap) else QtGui.QImage(image)
+            value=source.imageData()
+            if isinstance(value,QtGui.QPixmap):image=value.toImage()
+            elif isinstance(value,QtGui.QImage):image=value.copy()
+        if image.isNull():
+            for kind in ('image/png','image/jpeg','image/bmp','image/tiff','image/webp'):
+                if source.hasFormat(kind) and image.loadFromData(source.data(kind)):break
+        if not image.isNull():
             self.image_pasted.emit(image)
         elif source.hasText():
             # A new paste is a new request; no Select All step is required.
@@ -182,8 +189,8 @@ class LineNumbers(QtWidgets.QWidget):
     def paintEvent(self,event):
         editor=self.editor
         painter=QtGui.QPainter(self)
-        painter.fillRect(event.rect(),QtGui.QColor('#252d36' if editor.property('dark') else '#f5f2e9'))
-        painter.setPen(QtGui.QColor('#91a0b0' if editor.property('dark') else '#949b8b'))
+        painter.fillRect(event.rect(),QtGui.QColor('#101010' if editor.property('dark') else '#f6f6f6'))
+        painter.setPen(QtGui.QColor('#a8a8a8' if editor.property('dark') else '#595959'))
         painter.setFont(editor.font())
         block=editor.firstVisibleBlock()
         top=int(editor.blockBoundingGeometry(block).translated(editor.contentOffset()).top())
@@ -240,13 +247,12 @@ class SourceHighlight(QtGui.QSyntaxHighlighter):
         super().__init__(document)
         from pygments import lex
         from pygments.lexers import get_lexer_for_filename
-        from pygments.styles import get_style_by_name
         from pygments.util import ClassNotFound
         self.lines={}
-        if not path:return
+        if not path or not syntax_safe(document.toPlainText()):return
         try:lexer=get_lexer_for_filename(path.name)
         except ClassNotFound:return
-        style=get_style_by_name('monokai' if dark else 'friendly')
+        style=source_style(dark)
         line=0;offset=0
         for token,value in lex(document.toPlainText(),lexer):
             color=style.style_for_token(token)['color']
@@ -555,7 +561,7 @@ QTabBar::tab:hover {background:#f0eee5}
         else:
             for index in range(self.file_list.count()):
                 item=self.file_list.item(index)
-                item.setForeground(QtGui.QColor('#91a0b0' if item.data(QtCore.Qt.UserRole+1) else '#aadbbd') if self.dark else QtGui.QColor('#8e9383' if item.data(QtCore.Qt.UserRole+1) else '#315443'))
+                item.setForeground(QtGui.QColor('#a8a8a8' if item.data(QtCore.Qt.UserRole+1) else '#6cb8e6') if self.dark else QtGui.QColor('#595959' if item.data(QtCore.Qt.UserRole+1) else '#005a8e'))
 
     def show_adhoc(self):
         self.context_stack=[]
@@ -643,7 +649,7 @@ QTabBar::tab:hover {background:#f0eee5}
             header=QtWidgets.QListWidgetItem(('◩ ' if batch['has_image'] else '≡ ')+batch['stamp'])
             header.setData(QtCore.Qt.UserRole,f"context:{batch['id']}")
             header.setData(QtCore.Qt.UserRole+1,True)
-            header.setForeground(QtGui.QColor('#91a0b0' if self.dark else '#8e9383'))
+            header.setForeground(QtGui.QColor('#a8a8a8' if self.dark else '#595959'))
             header.setFont(QtGui.QFont('JetBrains Mono',9))
             header.setSizeHint(QtCore.QSize(0,36))
             self.file_list.addItem(header)
@@ -745,7 +751,8 @@ QTabBar::tab:hover {background:#f0eee5}
             if not image.save(buffer,'PNG'):
                 raise ValueError('Could not read clipboard image.')
             png=bytes(data)
-            return image_text(png),png
+            try:return image_text(png),png,None
+            except Exception:return '',png,'Image saved; text could not be read.'
         def ready(result,error):
             if generation!=self.paste_generation:
                 return
@@ -753,9 +760,12 @@ QTabBar::tab:hover {background:#f0eee5}
             if error:
                 self.status.setText('Image could not be read: '+error)
                 return
-            text,png=result
+            text,png,warning=result
             if not text.strip():
-                self.status.setText('No readable text in image')
+                self.batches.insert(0,self.history.add(text,[],png))
+                self.pending_image=None
+                self.path_input.blockSignals(True);self.path_input.clear();self.path_input.blockSignals(False)
+                self.show_history();self.status.setText(warning or 'Image saved; no readable text.')
                 return
             self.pending_image=png
             self.path_input.blockSignals(True)
@@ -839,7 +849,7 @@ QTabBar::tab:hover {background:#f0eee5}
         for destination in self.zip_roots.values():
             if path.is_relative_to(destination):name=str(path.relative_to(destination));break
         item = QtWidgets.QListWidgetItem(('▸ ' if path.is_dir() else '')+name)
-        item.setForeground(QtGui.QColor('#aadbbd' if self.dark else '#315443'))
+        item.setForeground(QtGui.QColor('#6cb8e6' if self.dark else '#005a8e'))
         item.setData(QtCore.Qt.UserRole, str(path))
         item.setToolTip(str(path))
         item.setSizeHint(QtCore.QSize(0,30))
@@ -1118,12 +1128,13 @@ QTabBar::tab:hover {background:#f0eee5}
             if self.pretty:
                 try:text=pretty_json(text)
                 except (ValueError,RecursionError) as exc:self.pretty=False;self.status.setText('Cannot prettify: '+str(exc))
+            if hasattr(self,'highlighter'):self.highlighter.setDocument(None);self.highlighter.deleteLater();del self.highlighter
             self.source.setPlainText(text)
             if doc.path and doc.path.suffix.lower()=='.json':
                 self.prettify_button.setText('Original' if self.pretty else 'Prettify')
                 self.prettify_button.show()
-            if hasattr(self,'highlighter'):self.highlighter.setDocument(None);self.highlighter.deleteLater()
             self.highlighter=SourceHighlight(self.source.document(),doc.path,self.dark)
+            if not syntax_safe(text):self.status.setText('Raw text · syntax coloring skipped for large files or long lines.')
             self.views.setCurrentWidget(self.source)
         elif doc.kind == 'csv':
             self.transposed=False

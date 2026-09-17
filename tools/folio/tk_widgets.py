@@ -5,8 +5,8 @@ import tkinter as tk
 from tkinter import ttk
 from cell_stats import selection_summary, display_summary
 
-LIGHT = dict(bg='#fbf8f1',panel='#fffdf8',fg='#303b32',muted='#858879',line='#dedbce',green='#315543',selected='#bed5af',selected_fg='#17271a',button='#e6eddf',alt='#f1eee5')
-DARK = dict(bg='#181d23',panel='#20262e',fg='#e2e7eb',muted='#91a0b0',line='#343e49',green='#aadbbd',selected='#375645',selected_fg='#f0fff4',button='#2d4437',alt='#252d36')
+LIGHT = dict(bg='#ffffff',panel='#ffffff',fg='#111111',muted='#595959',line='#d0d0d0',green='#005a8e',selected='#cbdff5',selected_fg='#111111',button='#eeeeee',alt='#f6f6f6')
+DARK = dict(bg='#000000',panel='#000000',fg='#f5f5f5',muted='#a8a8a8',line='#383838',green='#6cb8e6',selected='#193b5c',selected_fg='#ffffff',button='#202020',alt='#101010')
 
 
 class Table(tk.Frame):
