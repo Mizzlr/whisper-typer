@@ -176,3 +176,15 @@ attempts were disclosed and stopped; no speculative mouse remapping was made.
 Summary-action batch: 38 UI checks passed, including historical reload, stale
 summary recovery and unchanged summary text with advancing coverage. The UI
 helper was deployed independently; existing recordings and summaries are preserved.
+
+- [x] Build and install Folio as a separate local Qt reading desk for repo-resolved paths, Markdown, CSV/TSV, text, PDFs and pasted content.
+- [x] Render Mermaid and LaTeX math offline with pinned local renderer assets.
+- [x] Add selected-cell/row/column statistics and copying for CSV and Markdown tables.
+
+Folio batch: 13 behavioral checks passed in isolated Xvfb, including actual
+Mermaid SVG/MathJax output, Markdown table statistics, code copying, CSV decimal
+statistics and TSV copying, PDF extraction/paging/zoom/pan, and asynchronous
+pasted-path loading. Live discovery found 16 Git repos in 13.47 ms; two exact
+path probes resolved in 1.83 and 32.83 ms. Installed through tools/folio/install.py
+with checksum-pinned offline assets and an Applications launcher. Whisper Typer
+services were not changed. Folio starts on demand; no boot autostart was added.
