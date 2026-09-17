@@ -223,6 +223,17 @@ class NumberedText(QtWidgets.QPlainTextEdit):
             self.update_gutter()
 
 
+class FileListDelegate(QtWidgets.QStyledItemDelegate):
+    def paint(self,painter,option,index):
+        super().paint(painter,option,index)
+        if index.data(QtCore.Qt.UserRole+1) and index.row()>0:
+            painter.save()
+            painter.setPen(QtGui.QColor('#dedbce'))
+            painter.drawLine(option.rect.left()+8,option.rect.top()+1,
+                             option.rect.right()-8,option.rect.top()+1)
+            painter.restore()
+
+
 class Folio(QtWidgets.QMainWindow):
     def __init__(self,history_path=None):
         super().__init__()
@@ -287,13 +298,15 @@ class Folio(QtWidgets.QMainWindow):
         self.path_input.textChanged.connect(self.schedule_paste)
         self.path_input.image_pasted.connect(self.parse_image)
         self.file_list = QtWidgets.QListWidget()
+        self.file_list.setItemDelegate(FileListDelegate(self.file_list))
+        self.file_list.viewport().setCursor(QtCore.Qt.PointingHandCursor)
         self.file_list.setViewMode(QtWidgets.QListView.ListMode)
         self.file_list.setFlow(QtWidgets.QListView.TopToBottom)
         self.file_list.setMovement(QtWidgets.QListView.Static)
         self.file_list.setResizeMode(QtWidgets.QListView.Adjust)
         self.file_list.setWrapping(False)
         self.file_list.setWordWrap(False)
-        self.file_list.setSpacing(3)
+        self.file_list.setSpacing(0)
         self.file_list.setTextElideMode(QtCore.Qt.ElideMiddle)
         self.file_list.setMinimumHeight(0)
         self.file_list.itemClicked.connect(self.activate_item)
@@ -412,7 +425,8 @@ QPushButton:checked {background:#e1ebdc;color:#315543;border-color:#b0c1a8}
 QPushButton:disabled {color:#aaa99e}
 QLineEdit,QPlainTextEdit {background:#fffdf8;border:1px solid #dedbcd;border-radius:7px;padding:10px;selection-background-color:#bed5af;selection-color:#17271a}
 QListWidget {border:0;background:#fbf8f1;padding:0}
-QListWidget::item {background:#f1eee4;border:1px solid #dedbcd;padding:3px 8px;border-radius:5px}
+QListWidget::item {background:transparent;border:0;padding:3px 8px}
+QListWidget::item:hover {background:#f2f0e7}
 QListWidget::item:selected {background:#dfe8d9;color:#2b4d37}
 QTableView {background:#fffdf8;alternate-background-color:#f4f1e9;border:1px solid #dedbcd;gridline-color:#e5e2d8;selection-background-color:#bed5af;selection-color:#17271a}
 QTableView::item:selected {background:#bed5af;color:#17271a}
@@ -491,8 +505,10 @@ QSplitter::handle {background:#e5e0d4;width:1px}
         for batch in self.batches:
             header=QtWidgets.QListWidgetItem(('◩ ' if batch['has_image'] else '≡ ')+batch['stamp'])
             header.setData(QtCore.Qt.UserRole,f"context:{batch['id']}")
+            header.setData(QtCore.Qt.UserRole+1,True)
             header.setForeground(QtGui.QColor('#8e9383'))
-            header.setSizeHint(QtCore.QSize(0,28))
+            header.setFont(QtGui.QFont('JetBrains Mono',9))
+            header.setSizeHint(QtCore.QSize(0,36))
             self.file_list.addItem(header)
             for path in batch['paths']:
                 self.add_file_item(Path(path))
@@ -509,6 +525,7 @@ QSplitter::handle {background:#e5e0d4;width:1px}
         self.date.show()
         self.back_button.hide()
         self.status.clear()
+        self.setWindowTitle('Folio')
         self.file_list.verticalScrollBar().setValue(self.history_scroll)
 
     def load_more_history(self,value):
@@ -526,7 +543,6 @@ QSplitter::handle {background:#e5e0d4;width:1px}
             self.show_history()
             bar.blockSignals(False)
         self.loading_history=False
-        self.setWindowTitle('Folio')
 
     def show_recent(self):
         self.context_stack=[]
@@ -678,9 +694,10 @@ QSplitter::handle {background:#e5e0d4;width:1px}
         except ValueError:
             name = str(path)
         item = QtWidgets.QListWidgetItem(('▸ ' if path.is_dir() else '')+name)
+        item.setForeground(QtGui.QColor('#315443'))
         item.setData(QtCore.Qt.UserRole, str(path))
         item.setToolTip(str(path))
-        item.setSizeHint(QtCore.QSize(0,36))
+        item.setSizeHint(QtCore.QSize(0,30))
         self.file_list.addItem(item)
         return item
 

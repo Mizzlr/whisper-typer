@@ -212,3 +212,9 @@ contents stay unchanged. Synthetic fixtures only.
 Contrast batch: existing 18 behavioral checks passed; selected cells and statistics
 were visually checked on a synthetic CSV in isolated Xvfb. No private file data
 was used in the regression fixture or preview.
+
+- [x] Replace Folio boxed file rows with plain links, muted timestamp headers and a thin separator between paste groups.
+
+Plain-list batch: three relevant group/folder/image interaction checks passed in
+isolated Xvfb; synthetic list preview verified without private data. History view
+also resets the window title after leaving a document.
