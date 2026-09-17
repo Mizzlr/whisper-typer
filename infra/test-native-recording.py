@@ -35,8 +35,11 @@ class RecorderTests(unittest.TestCase):
     def test_recording_uses_shared_journal_filters(self):
         self.replay(False,True)
 
-    def replay(self,fail,filter_texts=False):
-        count=[]
+    def test_unknown_markers_are_cleaned_before_punctuation_and_percentages_survive(self):
+        self.replay(False,markers=True)
+
+    def replay(self,fail,filter_texts=False,markers=False):
+        count=[];punctuation_inputs=[]
         class Handler(BaseHTTPRequestHandler):
             protocol_version='HTTP/1.1'
             def log_message(self,*_): pass
@@ -50,8 +53,11 @@ class RecorderTests(unittest.TestCase):
                     code=500 if fail else 200
                     payload={'text':'First sentence' if len(count)==1 else 'Final tail'}
                     if filter_texts:payload={'text':'Thank you' if len(count)==1 else 'Okay'}
+                    if markers:payload={'text':'First <Unk>sentence 100%' if len(count)==1 else 'Final<UNK>tail 12.5%'}
                 else:
                     code=200;payload={'text':json.loads(body)['text']+'.'}
+                    punctuation_inputs.append(json.loads(body)['text'])
+                    if markers:payload={'text':'First <Unk>sentence 100%.' if len(count)==1 else 'Final tail 12.5.'}
                 encoded=json.dumps(payload).encode()
                 self.send_response(code);self.send_header('Content-Type','application/json')
                 self.send_header('Content-Length',str(len(encoded)));self.end_headers();self.wfile.write(encoded)
@@ -92,6 +98,12 @@ class RecorderTests(unittest.TestCase):
                     self.assertNotIn('Thank you',journal);self.assertNotIn('Okay',journal)
                     raw=next((p/'journal').glob('*.unfiltered.md')).read_text()
                     self.assertIn('Thank you',raw);self.assertIn('Okay',raw)
+                elif markers:
+                    chunks=[e['payload'] for e in events if e['payload']['status']=='chunk']
+                    self.assertEqual(punctuation_inputs,['First sentence 100%','Final tail 12.5%'])
+                    self.assertEqual([c['text'] for c in chunks],punctuation_inputs)
+                    self.assertEqual([c['raw_text'] for c in chunks],['First <Unk>sentence 100%','Final<UNK>tail 12.5%'])
+                    self.assertTrue(all(c['journal_saved'] for c in chunks))
                 else:
                     chunks=[e['payload'] for e in events if e['payload']['status']=='chunk']
                     self.assertEqual([e['seq'] for e in chunks],[1,2])

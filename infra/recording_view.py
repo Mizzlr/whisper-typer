@@ -36,6 +36,8 @@ class RecordingView(tk.Frame):
         scrollbar.configure(command=self.scroll)
         self.text.tag_configure('time',foreground=style.METADATA,font=(style.FONT,9),spacing1=5,spacing3=3)
         self.text.tag_configure('body',spacing3=8)
+        self.line_height=tkfont.Font(root=self,font=self.text.cget('font')).metrics('linespace')
+        self.char_width=max(1,tkfont.Font(root=self,font=self.text.cget('font')).measure('M'))
         self.bind_wheel(self,self.text,scrollbar,rail,self.tabs,self.transcript_button,self.summary_button,self.copy_summary,self.note,self.topic)
         self.update_row(row)
 
@@ -51,10 +53,17 @@ class RecordingView(tk.Frame):
 
     def finish_text_layout(self):
         self.layout_timer=None
+        if self.text.winfo_width()<=10:return
         self.text.tk.call(self.text._w,'sync')
-        pixels=self.text.count('1.0','end-1c','ypixels')
-        content=(pixels[0] if pixels else 0)+tkfont.Font(root=self,font=self.text.cget('font')).metrics('linespace')+4
-        height=min(self.maximum_height,max(48,self.tabs.winfo_reqheight()+content))
+        source=self.summary if self.mode=='summary' else '\n'.join(segment['text'] for segment in self.segments)
+        capacity=max(1,(self.maximum_height-self.tabs.winfo_reqheight())//self.line_height)
+        columns=max(1,(self.text.winfo_width()-6)//self.char_width)
+        if len(source)>columns*capacity or source.count('\n')>=capacity:
+            height=self.maximum_height
+        else:
+            pixels=self.text.count('1.0','end-1c','ypixels')
+            content=(pixels[0] if pixels else 0)+self.line_height+4
+            height=min(self.maximum_height,max(48,self.tabs.winfo_reqheight()+content))
         if int(self.cget('height'))!=height:
             self.configure(height=height)
             self.style.queue_header_resize()
@@ -70,6 +79,9 @@ class RecordingView(tk.Frame):
         self.queue_text_layout()
 
     def wheel(self,direction):
+        top,bottom=self.text.yview()
+        if (direction<0 and top<=1e-9) or (direction>0 and bottom>=1-1e-9):
+            return self.style.wheel(direction)
         self.text.yview_scroll(direction*3,'units')
         self.track_manual_scroll()
         return 'break'

@@ -359,7 +359,8 @@ fn capture(config: Config, output: &Path, events: Arc<Events>) -> Result<(), Str
             };
             match raw {
                 Ok(raw) if !raw.trim().is_empty() => {
-                    if is_hallucination(&raw, &hallucination_filters) {
+                    let asr_clean = whisper_typer_rs::punctuation::clean_asr_text(&raw);
+                    if asr_clean.trim().is_empty() || is_hallucination(&asr_clean, &hallucination_filters) {
                         worker_events.emit(
                             "filtered",
                             json!({"seq":seq,"raw_text":raw,"end_reason":chunk.end_reason}),
@@ -368,7 +369,7 @@ fn capture(config: Config, output: &Path, events: Arc<Events>) -> Result<(), Str
                         let _ = fs::remove_file(&audio);
                         continue;
                     }
-                    let mut text = corrections.apply(&raw);
+                    let mut text = corrections.apply(&asr_clean);
                     if let Some(spelling) = &spelling {
                         text = spelling
                             .apply(&text, corrections.protectors())

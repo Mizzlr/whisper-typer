@@ -1,10 +1,47 @@
 //! Optional punctuation and truecasing client.
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::PunctuationConfig;
+
+pub fn unknown_marker_count(text: &str) -> usize {
+    text.as_bytes().windows(5).filter(|part| part.eq_ignore_ascii_case(b"<unk>")).count()
+}
+
+/// Remove ASR tokenizer artifacts before other text processing. Ordinary
+/// transcripts borrow their input; adjacent words never get glued together.
+/// Percent signs and all other actual content remain unchanged.
+pub fn clean_asr_text(text: &str) -> Cow<'_, str> {
+    let positions: Vec<_> = text.as_bytes().windows(5).enumerate()
+        .filter_map(|(offset, part)| part.eq_ignore_ascii_case(b"<unk>").then_some(offset))
+        .collect();
+    if positions.is_empty() { return Cow::Borrowed(text); }
+    let mut cleaned = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for offset in positions {
+        if offset < cursor { continue; }
+        cleaned.push_str(&text[cursor..offset]);
+        cursor = offset + 5;
+        if cleaned.ends_with([' ', '\t']) {
+            while matches!(text.as_bytes().get(cursor), Some(b' ' | b'\t')) { cursor += 1; }
+        } else if cleaned.chars().last().is_some_and(char::is_alphanumeric)
+            && text[cursor..].chars().next().is_some_and(char::is_alphanumeric) {
+            cleaned.push(' ');
+        }
+    }
+    cleaned.push_str(&text[cursor..]);
+    Cow::Owned(cleaned.trim().to_string())
+}
+
+pub fn validate_punctuation_symbols(original: &str, corrected: &str) -> Result<(), &'static str> {
+    if unknown_marker_count(corrected) > unknown_marker_count(original)
+        || corrected.matches('%').count() != original.matches('%').count() {
+        Err("punctuation service corrupted symbols")
+    } else { Ok(()) }
+}
 
 #[derive(Clone)]
 pub struct PunctuationClient {
@@ -93,11 +130,7 @@ impl PunctuationClient {
         // The punctuation tokenizer can turn symbols such as '%' into <unk>.
         // Reject corrupt output so the fallback endpoint or original ASR text
         // is used, rather than typing model tokens or losing percentages.
-        if corrected.matches("<unk>").count() > text.matches("<unk>").count()
-            || corrected.matches('%').count() != text.matches('%').count()
-        {
-            return Err("punctuation service corrupted symbols".into());
-        }
+        validate_punctuation_symbols(text, &corrected).map_err(str::to_string)?;
         Ok(PunctuationResult {
             text: corrected,
             latency_ms: response
@@ -115,6 +148,23 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn cleans_unknown_markers_before_processing_without_losing_symbols() {
+        assert!(matches!(clean_asr_text("Are you 100% sure?"), Cow::Borrowed(_)));
+        for (input, expected) in [
+            ("Can you give <Unk>me links?", "Can you give me links?"),
+            ("to<UNK>can", "to can"),
+            ("one <unk> two", "one two"),
+            ("<uNk><UNK>", ""),
+            ("你好<Unk>世界 12.5%", "你好 世界 12.5%"),
+            ("100<Unk>% complete", "100% complete"),
+            ("<unknown> is a tag", "<unknown> is a tag"),
+        ] { assert_eq!(clean_asr_text(input), expected); }
+        assert!(validate_punctuation_symbols("100% complete", "100<Unk> complete").is_err());
+        assert!(validate_punctuation_symbols("Give me links", "Give <UNK>me links.").is_err());
+        assert!(validate_punctuation_symbols("12.5% complete", "12.5% complete.").is_ok());
+    }
+
     #[tokio::test]
     async fn rejects_corrupted_percentages_but_accepts_preserved_symbols() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -129,6 +179,7 @@ mod tests {
                             "are you 100% sure" => "Are you 100<unk>? Sure.",
                             "it is 25%" => "It is 25.",
                             "unknown symbol" => "Unknown <unk> symbol.",
+                            "mixed case symbol" => "Mixed <Unk> case symbol.",
                             _ => "It is 12.5% complete.",
                         };
                         Json(json!({"text": text}))
@@ -145,7 +196,7 @@ mod tests {
             timeout_ms: 500,
         })
         .unwrap();
-        for text in ["are you 100% sure", "it is 25%", "unknown symbol"] {
+        for text in ["are you 100% sure", "it is 25%", "unknown symbol", "mixed case symbol"] {
             assert!(client
                 .process(text)
                 .await

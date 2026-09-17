@@ -15,6 +15,49 @@ spec.loader.exec_module(window)
 
 
 class DictationTests(unittest.TestCase):
+    def test_idle_poll_skips_render_but_pending_timeout_refreshes(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        from datetime import datetime
+        stamp=datetime.now().astimezone().isoformat()
+        app=SimpleNamespace(store=SimpleNamespace(refresh=Mock(return_value=False)),
+                            rows=[{'timestamp':stamp,'status':'Checking grammar…'}],
+                            rendered='current',render=Mock(),root=SimpleNamespace(after=Mock()),
+                            within_history_window=Mock(return_value=True),poll=Mock())
+        window.DictationWindow.poll(app)
+        app.render.assert_not_called()
+        with patch.object(window.time,'time',return_value=window.timestamp_seconds(stamp)+121):
+            window.DictationWindow.poll(app)
+        app.render.assert_called_once_with()
+        app.render.reset_mock();app.rows[0]['timestamp']='invalid'
+        window.DictationWindow.poll(app);app.render.assert_not_called()
+        app.within_history_window.return_value=False
+        window.DictationWindow.poll(app);app.render.assert_called_once_with()
+
+    def test_cached_rows_preserve_updates_ordinals_and_timeout_without_pollution(self):
+        from datetime import datetime,timedelta
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            store=window.DictationStore(directory,Path(directory)/'reviews.jsonl')
+            now=datetime.now().astimezone();stamp=now.isoformat()
+            store.records[stamp]={'timestamp':stamp,'whisper_text':'she have files','final_text':'She have files.','background_review':True,'total_latency_ms':67}
+            first=store.visible()[0];self.assertTrue(first['status'].startswith('Checking grammar'))
+            first['_heading']='caller annotation';first['original']='polluted'
+            self.assertNotIn('_heading',store.visible()[0]);self.assertEqual(store.visible()[0]['original'],'She have files.')
+            with patch.object(window.time,'time',return_value=now.timestamp()+121):
+                self.assertEqual(store.visible()[0]['status'],'No grammar result')
+            store.corrections[stamp]={'pasted':'She have files.','corrected':'She has files.','status':'changed','grammar_latency_ms':306}
+            self.assertEqual(store.visible()[0]['corrected'],'She has files.')
+            store.corrections[stamp]['corrected']='She owns files.'
+            self.assertEqual(store.visible()[0]['corrected'],'She owns files.')
+            store.records[stamp]['total_latency_ms']=81;self.assertEqual(store.visible()[0]['paste_ms'],81)
+            earlier=(now-timedelta(seconds=1)).isoformat()
+            store.records[earlier]={'timestamp':earlier,'whisper_text':'Earlier sentence.'}
+            self.assertEqual(store.visible()[0]['number'],2)
+            store.records.pop(earlier);self.assertEqual(store.visible()[0]['number'],1)
+            self.assertNotIn(earlier,store.row_cache)
+            self.assertEqual(len(store.visible('owns')),1);self.assertEqual(store.visible('absent'),[])
+
     def test_word_diff_preserves_text_and_marks_only_changed_words(self):
         before, after = 'She have two files.', 'She has two files.'
         left, right = window.diff_segments(before, after)

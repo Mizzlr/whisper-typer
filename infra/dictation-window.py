@@ -6,6 +6,7 @@ Grammar is performed by Whisper Typer's independent background queue.
 """
 import argparse
 import difflib
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -42,7 +43,14 @@ def grammar_changed(original, corrected):
     return words(original) != words(corrected)
 
 
+@lru_cache(maxsize=16384)
+def timestamp_seconds(value):
+    return datetime.fromisoformat(value).timestamp()
+
+
 class DictationStore:
+    RECORD_FIELDS=('final_text','whisper_text','background_review','grammar_gate_decision','correction_accepted','total_latency_ms','ollama_latency_ms','grammar_gate_latency_ms')
+    REVIEW_FIELDS=('pasted','corrected','status','accepted','fallback_reason','grammar_latency_ms')
     def __init__(self, history, reviews):
         self.history = Path(history)
         self.reviews = Path(reviews)
@@ -51,6 +59,7 @@ class DictationStore:
         self.tails = {}
         self.bad_lines = 0
         self.loaded_paths = set()
+        self.row_cache={}
 
     def load_older_day(self, allow_archives=False):
         paths = sorted(self.history.glob('*.jsonl'), reverse=True)
@@ -126,17 +135,33 @@ class DictationStore:
         query = query.casefold()
         rows = []
         numbers, counts = {}, {}
-        for timestamp in sorted(self.records):
+        ordered=sorted(self.records)
+        for timestamp in set(self.row_cache)-set(self.records):self.row_cache.pop(timestamp,None)
+        for timestamp in ordered:
             date = timestamp[:10]
             counts[date] = counts.get(date, 0) + 1
             numbers[timestamp] = counts[date]
-        for timestamp, record in sorted(self.records.items(), reverse=True):
+        now=time.time()
+        for timestamp in reversed(ordered):
+            record=self.records[timestamp]
             if day and not timestamp.startswith(day):
+                continue
+            review=self.corrections.get(timestamp)
+            pending=False
+            if record.get('background_review') and not review:
+                try:pending=now-timestamp_seconds(timestamp)<120
+                except ValueError:pending=True
+            signature=(tuple(record.get(field) for field in self.RECORD_FIELDS),
+                       tuple(review.get(field) for field in self.REVIEW_FIELDS) if review else None,
+                       numbers[timestamp],pending)
+            cached=self.row_cache.get(timestamp)
+            if cached and cached[0]==signature:
+                row=cached[1]
+                if not query or query in (row['original']+' '+row['corrected']).casefold():rows.append(row.copy())
                 continue
             # The baseline is what was already pasted, after spelling/punctuation.
             original = str(record.get('final_text') or record['whisper_text']).strip()
             corrected = original
-            review = self.corrections.get(timestamp)
             status = 'Recorded'
             if review:
                 if isinstance(review.get('pasted'), str): original = review['pasted'].strip()
@@ -146,15 +171,11 @@ class DictationStore:
                 if review.get('accepted') is False and review.get('status') == 'unchanged':
                     rejected = review.get('fallback_reason') in {
                         'large_length_change', 'introduced_stutter', 'changed_numeric_fact', 'changed_url',
-                        'empty_correction', 'wrapped_or_explained_output', 'removed_protected_term',
+                        'empty_correction', 'wrapped_or_explained_output', 'removed_protected_term', 'changed_personal_reference', 'introduced_unknown_token',
                     }
                     status = 'Suggestion rejected' if rejected else 'Grammar unavailable'
             elif record.get('background_review'):
-                try:
-                    age = (datetime.now().astimezone() - datetime.fromisoformat(timestamp).astimezone()).total_seconds()
-                except ValueError:
-                    age = 0
-                status = 'Checking grammar…' if age < 120 else 'No grammar result'
+                status = 'Checking grammar…' if pending else 'No grammar result'
             elif record.get('grammar_gate_decision') == 'clean':
                 status = 'Grammar passed'
             elif record.get('correction_accepted'):
@@ -176,10 +197,12 @@ class DictationStore:
             timing('Judge', record.get('grammar_gate_latency_ms'))
             if query and query not in (original+' '+corrected).casefold():
                 continue
-            rows.append({'timestamp': timestamp, 'original': original, 'corrected': corrected, 'status': status,
+            row={'timestamp': timestamp, 'original': original, 'corrected': corrected, 'status': status,
                          'timings': ' · '.join(timings), 'paste_ms': record.get('total_latency_ms'),
                          'grammar_ms': review.get('grammar_latency_ms') if review else record.get('ollama_latency_ms'),
-                         'reason': review.get('fallback_reason') if review else None, 'number': numbers[timestamp]})
+                         'reason': review.get('fallback_reason') if review else None, 'number': numbers[timestamp]}
+            self.row_cache[timestamp]=(signature,row.copy())
+            rows.append(row)
         return rows
 
 
@@ -442,14 +465,14 @@ class DictationWindow:
 
     @staticmethod
     def recent_count(rows):
-        now = datetime.now().astimezone()
+        now = time.time()
         count = 0
         for row in rows:
             if row.get('recording_active'):
                 count += 1
                 continue
             try:
-                if (now - datetime.fromisoformat(row.get('sort_timestamp', row['timestamp'])).astimezone()).total_seconds() > 900: break
+                if now-timestamp_seconds(row.get('sort_timestamp',row['timestamp']))>900:break
             except ValueError: break
             count += 1
         return count
@@ -536,7 +559,7 @@ class DictationWindow:
     def within_history_window(self,row):
         if self.history_expanded or row.get('recording_active') or self.row_category(row) in self.fallback_categories: return True
         try:
-            stamp = datetime.fromisoformat(row.get('sort_timestamp',row['timestamp'])).astimezone().timestamp()
+            stamp = timestamp_seconds(row.get('sort_timestamp',row['timestamp']))
             return stamp >= time.time() - 86400
         except (ValueError, TypeError):
             return False
@@ -998,10 +1021,19 @@ class DictationWindow:
         except OSError:messagebox.showerror('Save transcript','Could not save the transcript.',parent=self.root)
 
     def poll(self):
-        if self.store.refresh():
+        changed=self.store.refresh()
+        now=time.time()
+        expired=False
+        for row in self.rows:
+            try:
+                pending_expired=row['status'].startswith('Checking grammar') and now-timestamp_seconds(row['timestamp'])>=120
+            except (ValueError,TypeError):
+                pending_expired=False
+            if pending_expired or not self.within_history_window(row):
+                expired=True
+                break
+        if changed or expired or self.rendered is None:
             self.render()
-        else:
-            self.render(self.rows)
         self.root.after(5000, self.poll)
 
     def save_settings(self):

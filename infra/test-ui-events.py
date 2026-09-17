@@ -30,6 +30,10 @@ class PushTests(unittest.TestCase):
 
     def tearDown(self):
         self.client.close(); self.app.close(); self.temp.cleanup()
+        # Reclaim destroyed Tk interpreters on their owning thread before the
+        # next test starts workers that can trigger cyclic collection.
+        self.client=self.bridge=self.app=self.root=None
+        __import__('gc').collect()
 
     def send(self,event,origin=None):
         headers={'Content-Type':'application/json'}
@@ -176,6 +180,34 @@ class PushTests(unittest.TestCase):
         sessions.receive({'session_id':'fit','timestamp':stamp,'status':'summary_ready','text':'Review the release tomorrow.','title':'Release Review Planning','through_seq':2})
         self.app.render();self.root.update();self.assertLess(view.winfo_height(),130)
         view.transcript_button.invoke();self.root.update();self.assertGreater(view.winfo_height(),short)
+
+    def test_recording_and_summary_wheel_hands_off_at_both_edges(self):
+        from datetime import timedelta
+        now=datetime.now().astimezone()
+        for index in range(80):
+            stamp=(now-timedelta(seconds=index+1)).isoformat()
+            self.app.store.records[stamp]={'timestamp':stamp,'whisper_text':str(index),'final_text':f'Other dictation {index}.'}
+        sessions=RecordingSessions(self.path/'recordings',self.path/'unused',self.path/'config',self.bridge.enqueue)
+        self.app.recordings=sessions;stamp=now.isoformat()
+        for status,details in [('started',{}),('chunk',{'seq':1,'text':'Meeting notes. '*300}),
+                               ('summary_ready',{'text':'Summary discussion. '*300,'title':'Meeting Notes Review','through_seq':1})]:
+            sessions.receive({'session_id':'handoff','timestamp':stamp,'status':status,**details})
+        self.root.deiconify();self.root.geometry('680x650');self.app.render();self.root.update()
+        view=self.app.row_blocks['recording:handoff']['view']
+        for mode in ('transcript','summary'):
+            with self.subTest(mode=mode):
+                view.show(mode);self.root.update()
+                self.app.text.yview_moveto(0);view.scroll('moveto',1);self.root.update()
+                before=self.app.text.yview()[0];view.text.event_generate('<Button-5>');self.root.update()
+                self.assertGreater(self.app.text.yview()[0],before)
+                self.assertAlmostEqual(view.text.yview()[1],1)
+                self.app.text.yview_moveto(.02);view.scroll('moveto',0);self.root.update()
+                before=self.app.text.yview()[0];view.topic.event_generate('<Button-4>');self.root.update()
+                self.assertLess(self.app.text.yview()[0],before)
+                self.assertAlmostEqual(view.text.yview()[0],0)
+                view.scroll('moveto',.5);self.root.update();before=self.app.text.yview()
+                view.text.event_generate('<Button-5>');self.root.update()
+                self.assertEqual(self.app.text.yview(),before)
 
     def test_recording_pane_is_bounded_and_scrolls_without_moving_outer_history(self):
         sessions=RecordingSessions(self.path/'recordings',self.path/'unused',self.path/'config',self.bridge.enqueue)

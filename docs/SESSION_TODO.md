@@ -139,3 +139,34 @@ Clipboard-only rendering retained the latest screenshot. Source/installed hash,
 service/health PID, zero restarts and no callback errors verified. Evidence:
 `~/.cache/whisper-typer/clipboard-voice-ownership-deployment.json` and
 `~/.cache/whisper-typer/clipboard-voice-ownership-live-history.json`.
+
+- [x] Review current changes for credentials and commit the session checkpoint (7869b33).
+- [x] Profile and review the UI data/render/scroll/background-job lifecycle; optimize measured costs and verify end to end.
+- [ ] Confirm the original gesture/input cause of the Terminator preferences popup; the shortcut mitigation is saved and scoped invocation opened no new panel.
+- [x] Hand off recording/summary wheel input to the outer timeline at both edges, preserving independent scrolling inside each pane.
+
+- [x] Disable the Terminator keybindings-preferences shortcut and close unwanted preferences panels without restarting terminal sessions.
+
+Only preferences_keybindings was changed in the private local configuration;
+parsed settings match the backup otherwise. The scoped shortcut invocation did
+not open another panel. The original gesture input cause remains unconfirmed.
+
+- [x] Clean ASR unknown-token artifacts in Rust before all correction stages, preserving raw history and percentage symbols.
+- [x] Preserve personal references in grammar correction; reject the reported you-are to I-am change.
+- [ ] Trace unexpected automatic workspace/content scrolling and fix the verified source.
+
+Optimization/correction batch: 61 UI checks, 50 Rust library tests, 16 binary
+unit tests and five native recorder replay checks passed. Strict library Clippy
+passed; the all-binary run has five existing findings, recorded in
+UI_PERFORMANCE_REVIEW.md. Final synthetic reviewed workload: collect 32.120 to
+17.144 ms, one-card update 43.269 to 22.216 ms, idle poll 18.669 to 3.484 ms;
+fullscreen results mixed. All five installed hashes and running binary hashes
+match, service/health PID agrees, and all three services have zero failure
+restarts. A real dictation/review advanced live push counters after deployment.
+Real Granite probes preserved the reported personal reference and both percent
+symbols. Evidence is private in ~/.cache/whisper-typer/ui-rust-optimization-*.json,
+ui-optimization-benchmark-final.json and grammar-person-percent-check.json.
+
+Automatic movement remains unconfirmed pending whether it is workspace or
+content scrolling. Brief Terminator activations from configuration reload
+attempts were disclosed and stopped; no speculative mouse remapping was made.

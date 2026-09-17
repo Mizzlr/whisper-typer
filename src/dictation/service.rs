@@ -566,7 +566,8 @@ impl DictationService {
             };
             t_whisper = t_whisper_start.elapsed().as_secs_f64() * 1000.0;
 
-            if raw_text.is_empty() {
+            let asr_clean = crate::punctuation::clean_asr_text(&raw_text);
+            if asr_clean.trim().is_empty() {
                 info!("Empty transcription, returning to IDLE");
                 self.transition_to_idle();
                 return;
@@ -597,7 +598,7 @@ impl DictationService {
                 "the president.",
             ];
 
-            let normalized = raw_text.trim().to_lowercase();
+            let normalized = asr_clean.trim().to_lowercase();
             if HALLUCINATIONS.contains(&normalized.as_str()) {
                 info!("Filtered hallucination: '{raw_text}'");
                 self.transition_to_idle();
@@ -609,7 +610,7 @@ impl DictationService {
             let spelling_start = Instant::now();
             let domain_clean = self
                 .voice_corrections
-                .apply(strip_trailing_hallucination(&raw_text));
+                .apply(strip_trailing_hallucination(&asr_clean));
             (raw_clean, spelling_edits) = match &self.spell_corrector {
                 Some(corrector) => {
                     let cleaned =

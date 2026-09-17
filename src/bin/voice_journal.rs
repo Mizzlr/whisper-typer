@@ -288,6 +288,8 @@ fn punctuate_at(
     if corrected.is_empty() {
         return Err("punctuation service returned empty text".to_string());
     }
+    whisper_typer_rs::punctuation::validate_punctuation_symbols(text, &corrected)
+        .map_err(str::to_string)?;
     Ok(corrected)
 }
 
@@ -1543,20 +1545,26 @@ fn spawn_transcriber(
             match transcribe(&remote_asr_client, &local_asr_client, &chunk) {
                 Ok(text) if !text.trim().is_empty() => {
                     if whisper_typer_rs::recording::active() { continue; }
-                    let trimmed = text.trim();
+                    let original = text.trim();
+                    let asr_clean = whisper_typer_rs::punctuation::clean_asr_text(original);
+                    let trimmed = asr_clean.trim();
                     let ts = Local::now().format("%H:%M:%S");
+                    if trimmed.is_empty() {
+                        let _ = writer.write_unfiltered(&format!("[{ts}] [filtered] {original}"));
+                        continue;
+                    }
                     if is_hallucination(trimmed, &hallucination_filters) {
-                        let _ = writer.write_unfiltered(&format!("[{ts}] [filtered] {trimmed}"));
-                        let _ = tx.send(format!("[filtered] {trimmed}"));
+                        let _ = writer.write_unfiltered(&format!("[{ts}] [filtered] {original}"));
+                        let _ = tx.send(format!("[filtered] {original}"));
                         continue;
                     }
                     if matches!(llm_filter.check(trimmed), Some(true)) {
                         let _ =
-                            writer.write_unfiltered(&format!("[{ts}] [filtered-llm] {trimmed}"));
-                        let _ = tx.send(format!("[filtered-llm] {trimmed}"));
+                            writer.write_unfiltered(&format!("[{ts}] [filtered-llm] {original}"));
+                        let _ = tx.send(format!("[filtered-llm] {original}"));
                         continue;
                     }
-                    let raw_line = format!("[{ts}] {trimmed}");
+                    let raw_line = format!("[{ts}] {original}");
                     let _ = writer.write_unfiltered(&raw_line);
                     let curated = match punctuate(&punctuation_client, trimmed) {
                         Ok(Some(corrected)) => corrected,
