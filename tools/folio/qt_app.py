@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """Folio — a local reading desk for documents and pasted ideas."""
+import base64
 import csv
 import io
 import json
@@ -11,6 +12,7 @@ import tempfile
 import uuid
 from collections import Counter
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWebChannel import QWebChannel
@@ -65,6 +67,8 @@ class Page(QWebEnginePage):
 
 
 class Bridge(QtCore.QObject):
+    zoom_requested = QtCore.pyqtSignal(str)
+
     @QtCore.pyqtSlot(str, result=str)
     def stats(self, values):
         return display_summary(selection_summary(json.loads(values)))
@@ -72,6 +76,10 @@ class Bridge(QtCore.QObject):
     @QtCore.pyqtSlot(str)
     def copy(self, text):
         QtWidgets.QApplication.clipboard().setText(text)
+
+    @QtCore.pyqtSlot(str)
+    def zoom_image(self, src):
+        self.zoom_requested.emit(src)
 
 
 class CsvModel(QtCore.QAbstractTableModel):
@@ -463,6 +471,8 @@ class Folio(QtWidgets.QMainWindow):
         self.web.setPage(self.web_page)
         self.channel = QWebChannel(self.web_page)
         self.bridge = Bridge(self.channel)
+        self.previous_view_before_zoom = None
+        self.bridge.zoom_requested.connect(self.open_image_zoom)
         self.channel.registerObject('folio', self.bridge)
         self.web_page.setWebChannel(self.channel)
         self.source = NumberedText()
@@ -628,6 +638,11 @@ QTabBar::tab:hover {background:#f0eee5}
         self.path_input.selectAll()
 
     def escape(self):
+        if hasattr(self, 'previous_view_before_zoom') and self.previous_view_before_zoom and self.views.currentWidget() == self.pdf:
+            self.views.setCurrentWidget(self.previous_view_before_zoom)
+            self.previous_view_before_zoom = None
+            self.pdf_controls.hide()
+            return
         self.find.hide()
         self.paste_generation+=1
         self.generation+=1
@@ -885,6 +900,11 @@ QTabBar::tab:hover {background:#f0eee5}
         self.copy_button.setEnabled(True)
 
     def go_back(self):
+        if hasattr(self, 'previous_view_before_zoom') and self.previous_view_before_zoom and self.views.currentWidget() == self.pdf:
+            self.views.setCurrentWidget(self.previous_view_before_zoom)
+            self.previous_view_before_zoom = None
+            self.pdf_controls.hide()
+            return
         self.generation+=1
         self.pdf_generation+=1
         if self.reading.isVisible():
@@ -893,6 +913,45 @@ QTabBar::tab:hover {background:#f0eee5}
             self.show_context(self.context_stack.pop())
         else:
             self.show_history()
+
+    def open_image_zoom(self, src):
+        pixmap = QtGui.QPixmap()
+        if src.startswith('data:image/svg+xml;base64,'):
+            try:
+                from PyQt5.QtSvg import QSvgRenderer
+                data = base64.b64decode(src.split(',', 1)[1])
+                renderer = QSvgRenderer(data)
+                if renderer.isValid():
+                    size = renderer.defaultSize()
+                    scale = max(1.0, min(4.0, 2400.0 / max(1, size.width())))
+                    scaled_size = QtCore.QSize(round(size.width() * scale), round(size.height() * scale))
+                    image = QtGui.QImage(scaled_size, QtGui.QImage.Format_ARGB32)
+                    image.fill(QtCore.Qt.transparent)
+                    painter = QtGui.QPainter(image)
+                    renderer.render(painter)
+                    painter.end()
+                    pixmap = QtGui.QPixmap.fromImage(image)
+            except Exception: pass
+        elif src.startswith('data:image/'):
+            try:
+                data = base64.b64decode(src.split(',', 1)[1])
+                pixmap.loadFromData(data)
+            except Exception: pass
+        else:
+            if src.startswith('file://'):
+                p = Path(unquote(urlparse(src).path))
+            elif self.current and self.current.path:
+                p = (self.current.path.parent / src).resolve()
+            else:
+                p = Path(src).resolve()
+            if p.exists():
+                pixmap.load(str(p))
+
+        if not pixmap.isNull():
+            self.previous_view_before_zoom = self.views.currentWidget()
+            self.pdf_image = pixmap
+            self.views.setCurrentWidget(self.pdf)
+            self.fit_pdf()
 
     def open_folder(self,path):
         generation=self.paste_generation

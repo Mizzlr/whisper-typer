@@ -24,7 +24,7 @@ th {background:#e8eee4;text-align:left} td,th {padding:10px 16px;border-bottom:1
 tr:nth-child(even) {background:#f4f1e9} img {max-width:100%;height:auto}
 hr {border:0;border-top:1px solid #dedacc;margin:32px 0}
 .mermaid {background:#fffdf8;border:1px solid #e1ddcf;border-radius:12px;padding:24px;overflow:auto;text-align:center}
-.mermaid svg {max-width:100%;height:auto} .render-error {color:#9a4435;font-size:13px}
+.mermaid svg {max-width:100%;height:auto;cursor:zoom-in} article img {cursor:zoom-in} .render-error {color:#9a4435;font-size:13px}
 button.copy-code {float:right;color:#527564;border:1px solid #cad5c8;border-radius:5px;background:#fbf8f1;padding:4px 8px;cursor:pointer;opacity:0}
 pre:hover button.copy-code,.table-stats:hover button.copy-code {opacity:1}
 td.folio-selected,th.folio-selected {background:#cfe0c7!important;outline:1px solid #95b08a}
@@ -142,6 +142,26 @@ document.addEventListener('DOMContentLoaded',async()=>{
     b.onclick=()=>{bridge.copy((block.querySelector('code')||block).textContent);b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1000);};
     block.prepend(b);
    }
+   document.addEventListener('click', (e) => {
+    if (e.target.closest('button.copy-code, .table-controls, .row-grip, a')) return;
+    const img = e.target.closest('img');
+    if (img && img.src && typeof bridge.zoom_image === 'function') {
+     e.preventDefault();
+     bridge.zoom_image(img.src);
+     return;
+    }
+    const mermaidBlock = e.target.closest('.mermaid');
+    if (mermaidBlock && typeof bridge.zoom_image === 'function') {
+     const svg = mermaidBlock.querySelector('svg');
+     if (svg) {
+      e.preventDefault();
+      const svgData = new XMLSerializer().serializeToString(svg);
+      const b64 = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+      bridge.zoom_image(b64);
+      return;
+     }
+    }
+   });
   }
   const originals=new WeakMap(),transposed=new WeakMap();
   function initializeTables(tables=document.querySelectorAll('article table')) {

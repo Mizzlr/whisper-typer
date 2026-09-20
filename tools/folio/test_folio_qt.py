@@ -451,6 +451,18 @@ class UiTests(unittest.TestCase):
             QtTest.QTest.qWait(500)  # Allow Chromium's compositor to finish painting.
             self.window.grab().save(artifact)
 
+    def test_diagram_click_opens_image_zoom_and_escape(self):
+        self.window.show()
+        doc = Document(None, 'markdown', '# Title\n\nContent')
+        self.window.document_ready(doc, None)
+        svg_b64 = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0icmVkIi8+PC9zdmc+'
+        self.window.open_image_zoom(svg_b64)
+        self.wait(lambda: self.window.views.currentWidget() == self.window.pdf)
+        self.assertIsNotNone(self.window.pdf_image)
+        self.window.zoom(1)
+        self.window.escape()
+        self.wait(lambda: self.window.views.currentWidget() != self.window.pdf)
+
 
 if __name__=='__main__':
     unittest.main()

@@ -27,6 +27,7 @@ from clipboard import read_clipboard
 from history import History
 from tk_widgets import Table, LIGHT, DARK
 from syntax import syntax_safe, source_style
+from image_zoom import ImageZoom, ZoomStyle
 
 
 class TableParser(HTMLParser):
@@ -107,6 +108,7 @@ class Folio:
         self.context_entries=[];self.context_stack=[];self.context_label='Paths';self.active_batch=None
         self.view='list';self.root_tab='Paths';self.navigation=0;self.paste_generation=0
         self.closing=False;self.busy=0;self.image_scale=1.;self.image=None;self.image_photo=None
+        self.zoom_view=None;self.zoom_images={}
         self.temp=tempfile.TemporaryDirectory(prefix='folio-');self.zip_roots={}
         self.executor=ThreadPoolExecutor(max_workers=3,thread_name_prefix='folio')
         self.results=queue.Queue();self.paste_timer=None
@@ -298,6 +300,7 @@ class Folio:
         self.submit(resolve,ready)
 
     def hide_views(self):
+        if self.zoom_view:self.unzoom_image()
         for widget in self.content.winfo_children():widget.pack_forget()
 
     def show_history(self):
@@ -389,6 +392,8 @@ class Folio:
         self.submit(listing,ready)
 
     def go_back(self):
+        if self.zoom_view:
+            self.unzoom_image();return
         self.navigation+=1
         if self.view!='list':
             if not self.context_stack and (self.context_label=='Paths' or len(self.context_entries)<=1):
@@ -400,6 +405,8 @@ class Folio:
         else:self.show_history()
 
     def escape(self):
+        if self.zoom_view:
+            self.unzoom_image();return 'break'
         self.navigation+=1;self.paste_generation+=1
         if self.paste_timer:self.root.after_cancel(self.paste_timer);self.paste_timer=None
         self.path_input.delete('1.0','end');self.path_input.edit_modified(False)
@@ -408,8 +415,42 @@ class Folio:
 
     def open_link(self,url):
         parsed=urlparse(url)
-        if parsed.scheme=='file':self.load_path(Path(unquote(parsed.path)))
+        if parsed.scheme=='folio-image':
+            img_id=parsed.path or parsed.netloc
+            if img_id in self.zoom_images:
+                src,alt=self.zoom_images[img_id]
+                self.open_image_zoom(src,alt)
+            return
+        if parsed.scheme=='file':
+            target_path=Path(unquote(parsed.path))
+            if target_path.suffix.lower() in ('.png','.jpg','.jpeg','.gif','.bmp','.webp','.svg'):
+                self.open_image_zoom(str(target_path),target_path.name)
+                return
+            self.load_path(target_path)
         elif parsed.scheme in ('https','http','mailto'):self.open_browser(url)
+
+    def open_image_zoom(self,src,alt='Diagram'):
+        title=f"{self.current.path.name} · {alt}" if (self.current and self.current.path) else alt
+        if src.startswith('data:image/'):
+            try:
+                raw=base64.b64decode(src.split(',',1)[1])
+                self.zoom_image(raw,title=title)
+            except Exception as e:
+                self.status.configure(text=f'Error decoding image: {e}')
+        else:
+            if src.startswith('file://'):p=Path(unquote(urlparse(src).path))
+            elif self.current and self.current.path:p=(self.current.path.parent/src).resolve()
+            else:p=Path(src).resolve()
+            if p.exists():self.zoom_image(p,title=title)
+            else:self.status.configure(text=f'Image not found: {src}')
+
+    def zoom_image(self,source_input,title='Diagram'):
+        if self.zoom_view:self.unzoom_image()
+        self.zoom_view=ImageZoom(self.frame,source_input,None,title,ZoomStyle(self.palette),self.unzoom_image)
+
+    def unzoom_image(self):
+        if self.zoom_view:
+            self.zoom_view.destroy();self.zoom_view=None
 
     def open_browser(self,url):
         command=shutil.which('firefox') or shutil.which('xdg-open')
@@ -515,9 +556,24 @@ class Folio:
         body=re.sub(r'<t[dh] class="row-grip"[^>]*>[\s\S]*?</t[dh]>','',body)
         body=re.sub(r'<table\b[^>]*>[\s\S]*?</table>',replace,body)
         body=re.sub(r'<button\b[^>]*>[\s\S]*?</button>','',body)
+        self.zoom_images = {}
+        def wrap_img(match):
+            full_tag = match.group(0)
+            if full_tag.startswith('<a'):
+                return full_tag
+            src_m = re.search(r'src=["\']([^"\']+)["\']', full_tag)
+            if not src_m:
+                return full_tag
+            src = src_m.group(1)
+            alt_m = re.search(r'alt=["\']([^"\']*)["\']', full_tag)
+            alt = alt_m.group(1) if alt_m else 'Diagram'
+            img_id = str(len(self.zoom_images))
+            self.zoom_images[img_id] = (src, alt)
+            return f'<a href="folio-image:{img_id}" style="cursor:zoom-in;display:inline-block">{full_tag}</a>'
+        body = re.sub(r'(<a\b[^>]*>[\s\S]*?</a>)|(<img\b[^>]*>)', wrap_img, body)
         css=CSS.replace('article','.article').replace(':root {color-scheme:light}','')
         # Tkhtml renders conservative HTML/CSS; advanced scripts never run here.
-        css+='\n.article {padding:25px 36px;max-width:1000px} object {display:block} img {max-width:100%}\n'
+        css+='\n.article {padding:25px 36px;max-width:1000px} object {display:block} img {max-width:100%;cursor:pointer}\n'
         css=theme_colors(css,self.dark)
         base=self.current.path.parent.as_uri()+'/' if self.current.path else Path.home().as_uri()+'/'
         self.html.load_html('<html><head><style>'+css+'</style></head><body><div class="article">'+body+'</div></body></html>',base_url=base)
@@ -625,6 +681,8 @@ class Folio:
         self.root.clipboard_clear();self.root.clipboard_append(text);self.root.update_idletasks()
 
     def copy_visible(self):
+        if self.zoom_view:
+            self.zoom_view.copy_action();return
         if self.view!='list' and self.current:
             if self.current.kind=='image' and self.view=='document':self.copy_image()
             else:self.copy_content()

@@ -332,6 +332,28 @@ class TkTests(unittest.TestCase):
         self.idle();self.window.show_html(body);self.root.update()
         self.assertIn('Diagram',self.window.html.document.body.textContent)
 
+    def test_diagram_click_opens_image_zoom_and_escape(self):
+        body = '<p>Doc with diagram</p><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==" width="200" height="200" alt="Test Arch Diagram">'
+        self.window.select_document(Document(None, 'markdown', 'placeholder'))
+        self.idle(); self.window.show_html(body); self.root.update()
+        self.assertIn('0', self.window.zoom_images)
+        src, alt = self.window.zoom_images['0']
+        self.assertEqual(alt, 'Test Arch Diagram')
+        # Simulate user clicking on the diagram
+        self.window.open_link('folio-image:0')
+        self.root.update()
+        self.assertIsNotNone(self.window.zoom_view)
+        # Test zoom, pan, fit
+        self.window.zoom_view.zoom(1.25)
+        self.window.zoom_view.pan('x', 2)
+        self.window.zoom_view.fit()
+        self.root.update()
+        # Escape closes zoom view
+        self.window.escape()
+        self.root.update()
+        self.assertIsNone(self.window.zoom_view)
+
+
 
 class ArchiveTests(unittest.TestCase):
     def test_reject_traversal_symlinks_and_oversized_archives_before_writes(self):

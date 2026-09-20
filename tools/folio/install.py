@@ -57,7 +57,7 @@ def install():
     source = Path(__file__).resolve().parent
     library = home / '.local/lib/folio'
     library.mkdir(parents=True, exist_ok=True)
-    for name in ('app.py','qt_app.py','tk_widgets.py','render_worker.py','files.py','rendering.py','cell_stats.py','history.py','clipboard.py','syntax.py'):
+    for name in ('app.py','qt_app.py','tk_widgets.py','image_zoom.py','render_worker.py','files.py','rendering.py','cell_stats.py','history.py','clipboard.py','syntax.py'):
         shutil.copyfile(source / name, library / name)
     executable = home / '.local/bin/folio'
     executable.parent.mkdir(parents=True, exist_ok=True)

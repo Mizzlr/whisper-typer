@@ -31,7 +31,7 @@ def main():
         if idx + 1 < len(sys.argv):
             output_path = Path(sys.argv[idx + 1])
     app=QtWidgets.QApplication(['folio-typesetter'])
-    view=QWebEngineView();view.resize(1400,1800);view.show()
+    view=QWebEngineView();view.resize(3200,2400);view.show()
     channel=QWebChannel(view.page());bridge=Bridge(channel)
     channel.registerObject('folio',bridge);view.page().setWebChannel(channel)
     interceptor=LocalOnly(view);view.page().profile().setUrlRequestInterceptor(interceptor)
@@ -84,16 +84,16 @@ def main():
                             + str(size.width())
                             + ";img.height="
                             + str(size.height())
-                            + ";img.alt='Typeset diagram or math';e.replaceWith(img);}})()"
+                            + ";img.style.maxWidth='100%';img.style.height='auto';img.alt='Typeset diagram or math';e.replaceWith(img);}})()"
                         )
                         view.page().runJavaScript(js_replace, lambda _: capture(index + 1))
 
                     QtCore.QTimer.singleShot(120, painted)
 
                 js_pos = (
-                    "(()=>{const e=document.querySelector('[data-folio-idx=\""
+                    "(()=>{const art=document.querySelector('article');if(art){art.style.maxWidth='none';art.style.width='3000px';}const e=document.querySelector('[data-folio-idx=\""
                     + str(index)
-                    + "\"]');if(!e)return null;const s=e.querySelector('svg')||e;s.style.maxHeight='1600px';e.scrollIntoView({block:'center'});const r=s.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};})()"
+                    + "\"]');if(!e)return null;const s=e.querySelector('svg')||e;s.style.maxWidth='none';s.style.maxHeight='none';const vb=s.viewBox?s.viewBox.baseVal:null;if(vb&&vb.width>0){s.style.width=vb.width+'px';s.style.height=vb.height+'px';}s.scrollIntoView({block:'center'});const r=s.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};})()"
                 )
                 view.page().runJavaScript(js_pos, positioned)
 
