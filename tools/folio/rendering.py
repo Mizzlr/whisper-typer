@@ -34,6 +34,23 @@ table td,table th {cursor:cell;user-select:none} .row-grip {cursor:pointer;color
 '''
 
 
+def sanitize_mermaid_code(code):
+    lines = []
+    for line in code.splitlines():
+        m = re.match(r'^(\s*subgraph\s+)(.+)$', line)
+        if m:
+            prefix, rest = m.group(1), m.group(2).strip()
+            if re.search(r'\[.+\]$', rest) or re.fullmatch(r'[A-Za-z0-9_-]+', rest):
+                lines.append(line)
+                continue
+            clean_title = rest.replace('"', "'")
+            safe_id = 'sg_' + re.sub(r'[^A-Za-z0-9_]+', '_', rest).strip('_')[:32]
+            lines.append(f'{prefix}{safe_id} ["{clean_title}"]')
+            continue
+        lines.append(line)
+    return '\n'.join(lines)
+
+
 def rendered_body(source):
     # Store math first, so Markdown cannot consume TeX backslashes/underscores.
     math = []
@@ -48,9 +65,10 @@ def rendered_body(source):
     source = re.sub(r'\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|(?<![\\$])\$(?!\$)(?:[^$\n]|\\\$)+?\$', protect_math, source)
     for i, value in enumerate(code):
         source = source.replace(f'FOLIOCODETOKEN{i}END', value)
+    source = re.sub(r'(^|\n)(```|~~~)mermaid\s*\n([\s\S]*?)\n\2', lambda m: f"{m.group(1)}{m.group(2)}mermaid\n{sanitize_mermaid_code(m.group(3))}\n{m.group(2)}", source, flags=re.IGNORECASE)
     # Bare Mermaid input is accepted as well as fenced mermaid blocks.
     if re.match(r'^\s*(?:graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap|timeline|journey)\b', source):
-        source = '```mermaid\n' + source + '\n```'
+        source = '```mermaid\n' + sanitize_mermaid_code(source) + '\n```'
     body = markdown.markdown(source, extensions=['fenced_code', 'tables', 'sane_lists', 'toc'])
     tags = set(bleach.sanitizer.ALLOWED_TAGS) | {'p','pre','div','span','h1','h2','h3','h4','h5','h6','hr','br','table','thead','tbody','tr','th','td','img','del','sup','sub'}
     body = bleach.clean(body, tags=tags,
@@ -103,11 +121,21 @@ document.addEventListener('DOMContentLoaded',async()=>{
     bridge = await new Promise(resolve=>new QWebChannel(qt.webChannelTransport,c=>resolve(c.objects.folio)));
    } catch(e) {}
   }
-  try {
-   if (typeof mermaid !== 'undefined') {
-    await mermaid.run({querySelector:'.mermaid'});
+  if (typeof mermaid !== 'undefined') {
+   for (const block of Array.from(document.querySelectorAll('.mermaid'))) {
+    const raw = block.textContent;
+    try {
+     await mermaid.run({nodes:[block]});
+     if (block.querySelector('.error-icon') || block.textContent.includes('Syntax error in text')) {
+      throw new Error('Diagram syntax error');
+     }
+    } catch(err) {
+     block.classList.remove('mermaid');
+     block.classList.add('mermaid-error');
+     block.innerHTML = '<div style="font-size:11px;color:#9a4435;margin-bottom:6px;font-family:JetBrains Mono,monospace;text-align:left">Diagram (syntax error: ' + (err.message || 'invalid diagram').replace(/</g,'&lt;') + ')</div><pre style="text-align:left;margin:0;padding:12px;background:inherit;border:0;font-size:12px;overflow:auto"><code>' + raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</code></pre>';
+    }
    }
-  } catch(e) {let p=document.createElement('p');p.className='render-error';p.textContent='Diagram: '+e.message;document.querySelector('article')?.appendChild(p);}
+  }
   if (bridge) {
    for (const block of document.querySelectorAll('pre:not(.mermaid)')) {
     const b=document.createElement('button');b.className='copy-code';b.textContent='Copy';
