@@ -485,6 +485,7 @@ class Folio(QtWidgets.QMainWindow):
         self.table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self.table.setSortingEnabled(False)
         self.table.horizontalHeader().setDefaultSectionSize(190)
+        self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setDefaultSectionSize(32)
         self.csv_view=QtWidgets.QWidget()
         csv_layout=QtWidgets.QVBoxLayout(self.csv_view)

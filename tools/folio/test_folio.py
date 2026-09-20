@@ -353,6 +353,23 @@ class TkTests(unittest.TestCase):
         self.root.update()
         self.assertIsNone(self.window.zoom_view)
 
+    def test_table_dynamically_renders_to_full_width(self):
+        rows = [
+            ['Short A', 'Short B'],
+            ['val 1', 'val 2']
+        ]
+        from tk_widgets import Table, LIGHT
+        table = Table(self.root, rows, LIGHT, lambda t: None)
+        table.pack(fill='both', expand=True)
+        self.root.update_idletasks()
+        self.root.update()
+        # Verify columns expand to fill the entire available canvas width
+        self.assertGreater(len(table.col_widths), 0)
+        avail_w = max(100, table.canvas.winfo_width() - 42 - 18)
+        self.assertEqual(sum(table.col_widths), avail_w)
+        table.destroy()
+
+
 
 
 class ArchiveTests(unittest.TestCase):

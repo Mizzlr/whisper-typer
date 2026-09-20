@@ -22,7 +22,9 @@ class Table(tk.Frame):
         self.stats_generation=0
         self.selected=set()
         self.anchor=None
-        self.cell_width=190
+        self.col_widths=[]
+        self.col_x=[42]
+        self.total_width=42
         self.row_height=30
         self.canvas=tk.Canvas(self,bg=palette['panel'],highlightthickness=0)
         self.vertical=ttk.Scrollbar(self,orient='vertical',command=self.yview)
@@ -39,8 +41,7 @@ class Table(tk.Frame):
         self.summary=tk.Label(self,bg=palette['bg'],fg=palette['green'],font=('JetBrains Mono',9),anchor='w')
         self.summary.grid(row=3,column=0,sticky='ew',pady=5)
         self.rowconfigure(1,weight=1);self.columnconfigure(0,weight=1)
-        self.canvas.configure(xscrollcommand=lambda a,b:self.scrollbar(self.horizontal,a,b),yscrollcommand=lambda a,b:self.scrollbar(self.vertical,a,b),
-                              scrollregion=(0,0,self.columns*self.cell_width+42,(len(rows)+1)*self.row_height))
+        self.canvas.configure(xscrollcommand=lambda a,b:self.scrollbar(self.horizontal,a,b),yscrollcommand=lambda a,b:self.scrollbar(self.vertical,a,b))
         self.canvas.bind('<Configure>',lambda e:self.draw())
         self.canvas.bind('<Button-1>',self.click)
         self.canvas.bind('<B1-Motion>',self.drag)
@@ -55,6 +56,36 @@ class Table(tk.Frame):
         if float(first)<=0 and float(last)>=1:bar.grid_remove()
         else:bar.grid()
 
+    def compute_column_layout(self):
+        if self.columns<=0:
+            self.col_widths=[];self.col_x=[42];self.total_width=42;return
+        c_width=self.canvas.winfo_width()
+        avail_w=max(100,c_width-42-18) if c_width>100 else 190*self.columns
+        sample_rows=self.rows[:100]
+        natural_w=[]
+        for col in range(self.columns):
+            max_len=0
+            for r in sample_rows:
+                if col<len(r):
+                    val=str(r[col]).replace('\n',' ')
+                    if len(val)>max_len:max_len=len(val)
+            header_len=len(self.column_label(col))
+            char_len=max(max_len,header_len,4)
+            needed=char_len*8+16
+            natural_w.append(max(120,min(800,needed)))
+        total_natural=sum(natural_w)
+        if total_natural<=avail_w:
+            extra=avail_w-total_natural
+            widths=[round(w+extra*(w/total_natural)) for w in natural_w]
+            diff=avail_w-sum(widths)
+            if widths:widths[-1]+=diff
+        else:
+            widths=natural_w
+        self.col_widths=widths
+        self.col_x=[42]
+        for w in widths:self.col_x.append(self.col_x[-1]+w)
+        self.total_width=self.col_x[-1]
+
     def transpose(self):
         self.stats_generation+=1
         self.transposed=not self.transposed
@@ -64,7 +95,6 @@ class Table(tk.Frame):
         else:self.rows=self.original_rows
         self.columns=max(map(len,self.rows),default=0)
         self.selected.clear();self.anchor=None;self.summary.configure(text='')
-        self.canvas.configure(scrollregion=(0,0,self.columns*self.cell_width+42,(len(self.rows)+1)*self.row_height))
         self.canvas.xview_moveto(0);self.canvas.yview_moveto(0);self.draw()
 
     @staticmethod
@@ -90,33 +120,48 @@ class Table(tk.Frame):
 
     def draw(self):
         c=self.canvas;p=self.palette;c.delete('all')
+        self.compute_column_layout()
+        if not self.col_widths:return
         x0=c.canvasx(0);y0=c.canvasy(0)
-        first_col=max(0,int((x0-42)//self.cell_width))
-        last_col=min(self.columns,int((x0+c.winfo_width())//self.cell_width)+1)
+        c_w=c.winfo_width();c_h=c.winfo_height()
+        region_w=max(c_w,self.total_width)
+        region_h=(len(self.rows)+1)*self.row_height
+        c.configure(scrollregion=(0,0,region_w,region_h))
         first_row=max(0,int(y0//self.row_height)-1)
-        last_row=min(len(self.rows),int((y0+c.winfo_height())//self.row_height)+1)
+        last_row=min(len(self.rows),int((y0+c_h)//self.row_height)+1)
         for row in range(first_row,last_row):
             y=(row+1)*self.row_height
-            for col in range(first_col,last_col):
-                x=42+col*self.cell_width;chosen=(row,col) in self.selected
+            for col in range(self.columns):
+                x=self.col_x[col]
+                w=self.col_widths[col]
+                if x+w<x0 or x>x0+c_w:continue
+                chosen=(row,col) in self.selected
                 bg=p['selected'] if chosen else (p['button'] if row==0 else p['alt'] if row%2==0 else p['panel'])
-                c.create_rectangle(x,y,x+self.cell_width,y+self.row_height,fill=bg,outline=p['line'])
+                c.create_rectangle(x,y,x+w,y+self.row_height,fill=bg,outline=p['line'])
                 text=str(self.value(row,col)).replace('\n',' ↵ ')
-                # Only the display is clipped; copying/statistics use full values.
-                if len(text)>23:text=text[:22]+'…'
+                max_chars=max(3,int((w-14)/7.6))
+                if len(text)>max_chars:text=text[:max_chars-1]+'…'
                 c.create_text(x+6,y+15,anchor='w',text=text,font=('JetBrains Mono',10),fill=p['selected_fg'] if chosen else p['fg'])
             c.create_rectangle(x0,y,x0+42,y+self.row_height,fill=p['alt'],outline=p['line'])
             c.create_text(x0+21,y+15,text=str(row+1),font=('JetBrains Mono',9),fill=p['muted'])
-        for col in range(first_col,last_col):
-            x=42+col*self.cell_width
-            c.create_rectangle(x,y0,x+self.cell_width,y0+self.row_height,fill=p['alt'],outline=p['line'])
-            c.create_text(x+self.cell_width/2,y0+15,text=self.column_label(col),font=('JetBrains Mono',10),fill=p['green'])
+        for col in range(self.columns):
+            x=self.col_x[col]
+            w=self.col_widths[col]
+            if x+w<x0 or x>x0+c_w:continue
+            c.create_rectangle(x,y0,x+w,y0+self.row_height,fill=p['alt'],outline=p['line'])
+            c.create_text(x+w/2,y0+15,text=self.column_label(col),font=('JetBrains Mono',10),fill=p['green'])
         c.create_rectangle(x0,y0,x0+42,y0+self.row_height,fill=p['alt'],outline=p['line'])
 
     def location(self,event):
         x=self.canvas.canvasx(event.x);y=self.canvas.canvasy(event.y)
         row=-1 if event.y<self.row_height else int(y//self.row_height)-1
-        col=-1 if event.x<42 else int((x-42)//self.cell_width)
+        if event.x<42 or not self.col_widths:
+            col=-1
+        else:
+            col=-1
+            for c in range(len(self.col_widths)):
+                if self.col_x[c]<=x<self.col_x[c+1]:
+                    col=c;break
         return row,col
 
     def click(self,event):

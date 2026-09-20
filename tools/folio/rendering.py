@@ -213,7 +213,10 @@ document.addEventListener('DOMContentLoaded',async()=>{
 });
 </script></body></html>'''
 
-    return theme_colors(output,dark).replace('FOLIO_DOCUMENT_BODY',rendered_body(source),1)
+    body = rendered_body(source)
+    if '<table' in body:
+        output = output.replace('article {max-width:1000px;', 'article {max-width:none;')
+    return theme_colors(output,dark).replace('FOLIO_DOCUMENT_BODY',body,1)
 
 
 def theme_colors(text,dark):

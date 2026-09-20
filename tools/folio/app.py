@@ -550,7 +550,7 @@ class Folio:
         self.embedded_tables=[];rows=[]
         def replace(match):
             parser=TableParser();parser.feed(match[0]);rows.append(parser.rows)
-            height=min(360,30*(len(parser.rows)+1)+70)
+            height=min(500,30*(len(parser.rows)+1)+70)
             return f'<object id="folio-table-{len(rows)-1}" style="width:100%;height:{height}px"></object>'
         body=re.sub(r'<div class="(?:table-controls|table-stats)"[^>]*>[\s\S]*?</div>','',body)
         body=re.sub(r'<t[dh] class="row-grip"[^>]*>[\s\S]*?</t[dh]>','',body)
@@ -573,7 +573,8 @@ class Folio:
         body = re.sub(r'(<a\b[^>]*>[\s\S]*?</a>)|(<img\b[^>]*>)', wrap_img, body)
         css=CSS.replace('article','.article').replace(':root {color-scheme:light}','')
         # Tkhtml renders conservative HTML/CSS; advanced scripts never run here.
-        css+='\n.article {padding:25px 36px;max-width:1000px} object {display:block} img {max-width:100%;cursor:pointer}\n'
+        max_w = 'none;width:100%' if rows else '1000px'
+        css+=f'\n.article {{padding:25px 36px;max-width:{max_w}}} object {{display:block;width:100%}} img {{max-width:100%;cursor:pointer}}\n'
         css=theme_colors(css,self.dark)
         base=self.current.path.parent.as_uri()+'/' if self.current.path else Path.home().as_uri()+'/'
         self.html.load_html('<html><head><style>'+css+'</style></head><body><div class="article">'+body+'</div></body></html>',base_url=base)
