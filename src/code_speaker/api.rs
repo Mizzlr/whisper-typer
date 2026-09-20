@@ -308,11 +308,13 @@ fn spawn_queue_consumer(
             let tts2 = tts.clone();
             let job_text = job.text;
             let job_event = job.event_type;
+            let job_sid = job.session_id.clone();
             let enabled2 = enabled.clone();
             let discard_before2 = discard_before.clone();
             let job_generation = job.generation;
             let speak_handle = tokio::spawn(async move {
-                do_speak(
+                tts2.set_current_session(Some(job_sid));
+                let res = do_speak(
                     &tts2,
                     job_text,
                     job_event,
@@ -320,7 +322,9 @@ fn spawn_queue_consumer(
                     &discard_before2,
                     job_generation,
                 )
-                .await
+                .await;
+                tts2.set_current_session(None);
+                res
             });
 
             let (cancelled, delivery) = match speak_handle.await {
@@ -495,8 +499,10 @@ async fn handle_user_input(
         });
     }
 
-    // Interrupt any in-progress speech for the focus session — they're typing, no need to talk over them
-    state.tts.interrupt();
+    // Interrupt in-progress speech only if it belongs to the session where user input occurred
+    if !req.session_id.is_empty() {
+        state.tts.interrupt_for_session(&req.session_id);
+    }
 
     // Re-queue deferred items that aren't from the user's current session
     let items: Vec<SpeakJob> = {
@@ -812,5 +818,30 @@ mod dnd_tests {
                 .unwrap();
             assert_eq!(deferred.lock().unwrap().len(), expected_deferred);
         }
+    }
+
+    #[test]
+    fn interrupt_for_session_only_affects_matching_session() {
+        let tts = KokoroTtsEngine::new(&crate::config::TTSConfig::default());
+        tts.set_current_session(Some("session-alpha".into()));
+
+        // Not speaking yet:
+        tts.interrupt_for_session("session-alpha");
+        assert!(!tts.is_cancelled());
+
+        // When speaking:
+        tts.set_speaking_for_test(true);
+
+        // Different session must NOT interrupt:
+        tts.interrupt_for_session("session-beta");
+        assert!(!tts.is_cancelled());
+
+        // Empty session must NOT interrupt:
+        tts.interrupt_for_session("");
+        assert!(!tts.is_cancelled());
+
+        // Matching session MUST interrupt:
+        tts.interrupt_for_session("session-alpha");
+        assert!(tts.is_cancelled());
     }
 }

@@ -69,6 +69,7 @@ pub struct KokoroTtsEngine {
     speaking: Arc<AtomicBool>,
     speak_lock: AsyncMutex<()>,
     active_sink: Arc<Mutex<Option<Sink>>>,
+    current_session: Arc<Mutex<Option<String>>>,
 
     /// External flag: true when voice input is idle (safe to speak).
     /// Connected to VoiceGate.is_idle from the dictation service.
@@ -107,6 +108,7 @@ impl KokoroTtsEngine {
             speaking: Arc::new(AtomicBool::new(false)),
             speak_lock: AsyncMutex::new(()),
             active_sink: Arc::new(Mutex::new(None)),
+            current_session: Arc::new(Mutex::new(None)),
             voice_idle: Arc::new(AtomicBool::new(true)),
             voice_idle_notify: Arc::new(Notify::new()),
             model_path,
@@ -121,6 +123,15 @@ impl KokoroTtsEngine {
 
     pub fn is_speaking(&self) -> bool {
         self.speaking.load(Ordering::Relaxed)
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn set_speaking_for_test(&self, speaking: bool) {
+        self.speaking.store(speaking, Ordering::Relaxed);
     }
 
     pub fn current_voice(&self) -> String {
@@ -466,6 +477,40 @@ impl KokoroTtsEngine {
         *self.active_sink.lock().unwrap() = None;
 
         was_cancelled
+    }
+
+    /// Set the session ID of the currently playing job.
+    pub fn set_current_session(&self, session_id: Option<String>) {
+        *self.current_session.lock().unwrap() = session_id;
+    }
+
+    /// Get the session ID of the currently playing job.
+    pub fn current_session(&self) -> Option<String> {
+        self.current_session.lock().unwrap().clone()
+    }
+
+    /// Interrupt current speech only if it belongs to the specified session.
+    /// Does not interrupt if session_id is empty or belongs to a different session.
+    pub fn interrupt_for_session(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        if self.speaking.load(Ordering::Relaxed) {
+            let matches = self
+                .current_session
+                .lock()
+                .unwrap()
+                .as_deref()
+                .map(|cur| cur == session_id)
+                .unwrap_or(false);
+            if matches {
+                self.cancel_flag.store(true, Ordering::Relaxed);
+                if let Some(sink) = self.active_sink.lock().unwrap().take() {
+                    sink.stop();
+                }
+                info!("TTS interrupted for session {session_id}");
+            }
+        }
     }
 
     /// Interrupt current speech so a new one can take over.
