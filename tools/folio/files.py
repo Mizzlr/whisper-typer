@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 
-EXTENSIONS = r'(?:md|markdown|csv|tsv|txt|log|json|jsonl|yaml|yml|toml|rs|py|html|pdf|sql|sh|zip)'
+EXTENSIONS = r'(?:md|markdown|mdown|mkd|csv|tsv|txt|log|json|jsonl|yaml|yml|toml|rs|py|html|pdf|sql|sh|bash|zsh|zip|c|cpp|cc|cxx|h|hpp|go|ts|tsx|js|jsx|xml|ini|conf|cfg|service|timer|socket|target|slice|mount|automount|scope)'
 
 
 def pasted_paths(text):
@@ -82,6 +82,12 @@ class PathResolver:
         self.indexed_at={}
         self.results={}
         self.lock=threading.RLock()
+        self.systemd_dirs = [
+            self.home / '.config/systemd/user',
+            Path('/etc/systemd/system'),
+            Path('/usr/lib/systemd/system'),
+            Path('/lib/systemd/system'),
+        ]
         self.discover()
 
     def discover(self):
@@ -118,6 +124,8 @@ class PathResolver:
             if path.is_file() or path.is_dir():
                 return [path.resolve()]
         roots = [self.cwd, self.home, *self.repos]
+        if path.suffix.lower() in ('.service', '.timer', '.socket', '.target', '.slice', '.mount', '.automount', '.scope') or path.suffix == '':
+            roots.extend(d for d in self.systemd_dirs if d.is_dir())
         if context:
             base=Path(context) if Path(context).is_dir() else Path(context).parent
             local = base / path
@@ -128,6 +136,10 @@ class PathResolver:
             candidate = root / path
             if candidate.is_file() or candidate.is_dir():
                 matches.add(candidate.resolve())
+            elif path.suffix == '':
+                service_cand = root / (name + '.service')
+                if service_cand.is_file():
+                    matches.add(service_cand.resolve())
         if matches:
             return sorted(matches)
         if name.startswith('refs/'):
@@ -245,7 +257,12 @@ def load_document(path):
             dialect = None
         rows = list(csv.reader(io.StringIO(text), dialect=dialect)) if dialect else list(csv.reader(io.StringIO(text), delimiter=delimiter))
         return Document(path, 'csv', text, rows)
-    return Document(path, 'markdown' if ext in ('.md', '.markdown', '.txt') else 'text', text)
+    is_markdown = (
+        ext in ('.md', '.markdown', '.mdown', '.mkd', '.mkdn', '.mdwn', '.txt')
+        or path.stem.lower() in ('readme', 'todo', 'changelog', 'notes', 'contributing', 'license', 'agents', 'gemini')
+        or (ext == '' and (text.startswith('#') or '\n# ' in text[:1000] or '\n## ' in text[:1000]))
+    )
+    return Document(path, 'markdown' if is_markdown else 'text', text)
 
 
 def unzip_contents(path, destination):
@@ -300,3 +317,23 @@ def pdf_page(path, page, dpi):
                              '-scale-to', '4096', '-r', str(dpi), '-png', str(path)],
                             capture_output=True, check=True, timeout=60)
     return result.stdout
+
+
+def latest_history_file(history, batches=None):
+    """Find the most recent readable document from opened history or paste batches."""
+    if history:
+        for path in history.recent_files():
+            if path.is_file() and path.suffix.lower() != '.pdf':
+                return path
+    if batches:
+        for batch in batches:
+            for p in batch.get('paths', []):
+                path = Path(p)
+                if path.is_file() and path.suffix.lower() != '.pdf':
+                    return path
+    if history:
+        recent = history.recent_files()
+        if recent and recent[0].is_file():
+            return recent[0]
+    return None
+

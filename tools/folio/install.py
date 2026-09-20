@@ -63,29 +63,73 @@ def install():
     executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_text('#!/bin/sh\ncase "$1" in\n  --qt) shift; exec /usr/bin/python3 "$HOME/.local/lib/folio/qt_app.py" "$@" ;;\n  *) exec "$HOME/.local/share/folio/venv/bin/python" "$HOME/.local/lib/folio/app.py" "$@" ;;\nesac\n')
     executable.chmod(0o755)
+    FOLIO_MIME_TYPES = [
+        'text/plain', 'application/x-zerosize',
+        'text/markdown', 'text/x-markdown',
+        'application/json', 'application/x-json', 'application/jsonlines', 'text/json',
+        'text/rust', 'text/x-rust', 'application/rust', 'text/x-rustsrc',
+        'text/x-python', 'text/x-python3',
+        'text/csv', 'text/x-csv', 'application/csv', 'text/tab-separated-values',
+        'application/toml', 'text/x-toml', 'text/toml',
+        'application/yaml', 'application/x-yaml', 'text/yaml', 'text/x-yaml',
+        'text/x-sh', 'text/x-shellscript', 'application/x-shellscript', 'text/x-bash', 'text/x-zsh',
+        'application/sql', 'text/x-sql', 'text/sql', 'application/x-sql',
+        'text/x-c', 'text/x-c++', 'text/x-csrc', 'text/x-c++src', 'text/x-chdr', 'text/x-c++hdr',
+        'text/x-go', 'text/x-java', 'text/x-java-source', 'text/x-kotlin',
+        'application/javascript', 'text/javascript', 'application/x-javascript',
+        'application/typescript', 'text/typescript', 'application/x-typescript',
+        'text/css', 'application/xml', 'text/xml',
+        'text/x-log', 'text/x-config', 'text/x-ini',
+        'text/x-systemd-unit', 'text/x-dbus-service',
+        'application/pdf',
+    ]
+    mimes_str = ';'.join(FOLIO_MIME_TYPES) + ';'
     desktop = home / '.local/share/applications/folio.desktop'
     desktop.parent.mkdir(parents=True, exist_ok=True)
     desktop.write_text(f'''[Desktop Entry]
 Type=Application
 Name=Folio
 Comment=A local reading desk for files, diagrams and mathematics
-Exec="{executable}" %F
+Exec={executable} %F
 Icon=accessories-text-editor
 Terminal=false
 StartupWMClass=Folio
 Categories=Utility;Office;
-MimeType=text/markdown;text/csv;text/plain;application/pdf;
+MimeType={mimes_str}
 ''')
     (desktop.parent/'folio-qt.desktop').write_text(f'''[Desktop Entry]
 Type=Application
 Name=Folio (Qt)
 Comment=Compare the Qt reading interface
-Exec="{executable}" --qt %F
+Exec={executable} --qt %F
 Icon=accessories-text-editor
 Terminal=false
 StartupWMClass=FolioQt
 Categories=Utility;Office;
+MimeType={mimes_str}
 ''')
+    for mime_file in (home / '.config/mimeapps.list', home / '.config/gnome-mimeapps.list'):
+        lines = mime_file.read_text().splitlines() if mime_file.exists() else []
+        header_idx = next((i for i, l in enumerate(lines) if l.strip() == '[Default Applications]'), -1)
+        if header_idx == -1:
+            lines.insert(0, '[Default Applications]')
+            header_idx = 0
+        defaults = {}
+        end_idx = len(lines)
+        for i in range(header_idx + 1, len(lines)):
+            line = lines[i].strip()
+            if line.startswith('[') and line.endswith(']'):
+                end_idx = i
+                break
+            if '=' in line:
+                k, v = line.split('=', 1)
+                defaults[k.strip()] = v.strip()
+        for m in FOLIO_MIME_TYPES:
+            defaults[m] = 'folio.desktop'
+        new_defaults = [f'{k}={v}' for k, v in defaults.items()]
+        mime_file.write_text('\n'.join(lines[:header_idx + 1] + new_defaults + lines[end_idx:]) + '\n')
+    if shutil.which('update-desktop-database'):
+        subprocess.run(['update-desktop-database', str(desktop.parent)], check=False, capture_output=True)
     print('Installed Folio. Launch from Applications or run: folio')
 
 

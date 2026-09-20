@@ -25,6 +25,11 @@ class Bridge(QtCore.QObject):
 
 def main():
     source=sys.stdin.read()
+    output_path = None
+    if '--output' in sys.argv:
+        idx = sys.argv.index('--output')
+        if idx + 1 < len(sys.argv):
+            output_path = Path(sys.argv[idx + 1])
     app=QtWidgets.QApplication(['folio-typesetter'])
     view=QWebEngineView();view.resize(1400,1800);view.show()
     channel=QWebChannel(view.page());bridge=Bridge(channel)
@@ -43,7 +48,12 @@ def main():
             state={'body':data['body']}
             def capture(index):
                 if index==len(data['items']):
-                    print(json.dumps(state['body']));app.quit();return
+                    payload = json.dumps(state['body'])
+                    if output_path:
+                        output_path.write_text(payload, encoding='utf-8')
+                    else:
+                        print('FOLIO_JSON_START' + payload + 'FOLIO_JSON_END')
+                    app.quit();return
                 item=data['items'][index]
                 def positioned(r):
                     def painted():

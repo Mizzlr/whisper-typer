@@ -17,7 +17,7 @@ from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineProfile, QWebEngineView
 
-from files import Document, PathResolver, load_document, pasted_paths, pdf_page, image_text, unzip_contents, pretty_json
+from files import Document, PathResolver, load_document, pasted_paths, pdf_page, image_text, unzip_contents, pretty_json, latest_history_file
 from rendering import VENDOR, document_html, theme_colors
 from cell_stats import selection_summary, display_summary
 from history import History
@@ -246,12 +246,15 @@ class SourceHighlight(QtGui.QSyntaxHighlighter):
     def __init__(self,document,path,dark):
         super().__init__(document)
         from pygments import lex
-        from pygments.lexers import get_lexer_for_filename
+        from pygments.lexers import get_lexer_for_filename, guess_lexer
         from pygments.util import ClassNotFound
         self.lines={}
-        if not path or not syntax_safe(document.toPlainText()):return
-        try:lexer=get_lexer_for_filename(path.name)
-        except ClassNotFound:return
+        text=document.toPlainText()
+        if not path or not syntax_safe(text):return
+        try:lexer=get_lexer_for_filename(path.name, text)
+        except ClassNotFound:
+            try:lexer=guess_lexer(text)
+            except ClassNotFound:return
         style=source_style(dark)
         line=0;offset=0
         for token,value in lex(document.toPlainText(),lexer):
@@ -1358,7 +1361,16 @@ def main():
     elif len(sys.argv)==3 and sys.argv[1]=='--image':
         window.parse_image(QtGui.QImage(sys.argv[2]))
     elif len(sys.argv) > 1:
-        window.path_input.setPlainText('\n'.join(sys.argv[1:]))
+        paths = [Path(p).expanduser().resolve() for p in sys.argv[1:] if Path(p).expanduser().exists()]
+        if paths:
+            window.context_entries = paths
+            window.load_path(paths[0])
+        else:
+            window.path_input.setPlainText('\n'.join(sys.argv[1:]))
+    else:
+        latest = latest_history_file(window.history, window.batches)
+        if latest:
+            window.load_path(latest)
     return application.exec_()
 
 

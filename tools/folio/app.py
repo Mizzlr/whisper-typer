@@ -19,10 +19,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 from tkinter import ttk
 from urllib.parse import urlparse, unquote
-
 from PIL import Image, ImageTk
 from tkinterweb import HtmlFrame
-from files import Document, PathResolver, load_document, pasted_paths, image_text, unzip_contents, pretty_json
+from files import Document, PathResolver, load_document, pasted_paths, image_text, unzip_contents, pretty_json, latest_history_file
 from rendering import CSS, rendered_body, theme_colors
 from clipboard import read_clipboard
 from history import History
@@ -58,15 +57,39 @@ def local_resource(url,data=None,method='GET',encoding=None):
     raise ValueError('External embedded resources are disabled.')
 
 
-def typeset(source,dark=False):
-    if not re.search(r'\$|\\\(|\\\[|```mermaid|^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap|timeline|journey)\b',source,re.M):
+_MATH_OR_DIAGRAM_PATTERN = re.compile(
+    r'\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|(?<![\\$])\$(?!\$)(?:[^$\n]|\\\$)+?\$|```mermaid|^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap|timeline|journey)\b',
+    re.M
+)
+
+
+def typeset(source, dark=False):
+    if not _MATH_OR_DIAGRAM_PATTERN.search(source):
         return rendered_body(source)
-    worker=Path(__file__).with_name('render_worker.py')
-    env=dict(os.environ,QTWEBENGINE_CHROMIUM_FLAGS='--disable-gpu',QT_QUICK_BACKEND='software')
-    result=subprocess.run(['xvfb-run','-a','/usr/bin/python3',str(worker)]+(['--dark'] if dark else []),input=source,
-                          text=True,capture_output=True,timeout=30,env=env)
-    if result.returncode:raise ValueError('Local diagram/math typesetting failed; Source is available from the menu.')
-    return json.loads(result.stdout)
+    worker = Path(__file__).with_name('render_worker.py')
+    env = dict(os.environ, QTWEBENGINE_CHROMIUM_FLAGS='--disable-gpu', QT_QUICK_BACKEND='software')
+    out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as out_tmp:
+            out_path = Path(out_tmp.name)
+        cmd = ['xvfb-run', '-a', '/usr/bin/python3', str(worker)] + (['--dark'] if dark else []) + ['--output', str(out_path)]
+        result = subprocess.run(cmd, input=source, text=True, capture_output=True, timeout=15, env=env)
+        if result.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            content = out_path.read_text(encoding='utf-8')
+            return json.loads(content)
+        if result.stdout and 'FOLIO_JSON_START' in result.stdout:
+            raw = result.stdout.split('FOLIO_JSON_START', 1)[1].split('FOLIO_JSON_END', 1)[0]
+            return json.loads(raw)
+    except Exception:
+        pass
+    finally:
+        if out_path and out_path.exists():
+            try:
+                out_path.unlink()
+            except OSError:
+                pass
+    # Always gracefully fall back to local offline markdown rendering!
+    return rendered_body(source)
 
 
 class Folio:
@@ -368,7 +391,10 @@ class Folio:
     def go_back(self):
         self.navigation+=1
         if self.view!='list':
-            self.view='list';self.show_list_controls();self.render_list()
+            if not self.context_stack and (self.context_label=='Paths' or len(self.context_entries)<=1):
+                self.show_history()
+            else:
+                self.view='list';self.show_list_controls();self.render_list()
         elif self.context_stack:
             label,entries=self.context_stack.pop();self.show_context(entries,label)
         else:self.show_history()
@@ -461,7 +487,15 @@ class Folio:
         self.status.configure(text='Rendering…')
         def ready(body,error):
             if navigation!=self.navigation or self.view!='document':return
-            if error:self.status.configure(text=error);self.show_source();return
+            if error:
+                try:
+                    fallback = rendered_body(document.text)
+                    self.rendered[key] = fallback
+                    self.show_html(fallback)
+                    self.status.configure(text='')
+                    return
+                except Exception:
+                    self.status.configure(text=error);self.show_source();return
             self.rendered[key]=body;self.show_html(body);self.status.configure(text='')
         dark=self.dark
         self.submit(lambda:typeset(document.text,dark),ready)
@@ -541,10 +575,12 @@ class Folio:
             self.status.configure(text='Raw text · syntax coloring skipped for large files or long lines.')
             return
         from pygments import lex
-        from pygments.lexers import get_lexer_for_filename
+        from pygments.lexers import get_lexer_for_filename, guess_lexer
         from pygments.util import ClassNotFound
-        try:lexer=get_lexer_for_filename(self.current.path.name)
-        except ClassNotFound:return
+        try:lexer=get_lexer_for_filename(self.current.path.name, text)
+        except ClassNotFound:
+            try:lexer=guess_lexer(text)
+            except ClassNotFound:return
         style=source_style(self.dark)
         document=self.current;navigation=self.navigation
         text=self.source.get('1.0','end-1c')
@@ -647,7 +683,17 @@ def main():
     root=tk.Tk(className='Folio');app=Folio(root)
     if len(sys.argv)==3 and sys.argv[1]=='--read':app.load_path(Path(sys.argv[2]))
     elif len(sys.argv)==3 and sys.argv[1]=='--image':app.paste(image=Image.open(sys.argv[2]))
-    elif len(sys.argv)>1:app.paste(text='\n'.join(sys.argv[1:]))
+    elif len(sys.argv)>1:
+        paths=[Path(p).expanduser().resolve() for p in sys.argv[1:] if Path(p).expanduser().exists()]
+        if paths:
+            app.context_entries=paths
+            app.load_path(paths[0])
+        else:
+            app.paste(text='\n'.join(sys.argv[1:]))
+    else:
+        latest=latest_history_file(app.history, app.batches)
+        if latest:
+            app.load_path(latest)
     root.mainloop()
 
 

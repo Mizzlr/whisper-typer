@@ -93,59 +93,75 @@ if(!Array.prototype.at)Array.prototype.at=function(i){i=Math.trunc(i)||0;return 
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded',async()=>{
- mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',themeVariables:{primaryColor:'#e7eee2',primaryTextColor:'#304439',primaryBorderColor:'#9eb493',lineColor:'#789181',fontFamily:'JetBrains Mono'}});
- const bridge=await new Promise(resolve=>new QWebChannel(qt.webChannelTransport,c=>resolve(c.objects.folio)));
  try {
- await mermaid.run({querySelector:'.mermaid'});
- } catch(e) {let p=document.createElement('p');p.className='render-error';p.textContent='Diagram: '+e.message;document.querySelector('article').appendChild(p);}
- for (const block of document.querySelectorAll('pre:not(.mermaid)')) {
-  const b=document.createElement('button');b.className='copy-code';b.textContent='Copy';
-  b.onclick=()=>{bridge.copy((block.querySelector('code')||block).textContent);b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1000);};
-  block.prepend(b);
- }
- const originals=new WeakMap(),transposed=new WeakMap();
- function initializeTables(tables=document.querySelectorAll('article table')) {
- for (const table of tables) {
-  if(table.previousElementSibling?.classList.contains('table-controls'))table.previousElementSibling.remove();
-  const controls=document.createElement('div');controls.className='table-controls';
-  const transpose=document.createElement('button');transpose.textContent='Transpose';transpose.onclick=()=>window.transposeTable(table);
-  controls.append(transpose);table.before(controls);
-  const rows=Array.from(table.rows);let anchor=null;let revision=0;
-  const status=document.createElement('div');status.className='table-stats';
-  const output=document.createElement('span');status.append(output);
-  const copy=document.createElement('button');copy.className='copy-code';copy.textContent='Copy selection';status.prepend(copy);table.after(status);
-  const cells=rows.map((row,r)=>Array.from(row.cells).map((cell,c)=>{cell.dataset.row=r;cell.dataset.col=c;return cell;}));
-  const selected=new Set();
-  const update=()=>{const version=++revision;for(const row of cells)for(const cell of row)cell.classList.toggle('folio-selected',selected.has(cell));bridge.stats(JSON.stringify(Array.from(selected).map(c=>c.textContent)),text=>{if(version===revision){output.textContent=text;}});};
-  copy.onclick=()=>{const out=[];for(const row of cells){const chosen=row.filter(c=>selected.has(c));if(chosen.length)out.push(chosen.map(c=>c.textContent).join('\\t'));}bridge.copy(out.join('\\n'));};
-  for (let r=0;r<rows.length;r++) {
-   const grip=document.createElement(r===0?'th':'td');grip.className='row-grip';grip.textContent=r===0?'#':r;
-   rows[r].prepend(grip);
-   grip.onclick=e=>{if(!e.ctrlKey&&!e.metaKey)selected.clear();for(const cell of cells[r])selected.add(cell);update();};
-   for(const cell of cells[r])cell.onclick=e=>{
-    const col=Number(cell.dataset.col);
-    if(!e.ctrlKey&&!e.metaKey)selected.clear();
-    if(cell.tagName==='TH'){for(const row of cells)if(row[col])selected.add(row[col]);}
-    else if(e.shiftKey&&anchor){const [ar,ac]=anchor;for(let rr=Math.min(ar,r);rr<=Math.max(ar,r);rr++)for(let cc=Math.min(ac,col);cc<=Math.max(ac,col);cc++)if(cells[rr][cc])selected.add(cells[rr][cc]);}
-    else {if(selected.has(cell))selected.delete(cell);else selected.add(cell);anchor=[r,col];}
-    update();
-   };
+  if (typeof mermaid !== 'undefined') {
+   mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',themeVariables:{primaryColor:'#e7eee2',primaryTextColor:'#304439',primaryBorderColor:'#9eb493',lineColor:'#789181',fontFamily:'JetBrains Mono'}});
   }
+  let bridge = null;
+  if (typeof qt !== 'undefined' && qt.webChannelTransport) {
+   try {
+    bridge = await new Promise(resolve=>new QWebChannel(qt.webChannelTransport,c=>resolve(c.objects.folio)));
+   } catch(e) {}
+  }
+  try {
+   if (typeof mermaid !== 'undefined') {
+    await mermaid.run({querySelector:'.mermaid'});
+   }
+  } catch(e) {let p=document.createElement('p');p.className='render-error';p.textContent='Diagram: '+e.message;document.querySelector('article')?.appendChild(p);}
+  if (bridge) {
+   for (const block of document.querySelectorAll('pre:not(.mermaid)')) {
+    const b=document.createElement('button');b.className='copy-code';b.textContent='Copy';
+    b.onclick=()=>{bridge.copy((block.querySelector('code')||block).textContent);b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1000);};
+    block.prepend(b);
+   }
+  }
+  const originals=new WeakMap(),transposed=new WeakMap();
+  function initializeTables(tables=document.querySelectorAll('article table')) {
+  for (const table of tables) {
+   if(table.previousElementSibling?.classList.contains('table-controls'))table.previousElementSibling.remove();
+   const controls=document.createElement('div');controls.className='table-controls';
+   const transpose=document.createElement('button');transpose.textContent='Transpose';transpose.onclick=()=>window.transposeTable(table);
+   controls.append(transpose);table.before(controls);
+   const rows=Array.from(table.rows);let anchor=null;let revision=0;
+   const status=document.createElement('div');status.className='table-stats';
+   const output=document.createElement('span');status.append(output);
+   const copy=document.createElement('button');copy.className='copy-code';copy.textContent='Copy selection';status.prepend(copy);table.after(status);
+   const cells=rows.map((row,r)=>Array.from(row.cells).map((cell,c)=>{cell.dataset.row=r;cell.dataset.col=c;return cell;}));
+   const selected=new Set();
+   const update=()=>{const version=++revision;for(const row of cells)for(const cell of row)cell.classList.toggle('folio-selected',selected.has(cell));if(bridge){bridge.stats(JSON.stringify(Array.from(selected).map(c=>c.textContent)),text=>{if(version===revision){output.textContent=text;}});}};
+   copy.onclick=()=>{const out=[];for(const row of cells){const chosen=row.filter(c=>selected.has(c));if(chosen.length)out.push(chosen.map(c=>c.textContent).join('\\t'));}if(bridge){bridge.copy(out.join('\\n'));}};
+   for (let r=0;r<rows.length;r++) {
+    const grip=document.createElement(r===0?'th':'td');grip.className='row-grip';grip.textContent=r===0?'#':r;
+    rows[r].prepend(grip);
+    grip.onclick=e=>{if(!e.ctrlKey&&!e.metaKey)selected.clear();for(const cell of cells[r])selected.add(cell);update();};
+    for(const cell of cells[r])cell.onclick=e=>{
+     const col=Number(cell.dataset.col);
+     if(!e.ctrlKey&&!e.metaKey)selected.clear();
+     if(cell.tagName==='TH'){for(const row of cells)if(row[col])selected.add(row[col]);}
+     else if(e.shiftKey&&anchor){const [ar,ac]=anchor;for(let rr=Math.min(ar,r);rr<=Math.max(ar,r);rr++)for(let cc=Math.min(ac,col);cc<=Math.max(ac,col);cc++)if(cells[rr][cc])selected.add(cells[rr][cc]);}
+     else {if(selected.has(cell))selected.delete(cell);else selected.add(cell);anchor=[r,col];}
+     update();
+    };
+   }
+  }
+  }
+  initializeTables();
+  window.transposeTable=table=>{
+    if(!originals.has(table))originals.set(table,Array.from(table.rows).map(row=>Array.from(row.cells).filter(cell=>!cell.classList.contains('row-grip')).map(cell=>cell.textContent)));
+    const original=originals.get(table),next=!transposed.get(table);transposed.set(table,next);
+    const width=Math.max(0,...original.map(row=>row.length));
+    const values=next?Array.from({length:width},(_,c)=>original.map(row=>row[c]||'')):original;
+    if(table.nextElementSibling?.classList.contains('table-stats'))table.nextElementSibling.remove();
+    table.innerHTML='';
+    values.forEach((row,r)=>{const tr=table.insertRow();row.forEach(value=>{const cell=document.createElement(r===0?'th':'td');cell.textContent=value;tr.appendChild(cell);});});
+   initializeTables([table]);
+  };
+  window.folioTranspose=()=>{for(const table of document.querySelectorAll('article table'))window.transposeTable(table);};
+ } catch(err) {
+  console.warn('Folio DOM init:', err);
+ } finally {
+  document.documentElement.dataset.folioReady='true';
  }
- }
- initializeTables();
- window.transposeTable=table=>{
-   if(!originals.has(table))originals.set(table,Array.from(table.rows).map(row=>Array.from(row.cells).filter(cell=>!cell.classList.contains('row-grip')).map(cell=>cell.textContent)));
-   const original=originals.get(table),next=!transposed.get(table);transposed.set(table,next);
-   const width=Math.max(0,...original.map(row=>row.length));
-   const values=next?Array.from({length:width},(_,c)=>original.map(row=>row[c]||'')):original;
-   if(table.nextElementSibling?.classList.contains('table-stats'))table.nextElementSibling.remove();
-   table.innerHTML='';
-   values.forEach((row,r)=>{const tr=table.insertRow();row.forEach(value=>{const cell=document.createElement(r===0?'th':'td');cell.textContent=value;tr.appendChild(cell);});});
-  initializeTables([table]);
- };
- window.folioTranspose=()=>{for(const table of document.querySelectorAll('article table'))window.transposeTable(table);};
- document.documentElement.dataset.folioReady='true';
 });
 </script></body></html>'''
 
