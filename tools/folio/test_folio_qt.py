@@ -232,8 +232,9 @@ class UiTests(unittest.TestCase):
         self.assertIn(str(file),self.window.batches[0]['paths'])
         self.window.open_folder(folder)
         self.wait(lambda:self.window.browsing_folder)
-        self.assertEqual(self.window.file_list.count(),1)
-        self.window.activate_item(self.window.file_list.item(0))
+        self.assertEqual(self.window.file_list.count(),2)
+        self.assertTrue(self.window.file_list.item(0).text().startswith('◂ ..'))
+        self.window.activate_item(self.window.file_list.item(1))
         self.wait(lambda:self.window.current is not None)
         self.window.escape();self.window.show_recent()
         self.assertEqual(self.window.context_entries,[file])
@@ -462,6 +463,58 @@ class UiTests(unittest.TestCase):
         self.window.zoom(1)
         self.window.escape()
         self.wait(lambda: self.window.views.currentWidget() != self.window.pdf)
+
+    def test_adhoc_tab_rename_and_projects_discovery(self):
+        from PyQt5 import QtWidgets
+        root_texts = [b.text() for b in self.window.root_controls.findChildren(QtWidgets.QPushButton)]
+        self.assertIn('Adhoc', root_texts)
+        self.assertNotIn('Ad hoc', root_texts)
+        self.assertIn('Projects', root_texts)
+        from unittest.mock import patch
+        fake_home = self.path / 'fake_home'
+        fake_home.mkdir()
+        for p in ('whisper-typer', 'astralane-quant', 'personal-finance', 'grid-grinder', 'trailblazer', 'extra-app'):
+            (fake_home / p).mkdir()
+        (fake_home / 'extra-app' / 'Cargo.toml').write_text('[package]')
+        (fake_home / 'non-project').mkdir()
+        with patch('pathlib.Path.home', return_value=fake_home):
+            self.window.show_projects()
+            expected = [
+                fake_home / 'astralane-quant',
+                fake_home / 'trailblazer',
+                fake_home / 'whisper-typer',
+                fake_home / 'grid-grinder',
+                fake_home / 'personal-finance',
+                fake_home / 'extra-app',
+            ]
+            self.assertEqual(self.window.context_entries, expected)
+
+    def test_folder_dropdown_and_parent_navigation(self):
+        self.assertEqual(self.window.folder_button.text(), '📁 Folders ▾')
+        folder = self.path / 'parent_dir' / 'child_dir'
+        folder.mkdir(parents=True)
+        file_a = folder / 'file_a.txt'
+        file_a.write_text('content')
+        self.window.open_folder(folder)
+        self.wait(lambda: self.window.browsing_folder and self.window.file_list.count() == 2)
+        self.assertEqual(self.window.folder_button.text(), '📁 child_dir ▾')
+        self.assertTrue(self.window.file_list.item(0).text().startswith('◂ .. (parent_dir)'))
+        # Activating the parent item navigates to parent folder
+        self.window.activate_item(self.window.file_list.item(0))
+        self.wait(lambda: self.window.current_folder == folder.parent)
+        self.assertEqual(self.window.folder_button.text(), '📁 parent_dir ▾')
+        # Opening document updates folder button
+        doc = Document(file_a, 'text', 'content')
+        self.window.document_ready(doc, None)
+        self.assertEqual(self.window.folder_button.text(), '📁 child_dir ▾')
+
+    def test_font_family_selection_and_persistence(self):
+        self.window.set_font_family('Google Sans Mono')
+        self.application.processEvents()
+        self.assertEqual(self.window.font_family, 'Google Sans Mono')
+        self.assertEqual(self.window.source.font().family(), 'Google Sans Mono')
+        self.assertEqual(self.window.settings.value('font_family'), 'Google Sans Mono')
+
 
 
 if __name__=='__main__':

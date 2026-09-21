@@ -25,6 +25,7 @@ class Table(tk.Frame):
         self.col_widths=[]
         self.col_x=[42]
         self.total_width=42
+        self.font_family='JetBrains Mono'
         self.font_size=10
         self.row_height=30
         self.canvas=tk.Canvas(self,bg=palette['panel'],highlightthickness=0)
@@ -32,14 +33,14 @@ class Table(tk.Frame):
         self.horizontal=ttk.Scrollbar(self,orient='horizontal',command=self.xview)
         self.controls=tk.Frame(self,bg=palette['bg'])
         self.controls.grid(row=0,column=0,columnspan=2,sticky='ew',pady=(0,5))
-        self.transpose_button=tk.Button(self.controls,text='Transpose',command=self.transpose,font=('JetBrains Mono',9),
+        self.transpose_button=tk.Button(self.controls,text='Transpose',command=self.transpose,font=(self.font_family,9),
                                        relief='solid',bd=1,padx=7,pady=3,bg=palette['bg'],fg=palette['green'],
                                        activebackground=palette['button'],activeforeground=palette['fg'],takefocus=False)
         self.transpose_button.pack(side='right')
         self.canvas.grid(row=1,column=0,sticky='nsew')
         self.vertical.grid(row=1,column=1,sticky='ns')
         self.horizontal.grid(row=2,column=0,sticky='ew')
-        self.summary=tk.Label(self,bg=palette['bg'],fg=palette['green'],font=('JetBrains Mono',9),anchor='w')
+        self.summary=tk.Label(self,bg=palette['bg'],fg=palette['green'],font=(self.font_family,9),anchor='w')
         self.summary.grid(row=3,column=0,sticky='ew',pady=5)
         self.rowconfigure(1,weight=1);self.columnconfigure(0,weight=1)
         self.canvas.configure(xscrollcommand=lambda a,b:self.scrollbar(self.horizontal,a,b),yscrollcommand=lambda a,b:self.scrollbar(self.vertical,a,b))
@@ -129,7 +130,13 @@ class Table(tk.Frame):
         if direction==0:self.font_size=10
         else:self.font_size=max(7,min(24,self.font_size+direction))
         self.row_height=max(24,int(self.font_size*3.0))
-        self.summary.configure(font=('JetBrains Mono',max(8,self.font_size-1)))
+        self.summary.configure(font=(self.font_family,max(8,self.font_size-1)))
+        self.draw()
+
+    def set_font_family(self,family):
+        self.font_family=family
+        self.summary.configure(font=(family,max(8,self.font_size-1)))
+        self.transpose_button.configure(font=(family,9))
         self.draw()
 
     def draw(self):
@@ -157,15 +164,15 @@ class Table(tk.Frame):
                 text=str(self.value(row,col)).replace('\n',' ↵ ')
                 max_chars=max(3,int((w-14)/char_w))
                 if len(text)>max_chars:text=text[:max_chars-1]+'…'
-                c.create_text(x+6,y+y_mid_offset,anchor='w',text=text,font=('JetBrains Mono',self.font_size),fill=p['selected_fg'] if chosen else p['fg'])
+                c.create_text(x+6,y+y_mid_offset,anchor='w',text=text,font=(self.font_family,self.font_size),fill=p['selected_fg'] if chosen else p['fg'])
             c.create_rectangle(x0,y,x0+42,y+self.row_height,fill=p['alt'],outline=p['line'])
-            c.create_text(x0+21,y+y_mid_offset,text=str(row+1),font=('JetBrains Mono',max(7,self.font_size-1)),fill=p['muted'])
+            c.create_text(x0+21,y+y_mid_offset,text=str(row+1),font=(self.font_family,max(7,self.font_size-1)),fill=p['muted'])
         for col in range(self.columns):
             x=self.col_x[col]
             w=self.col_widths[col]
             if x+w<x0 or x>x0+c_w:continue
             c.create_rectangle(x,y0,x+w,y0+self.row_height,fill=p['alt'],outline=p['line'])
-            c.create_text(x+w/2,y0+y_mid_offset,text=self.column_label(col),font=('JetBrains Mono',self.font_size),fill=p['green'])
+            c.create_text(x+w/2,y0+y_mid_offset,text=self.column_label(col),font=(self.font_family,self.font_size),fill=p['green'])
         c.create_rectangle(x0,y0,x0+42,y0+self.row_height,fill=p['alt'],outline=p['line'])
 
     def location(self,event):

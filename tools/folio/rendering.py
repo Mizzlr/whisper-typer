@@ -80,7 +80,7 @@ def rendered_body(source):
     return body
 
 
-def document_html(source, dark=False):
+def document_html(source, dark=False, font_family=None):
     mermaid = (VENDOR/'mermaid/dist/mermaid.min.js').as_uri()
     mathjax = (VENDOR/'mathjax/es5/tex-svg.js').as_uri()
     output = '''<!doctype html><html><head><meta charset="utf-8">
@@ -216,6 +216,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
     body = rendered_body(source)
     if '<table' in body:
         output = output.replace('article {max-width:1000px;', 'article {max-width:none;')
+    if font_family:
+        output = output.replace('"JetBrains Mono"', f'"{font_family}","JetBrains Mono"')
     return theme_colors(output,dark).replace('FOLIO_DOCUMENT_BODY',body,1)
 
 

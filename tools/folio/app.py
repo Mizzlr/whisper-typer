@@ -93,6 +93,15 @@ def typeset(source, dark=False):
     return rendered_body(source)
 
 
+AVAILABLE_FONTS=[
+    'JetBrains Mono',
+    'Google Sans Mono',
+    'DejaVu Sans Mono',
+    'Ubuntu Sans Mono',
+    'Liberation Mono',
+]
+
+
 class Folio:
     def __init__(self,root,history_path=None):
         self.root=root;root.title('Folio');root.wm_class('Folio','Folio') if hasattr(root,'wm_class') else None
@@ -101,8 +110,10 @@ class Folio:
         try:self.settings=json.loads(self.settings_path.read_text())
         except (OSError,ValueError):self.settings={}
         self.dark=bool(self.settings.get('dark',False));self.top=bool(self.settings.get('top',True))
+        self.font_family=self.settings.get('font_family','JetBrains Mono')
         self.font_size=int(self.settings.get('font_size',10))
         self.font_scale=float(self.settings.get('font_scale',1.0))
+        self.current_folder=None
         root.geometry(self.settings.get('geometry','1180x820'))
         root.attributes('-topmost',self.top)
         self.resolver=PathResolver();self.batches=self.history.recent();self.history_complete=False
@@ -116,31 +127,34 @@ class Folio:
         self.results=queue.Queue();self.paste_timer=None
         self.frame=tk.Frame(root);self.frame.pack(fill='both',expand=True,padx=16,pady=10)
         self.nav=tk.Frame(self.frame);self.nav.pack(fill='x',pady=(0,8))
-        self.date=tk.Label(self.nav,font=('JetBrains Mono',9),anchor='w');self.date.pack(side='left')
+        self.date=tk.Label(self.nav,font=(self.font_family,9),anchor='w');self.date.pack(side='left')
+        self.folder_button=self.button(self.nav,'📁 Folders ▾',self.open_folder_dropdown)
+        self.folder_button.pack(side='left',padx=(8,0))
         self.top_button=self.button(self.nav,'Top',self.toggle_top);self.top_button.configure(width=5);self.top_button.pack(side='right')
         self.back_button=self.button(self.nav,'← Back',self.go_back);self.back_button.configure(width=7);self.back_button.pack(side='right',padx=5)
         self.copy_button=self.button(self.nav,'Copy',self.copy_visible);self.copy_button.configure(width=5);self.copy_button.pack(side='right',padx=(0,5))
         self.theme_button=self.button(self.nav,'◐',self.toggle_theme);self.theme_button.configure(width=2);self.theme_button.pack(side='right',padx=(0,6))
         self.font_up_button=self.button(self.nav,'A+',lambda:self.zoom(1));self.font_up_button.configure(width=3);self.font_up_button.pack(side='right',padx=(0,2))
-        self.font_down_button=self.button(self.nav,'A-',lambda:self.zoom(-1));self.font_down_button.configure(width=3);self.font_down_button.pack(side='right',padx=(0,6))
+        self.font_down_button=self.button(self.nav,'A-',lambda:self.zoom(-1));self.font_down_button.configure(width=3);self.font_down_button.pack(side='right',padx=(0,2))
+        self.font_select_button=self.button(self.nav,'Aa ▾',self.show_font_menu);self.font_select_button.configure(width=4);self.font_select_button.pack(side='right',padx=(0,6))
         self.font_up_button.bind('<Button-3>',lambda e:self.zoom(0))
         self.font_down_button.bind('<Button-3>',lambda e:self.zoom(0))
         self.prettify_button=self.button(self.nav,'Prettify',self.toggle_prettify)
         self.pretty=False
         self.switcher=tk.Frame(self.nav)
         self.tab_buttons={}
-        for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Ad hoc',self.show_adhoc)]:
+        for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Adhoc',self.show_adhoc),('Projects',self.show_projects)]:
             button=self.button(self.switcher,label,callback);button.pack(side='left',padx=3);self.tab_buttons[label]=button
         self.switcher.pack(side='right',padx=7)
         self.reader_tabs=tk.Frame(self.nav)
         self.input_frame=tk.Frame(self.frame);self.input_frame.pack(fill='x',pady=(0,10))
-        self.path_input=tk.Text(self.input_frame,height=2,wrap='word',font=('JetBrains Mono',self.font_size),bd=1,relief='solid',padx=10,pady=8,undo=True)
+        self.path_input=tk.Text(self.input_frame,height=2,wrap='word',font=(self.font_family,self.font_size),bd=1,relief='solid',padx=10,pady=8,undo=True)
         self.path_input.pack(fill='x')
         self.path_input.bind('<<Modified>>',self.input_changed)
         for key in ('<Control-v>','<Control-V>','<Shift-Insert>','<<Paste>>'):self.path_input.bind(key,self.paste)
         self.content=tk.Frame(self.frame);self.content.pack(fill='both',expand=True)
         self.list_frame=tk.Frame(self.content)
-        self.list_text=tk.Text(self.list_frame,wrap='none',font=('JetBrains Mono',self.font_size),cursor='hand2',bd=0,padx=5,pady=2)
+        self.list_text=tk.Text(self.list_frame,wrap='none',font=(self.font_family,self.font_size),cursor='hand2',bd=0,padx=5,pady=2)
         self.list_scroll=ttk.Scrollbar(self.list_frame,command=self.list_text.yview)
         self.list_text.configure(yscrollcommand=self.list_scrolled)
         self.list_scroll.pack(side='right',fill='y');self.list_text.pack(fill='both',expand=True)
@@ -150,9 +164,9 @@ class Folio:
                            selected_text_highlight_color=LIGHT['selected'],selected_text_color=LIGHT['selected_fg'])
         self.html.bind('<Button-3>',self.menu,add='+');self.html.html.bind('<Button-3>',self.menu,add='+')
         self.source_frame=tk.Frame(self.content)
-        self.gutter=tk.Text(self.source_frame,width=5,wrap='none',state='disabled',bd=0,font=('JetBrains Mono',self.font_size),padx=5,pady=12)
+        self.gutter=tk.Text(self.source_frame,width=5,wrap='none',state='disabled',bd=0,font=(self.font_family,self.font_size),padx=5,pady=12)
         self.gutter.pack(side='left',fill='y')
-        self.source=tk.Text(self.source_frame,wrap='word',font=('JetBrains Mono',self.font_size),bd=0,padx=12,pady=12)
+        self.source=tk.Text(self.source_frame,wrap='word',font=(self.font_family,self.font_size),bd=0,padx=12,pady=12)
         self.source_scroll=ttk.Scrollbar(self.source_frame,command=self.source_yview)
         self.source.configure(yscrollcommand=self.source_scrolled)
         self.source_scroll.pack(side='right',fill='y');self.source.pack(fill='both',expand=True)
@@ -170,7 +184,7 @@ class Folio:
         for event,direction in [('<Button-4>',-1),('<Button-5>',1)]:
             self.image_canvas.bind(event,lambda e,d=direction:self.image_wheel(e,d))
         self.table=None;self.embedded_tables=[]
-        self.status=tk.Label(self.frame,font=('JetBrains Mono',9),anchor='w');self.status.pack(fill='x')
+        self.status=tk.Label(self.frame,font=(self.font_family,9),anchor='w');self.status.pack(fill='x')
         root.bind('<Control-v>',self.paste);root.bind('<Control-V>',self.paste)
         root.bind('<Shift-Insert>',self.paste);root.bind('<<Paste>>',self.paste)
         root.bind('<Escape>',lambda e:self.escape());root.bind('<Control-l>',lambda e:self.escape())
@@ -182,12 +196,12 @@ class Folio:
         self.apply_theme();self.show_history();self.tick();self.clock()
 
     def button(self,parent,text,command):
-        return tk.Button(parent,text=text,command=command,font=('JetBrains Mono',9),relief='solid',bd=1,
+        return tk.Button(parent,text=text,command=command,font=(self.font_family,9),relief='solid',bd=1,
                          padx=8,pady=3,takefocus=False,cursor='hand2')
 
     def save_settings(self):
         self.settings_path.parent.mkdir(parents=True,exist_ok=True)
-        self.settings_path.write_text(json.dumps(dict(dark=self.dark,top=self.top,font_size=self.font_size,font_scale=self.font_scale,geometry=self.root.geometry())))
+        self.settings_path.write_text(json.dumps(dict(dark=self.dark,top=self.top,font_size=self.font_size,font_scale=self.font_scale,font_family=self.font_family,geometry=self.root.geometry())))
         os.chmod(self.settings_path,0o600)
 
     def toggle_top(self):
@@ -227,7 +241,42 @@ class Folio:
         self.theme_button.configure(text='☀' if self.dark else '◐',fg=p['muted'])
         self.font_down_button.configure(bg=p['bg'],fg=p['muted'])
         self.font_up_button.configure(bg=p['bg'],fg=p['muted'])
+        self.font_select_button.configure(bg=p['bg'],fg=p['muted'])
+        self.folder_button.configure(bg=p['bg'],fg=p['green'] if self.current_folder else p['muted'])
         for label,button in self.tab_buttons.items():button.configure(bg=p['button'] if label==self.root_tab else p['bg'],fg=p['green'] if label==self.root_tab else p['muted'])
+
+    def show_font_menu(self):
+        menu=tk.Menu(self.root,tearoff=False,font=(self.font_family,10))
+        for f in AVAILABLE_FONTS:
+            menu.add_command(label=('✓ ' if f==self.font_family else '   ')+f,command=lambda fam=f:self.set_font_family(fam))
+        x=self.font_select_button.winfo_rootx()
+        y=self.font_select_button.winfo_rooty()+self.font_select_button.winfo_height()
+        menu.tk_popup(x,y)
+
+    def set_font_family(self,family):
+        self.font_family=family
+        self.source.configure(font=(family,self.font_size))
+        self.gutter.configure(font=(family,self.font_size))
+        self.list_text.configure(font=(family,self.font_size))
+        self.path_input.configure(font=(family,self.font_size))
+        self.date.configure(font=(family,9))
+        self.status.configure(font=(family,9))
+        self.top_button.configure(font=(family,9))
+        self.back_button.configure(font=(family,9))
+        self.copy_button.configure(font=(family,9))
+        self.theme_button.configure(font=(family,9))
+        self.font_up_button.configure(font=(family,9))
+        self.font_down_button.configure(font=(family,9))
+        self.font_select_button.configure(font=(family,9))
+        self.folder_button.configure(font=(family,9))
+        self.prettify_button.configure(font=(family,9))
+        for b in self.tab_buttons.values():b.configure(font=(family,9))
+        self.update_gutter()
+        if self.table:self.table.set_font_family(family)
+        for t in self.embedded_tables:t.set_font_family(family)
+        if self.view=='document' and self.current and self.current.kind=='markdown':
+            self.render_document()
+        self.save_settings()
 
     def clock(self):
         if self.closing:return
@@ -315,13 +364,15 @@ class Folio:
         for widget in self.content.winfo_children():widget.pack_forget()
 
     def show_history(self):
-        self.navigation+=1;self.root_tab='Paths';self.context_label='Paths';self.context_stack=[]
+        self.navigation+=1;self.root_tab='Paths';self.context_label='Paths';self.context_stack=[];self.current_folder=None
+        self.update_folder_button()
         self.view='list';self.show_list_controls();self.render_list()
 
     def show_list_controls(self):
         self.prettify_button.pack_forget()
         self.root.title('Folio');self.reader_tabs.pack_forget();self.switcher.pack(side='right',padx=7)
-        self.date.pack(side='left');self.input_frame.pack(fill='x',before=self.content,pady=(0,10))
+        self.date.pack(side='left');self.folder_button.pack(side='left',padx=(8,0),after=self.date)
+        self.input_frame.pack(fill='x',before=self.content,pady=(0,10))
         self.back_button.configure(state='disabled' if self.context_label=='Paths' else 'normal')
         self.update_buttons();self.hide_views();self.list_frame.pack(fill='both',expand=True);self.status.configure(text='')
 
@@ -334,12 +385,13 @@ class Folio:
 
     def render_list(self):
         text=self.list_text;p=self.palette;text.configure(state='normal');text.delete('1.0','end')
-        text.tag_configure('date',foreground=p['muted'],font=('JetBrains Mono',9),spacing1=12,spacing3=7)
+        text.tag_configure('date',foreground=p['muted'],font=(self.font_family,9),spacing1=12,spacing3=7)
         text.tag_configure('file',foreground=p['green'],spacing1=5,spacing3=5)
+        text.tag_configure('parent',foreground=p['muted'],spacing1=5,spacing3=5)
         self.list_actions=[]
-        def item(label,action,date=False):
+        def item(label,action,date=False,parent=False):
             tag=f'item{len(self.list_actions)}';self.list_actions.append(action)
-            text.insert('end',label+'\n',(tag,'date' if date else 'file'))
+            text.insert('end',label+'\n',(tag,'date' if date else ('parent' if parent else 'file')))
             text.tag_bind(tag,'<Button-1>',lambda e,callback=action:callback())
         if self.context_label=='Paths':
             for batch in self.batches:
@@ -347,6 +399,9 @@ class Folio:
                 for path in batch['paths']:item(('▸ ' if Path(path).is_dir() else '')+self.label_path(path),lambda p=path,b=batch:self.open_group_path(p,b))
                 if not batch['paths']:item('Pasted content',lambda b=batch:self.open_dump(b))
         else:
+            if self.current_folder and self.current_folder.parent and self.current_folder.parent!=self.current_folder and self.context_label not in ('Paths','Recent','Projects'):
+                p_name=self.current_folder.parent.name or str(self.current_folder.parent)
+                item(f'◂ .. ({p_name})',lambda:self.open_folder(self.current_folder.parent),parent=True)
             for path in self.context_entries:item(('▸ ' if path.is_dir() else '')+self.label_path(path),lambda p=path:self.load_path(p))
             if not self.context_entries:item('No files',lambda:None,True)
         text.configure(state='disabled')
@@ -377,18 +432,77 @@ class Folio:
         self.show_list_controls();self.render_list()
 
     def show_recent(self):
-        self.context_stack=[];self.root_tab='Recent';self.show_context(self.history.recent_files(),'Recent')
+        self.context_stack=[];self.root_tab='Recent';self.current_folder=None
+        self.update_folder_button()
+        self.show_context(self.history.recent_files(),'Recent')
 
     def show_downloads(self,folder=None):
         self.root_tab='Downloads';self.context_stack=[]
         self.open_folder(Path(folder or Path.home()/'Downloads'),'Downloads',push=False,by_date=True)
 
     def show_adhoc(self):
-        self.context_stack=[];self.root_tab='Ad hoc'
+        self.context_stack=[];self.root_tab='Adhoc';self.current_folder=None
+        self.update_folder_button()
         paths=[repo/'adhoc' for repo in self.resolver.repos if (repo/'adhoc').is_dir()]
-        self.show_context(paths,'Ad hoc')
+        self.show_context(paths,'Adhoc')
+
+    def show_projects(self):
+        self.context_stack=[];self.root_tab='Projects';self.current_folder=None
+        self.update_folder_button()
+        home=Path.home()
+        priority_names=['astralane-quant','trailblazer','whisper-typer','grid-grinder','personal-finance']
+        priority_paths=[home/name for name in priority_names if (home/name).is_dir()]
+        other_projects=[]
+        for p in sorted(home.iterdir(),key=lambda x:x.name.casefold()):
+            if p.name.startswith('.') or not p.is_dir() or p in priority_paths:continue
+            if (p/'.git').exists() or any((p/marker).exists() for marker in ('Cargo.toml','package.json','pyproject.toml','requirements.txt','Makefile')):
+                other_projects.append(p)
+        self.show_context(priority_paths+other_projects,'Projects')
+
+    def update_folder_button(self):
+        folder=self.current_folder
+        if not folder and self.current and self.current.path:
+            folder=self.current.path.parent
+        if folder and folder.is_dir():
+            name=folder.name or str(folder)
+            if len(name)>18:name=name[:17]+'…'
+            self.folder_button.configure(text=f'📁 {name} ▾',state='normal')
+        else:
+            self.folder_button.configure(text='📁 Folders ▾',state='normal')
+
+    def open_folder_dropdown(self):
+        folder=self.current_folder
+        if not folder or not folder.is_dir():
+            if self.current and self.current.path and self.current.path.parent.is_dir():
+                folder=self.current.path.parent
+            else:folder=Path.home()
+        menu=tk.Menu(self.root,tearoff=False,font=(self.font_family,10))
+        if folder.parent and folder.parent!=folder:
+            p_name=folder.parent.name or str(folder.parent)
+            menu.add_command(label=f'↑ .. ({p_name})',command=lambda p=folder.parent:self.open_folder(p))
+            menu.add_separator()
+        try:entries=sorted(folder.iterdir(),key=lambda p:(not p.is_dir(),p.name.casefold()))
+        except OSError as e:
+            menu.add_command(label=f'Error: {e}',state='disabled')
+            x=self.folder_button.winfo_rootx();y=self.folder_button.winfo_rooty()+self.folder_button.winfo_height()
+            menu.tk_popup(x,y);return
+        visible=[p for p in entries if not p.name.startswith('.')] or entries
+        dirs=[p for p in visible if p.is_dir()]
+        files=[p for p in visible if not p.is_dir()]
+        for d in dirs[:30]:
+            menu.add_command(label=f'▸ {d.name}/',command=lambda p=d:self.open_folder(p))
+        if dirs and files:menu.add_separator()
+        for f in files[:40]:
+            menu.add_command(label=f'  {f.name}',command=lambda p=f:self.load_path(p))
+        if not dirs and not files:
+            menu.add_command(label='(Empty folder)',state='disabled')
+        x=self.folder_button.winfo_rootx()
+        y=self.folder_button.winfo_rooty()+self.folder_button.winfo_height()
+        menu.tk_popup(x,y)
 
     def open_folder(self,path,label=None,push=True,by_date=False):
+        path=Path(path).resolve()
+        self.current_folder=path;self.update_folder_button()
         self.navigation+=1;navigation=self.navigation
         previous=(self.context_label,list(self.context_entries))
         def ready(entries,error):
@@ -496,9 +610,13 @@ class Folio:
     def select_document(self,document):
         self.navigation+=1;self.current=document;self.view='document';self.pretty=False
         self.prettify_button.pack_forget()
+        if document.path:
+            self.current_folder=document.path.parent
+            self.update_folder_button()
         if document.path and not document.path.is_relative_to(Path(self.temp.name)):self.history.opened(document.path)
         self.root.title(document.path.name if document.path else 'Folio')
         self.input_frame.pack_forget();self.date.pack_forget();self.switcher.pack_forget()
+        self.folder_button.pack(side='left',padx=(0,8))
         self.back_button.configure(state='normal')
         self.populate_tabs();self.status.configure(text='');self.render_document()
 
@@ -532,6 +650,7 @@ class Folio:
         if document.kind=='text':self.show_source();return
         if document.kind=='csv':
             self.table=Table(self.content,document.rows,p,self.copy_text,self.submit)
+            self.table.font_family=self.font_family
             self.table.font_size=self.font_size
             self.table.row_height=max(24,int(self.font_size*3.0))
             self.table.pack(fill='both',expand=True)
@@ -586,6 +705,7 @@ class Folio:
             return f'<a href="folio-image:{img_id}" style="cursor:zoom-in;display:inline-block">{full_tag}</a>'
         body = re.sub(r'(<a\b[^>]*>[\s\S]*?</a>)|(<img\b[^>]*>)', wrap_img, body)
         css=CSS.replace('article','.article').replace(':root {color-scheme:light}','')
+        css=css.replace('"JetBrains Mono"',f'"{self.font_family}","JetBrains Mono"')
         # Tkhtml renders conservative HTML/CSS; advanced scripts never run here.
         max_w = 'none;width:100%' if rows else '1000px'
         css+=f'\n.article {{padding:25px 36px;max-width:{max_w}}} object {{display:block;width:100%}} img {{max-width:100%;cursor:pointer}}\n'
@@ -594,6 +714,7 @@ class Folio:
         self.html.load_html('<html><head><style>'+css+'</style></head><body><div class="article">'+body+'</div></body></html>',base_url=base)
         for index,values in enumerate(rows):
             table=Table(self.html,values,self.palette,self.copy_text,self.submit)
+            table.font_family=self.font_family
             table.font_size=self.font_size
             table.row_height=max(24,int(self.font_size*3.0))
             self.html.document.getElementById('folio-table-'+str(index)).widget=table
@@ -697,11 +818,11 @@ class Folio:
                 self.draw_image()
         try:self.html.configure(fontscale=self.font_scale)
         except Exception:pass
-        self.source.configure(font=('JetBrains Mono',self.font_size))
-        self.gutter.configure(font=('JetBrains Mono',self.font_size))
+        self.source.configure(font=(self.font_family,self.font_size))
+        self.gutter.configure(font=(self.font_family,self.font_size))
         self.update_gutter()
-        self.list_text.configure(font=('JetBrains Mono',self.font_size))
-        self.path_input.configure(font=('JetBrains Mono',self.font_size))
+        self.list_text.configure(font=(self.font_family,self.font_size))
+        self.path_input.configure(font=(self.font_family,self.font_size))
         if self.table:
             self.table.font_size=self.font_size
             self.table.row_height=max(24,int(self.font_size*3.0))
@@ -746,7 +867,7 @@ class Folio:
 
     def menu(self,event):
         if not self.current:return
-        menu=tk.Menu(self.root,tearoff=False,font=('JetBrains Mono',10))
+        menu=tk.Menu(self.root,tearoff=False,font=(self.font_family,10))
         if self.view=='document' and self.current.kind=='markdown':menu.add_command(label='Copy selection',command=lambda:self.copy_text(self.html.get_selection()))
         menu.add_command(label='Copy content',command=self.copy_content)
         if self.current.path:menu.add_command(label='Copy path',command=lambda:self.copy_text(str(self.current.path)))
@@ -754,6 +875,10 @@ class Folio:
         else:menu.add_command(label='Rendered' if self.view=='source' and self.current.kind=='markdown' else 'Source',command=self.return_rendered if self.view=='source' and self.current.kind=='markdown' else self.show_source)
         menu.add_command(label='Find',command=self.find)
         menu.add_separator()
+        font_menu=tk.Menu(menu,tearoff=False,font=(self.font_family,10))
+        for f in AVAILABLE_FONTS:
+            font_menu.add_command(label=('✓ ' if f==self.font_family else '   ')+f,command=lambda fam=f:self.set_font_family(fam))
+        menu.add_cascade(label='Font family',menu=font_menu)
         menu.add_command(label='Increase font · Ctrl++',command=lambda:self.zoom(1))
         menu.add_command(label='Decrease font · Ctrl+-',command=lambda:self.zoom(-1))
         menu.add_command(label='Reset font · Ctrl+0',command=lambda:self.zoom(0))

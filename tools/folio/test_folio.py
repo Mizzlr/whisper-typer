@@ -399,6 +399,61 @@ class TkTests(unittest.TestCase):
         settings = json.loads(self.window.settings_path.read_text())
         self.assertEqual(settings['font_size'], 11)
 
+    def test_adhoc_tab_rename_and_projects_discovery(self):
+        self.assertIn('Adhoc', self.window.tab_buttons)
+        self.assertNotIn('Ad hoc', self.window.tab_buttons)
+        self.assertIn('Projects', self.window.tab_buttons)
+        from unittest.mock import patch
+        fake_home = self.path / 'fake_home'
+        fake_home.mkdir()
+        for p in ('whisper-typer', 'astralane-quant', 'personal-finance', 'grid-grinder', 'trailblazer', 'extra-app'):
+            (fake_home / p).mkdir()
+        (fake_home / 'extra-app' / 'Cargo.toml').write_text('[package]')
+        (fake_home / 'non-project').mkdir()
+        with patch('pathlib.Path.home', return_value=fake_home):
+            self.window.show_projects()
+            self.idle()
+            expected = [
+                fake_home / 'astralane-quant',
+                fake_home / 'trailblazer',
+                fake_home / 'whisper-typer',
+                fake_home / 'grid-grinder',
+                fake_home / 'personal-finance',
+                fake_home / 'extra-app',
+            ]
+            self.assertEqual(self.window.context_entries, expected)
+            self.assertEqual(self.window.context_label, 'Projects')
+
+    def test_folder_dropdown_and_parent_navigation(self):
+        self.assertEqual(self.window.folder_button['text'], '📁 Folders ▾')
+        folder = self.path / 'parent_dir' / 'child_dir'
+        folder.mkdir(parents=True)
+        file_a = folder / 'file_a.txt'
+        file_a.write_text('content')
+        self.window.open_folder(folder)
+        self.idle()
+        self.assertEqual(self.window.folder_button['text'], '📁 child_dir ▾')
+        list_content = self.window.list_text.get('1.0', 'end')
+        self.assertIn('◂ .. (parent_dir)', list_content)
+        self.assertIn('file_a.txt', list_content)
+        self.window.load_path(folder.parent)
+        self.idle()
+        self.assertEqual(self.window.folder_button['text'], '📁 parent_dir ▾')
+        doc = Document(file_a, 'text', 'content')
+        self.window.select_document(doc)
+        self.idle()
+        self.assertEqual(self.window.folder_button['text'], '📁 child_dir ▾')
+
+    def test_font_family_selection_and_persistence(self):
+        self.window.set_font_family('Google Sans Mono')
+        self.root.update()
+        self.assertEqual(self.window.font_family, 'Google Sans Mono')
+        self.assertIn('Google Sans Mono', str(self.window.source['font']))
+        self.assertIn('Google Sans Mono', str(self.window.list_text['font']))
+        settings = json.loads(self.window.settings_path.read_text())
+        self.assertEqual(settings['font_family'], 'Google Sans Mono')
+
+
 
 
 

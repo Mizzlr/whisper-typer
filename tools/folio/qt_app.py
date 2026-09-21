@@ -26,6 +26,15 @@ from history import History
 from syntax import syntax_safe, source_style
 
 
+AVAILABLE_FONTS = [
+    'JetBrains Mono',
+    'Google Sans Mono',
+    'DejaVu Sans Mono',
+    'Ubuntu Sans Mono',
+    'Liberation Mono',
+]
+
+
 class Signals(QtCore.QObject):
     done = QtCore.pyqtSignal(object, object)
 
@@ -325,6 +334,8 @@ class Folio(QtWidgets.QMainWindow):
         self.zip_roots={}
         self.dark=False
         self.settings = QtCore.QSettings(str(Path(history_path).with_suffix('.ini')),QtCore.QSettings.IniFormat) if history_path else QtCore.QSettings('Folio', 'Reader')
+        self.font_family = str(self.settings.value('font_family', 'JetBrains Mono'))
+        self.current_folder = None
         body = QtWidgets.QWidget()
         self.setCentralWidget(body)
         layout = QtWidgets.QVBoxLayout(body)
@@ -341,13 +352,15 @@ class Folio(QtWidgets.QMainWindow):
         self.header.setLayout(header)
         self.date=QtWidgets.QLabel()
         self.date.setObjectName('location')
+        self.folder_button=self.button('📁 Folders ▾',self.open_folder_dropdown)
         self.nav=QtWidgets.QHBoxLayout()
         self.nav.addWidget(self.date)
+        self.nav.addWidget(self.folder_button)
         self.nav.addStretch()
         self.root_controls=QtWidgets.QWidget()
         root_buttons=QtWidgets.QHBoxLayout(self.root_controls)
         root_buttons.setContentsMargins(0,0,0,0)
-        for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Ad hoc',self.show_adhoc)]:
+        for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Adhoc',self.show_adhoc),('Projects',self.show_projects)]:
             root_buttons.addWidget(self.button(label,callback))
         self.nav.addWidget(self.root_controls)
         self.pretty=False
@@ -421,6 +434,9 @@ class Folio(QtWidgets.QMainWindow):
         self.path_button = menu.addAction('Copy path', self.copy_path)
         menu.addAction('Find', self.show_find)
         menu.addSeparator()
+        self.font_family_menu = menu.addMenu('Font family')
+        for f in AVAILABLE_FONTS:
+            self.font_family_menu.addAction(('✓ ' if f == self.font_family else '   ') + f, lambda fam=f: self.set_font_family(fam))
         menu.addAction('Increase font · Ctrl++', lambda:self.zoom(1))
         menu.addAction('Decrease font · Ctrl+-', lambda:self.zoom(-1))
         menu.addAction('Reset font · Ctrl+0', lambda:self.zoom(0))
@@ -434,12 +450,14 @@ class Folio(QtWidgets.QMainWindow):
         self.copy_button = self.button('Copy', self.copy_visible)
         self.font_down_button = self.button('A-', lambda:self.zoom(-1))
         self.font_up_button = self.button('A+', lambda:self.zoom(1))
+        self.font_select_button = self.button('Aa ▾', self.show_font_menu)
         self.nav.insertWidget(self.nav.indexOf(self.back_button),self.copy_button)
         self.nav.removeWidget(self.theme_button)
+        self.nav.insertWidget(self.nav.indexOf(self.copy_button),self.font_select_button)
         self.nav.insertWidget(self.nav.indexOf(self.copy_button),self.font_down_button)
         self.nav.insertWidget(self.nav.indexOf(self.copy_button),self.font_up_button)
         self.nav.insertWidget(self.nav.indexOf(self.copy_button),self.theme_button)
-        for button,width in [(self.copy_button,64),(self.back_button,80),(self.theme_button,32),(self.top_button,64),(self.font_down_button,36),(self.font_up_button,36)]:button.setFixedWidth(width)
+        for button,width in [(self.copy_button,64),(self.back_button,80),(self.theme_button,32),(self.top_button,64),(self.font_down_button,36),(self.font_up_button,36),(self.font_select_button,44)]:button.setFixedWidth(width)
         more = QtWidgets.QToolButton()
         more.setText('…')
         more.setMenu(menu)
@@ -484,7 +502,7 @@ class Folio(QtWidgets.QMainWindow):
         self.web_page.setWebChannel(self.channel)
         self.source = NumberedText()
         self.source.setReadOnly(True)
-        self.source.setFont(QtGui.QFont('JetBrains Mono', 11))
+        self.source.setFont(QtGui.QFont(self.font_family, 11))
         self.table = CsvTable()
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
@@ -571,22 +589,117 @@ QTabBar::tab:hover {background:#f0eee5}
         self.top_button.setText(('✓ ' if self.top_button.isChecked() else '')+'Top')
 
     def apply_theme(self):
-        self.setStyleSheet(theme_colors(self.light_style,self.dark))
-        self.source.setProperty('dark',self.dark);self.source.gutter.update()
+        style = theme_colors(self.light_style, self.dark)
+        style = style.replace('"JetBrains Mono"', f'"{self.font_family}"')
+        self.setStyleSheet(style)
+        self.source.setProperty('dark', self.dark)
+        self.source.setStyleSheet(f'font-family: "{self.font_family}";')
+        self.source.gutter.update()
         self.theme_button.setText('☀' if self.dark else '◐')
-        self.top_button.setText(('✓ ' if self.top_button.isChecked() else '')+'Top')
+        self.top_button.setText(('✓ ' if self.top_button.isChecked() else '') + 'Top')
 
     def toggle_theme(self):
-        self.dark=not self.dark;self.settings.setValue('dark',self.dark);self.apply_theme()
-        if self.reading.isVisible():self.refresh_view()
+        self.dark = not self.dark
+        self.settings.setValue('dark', self.dark)
+        self.apply_theme()
+        if self.reading.isVisible():
+            self.refresh_view()
         else:
             for index in range(self.file_list.count()):
-                item=self.file_list.item(index)
-                item.setForeground(QtGui.QColor('#a8a8a8' if item.data(QtCore.Qt.UserRole+1) else '#6cb8e6') if self.dark else QtGui.QColor('#595959' if item.data(QtCore.Qt.UserRole+1) else '#005a8e'))
+                item = self.file_list.item(index)
+                item.setForeground(QtGui.QColor('#a8a8a8' if item.data(QtCore.Qt.UserRole + 1) else '#6cb8e6') if self.dark else QtGui.QColor('#595959' if item.data(QtCore.Qt.UserRole + 1) else '#005a8e'))
+
+    def show_font_menu(self):
+        menu = QtWidgets.QMenu(self)
+        for f in AVAILABLE_FONTS:
+            act = menu.addAction(('✓ ' if f == self.font_family else '   ') + f)
+            act.triggered.connect(lambda checked, fam=f: self.set_font_family(fam))
+        menu.exec_(self.font_select_button.mapToGlobal(QtCore.QPoint(0, self.font_select_button.height())))
+
+    def set_font_family(self, family):
+        self.font_family = family
+        self.settings.setValue('font_family', family)
+        self.apply_theme()
+        font = QtGui.QFont(family, self.source.font().pointSize() or 11)
+        self.source.setFont(font)
+        self.source.setStyleSheet(f'font-family: "{family}";')
+        self.source.gutter.update()
+        if hasattr(self, 'font_family_menu'):
+            self.font_family_menu.clear()
+            for f in AVAILABLE_FONTS:
+                self.font_family_menu.addAction(('✓ ' if f == self.font_family else '   ') + f, lambda fam=f: self.set_font_family(fam))
+        if self.reading.isVisible():
+            self.refresh_view()
+
+    def update_folder_button(self):
+        folder = self.current_folder
+        if not folder and self.current and self.current.path:
+            folder = self.current.path.parent
+        if folder and folder.is_dir():
+            name = folder.name or str(folder)
+            if len(name) > 18:
+                name = name[:17] + '…'
+            self.folder_button.setText(f'📁 {name} ▾')
+        else:
+            self.folder_button.setText('📁 Folders ▾')
+
+    def open_folder_dropdown(self):
+        folder = self.current_folder
+        if not folder or not folder.is_dir():
+            if self.current and self.current.path and self.current.path.parent.is_dir():
+                folder = self.current.path.parent
+            else:
+                folder = Path.home()
+        menu = QtWidgets.QMenu(self)
+        if folder.parent and folder.parent != folder:
+            p_name = folder.parent.name or str(folder.parent)
+            menu.addAction(f'↑ .. ({p_name})', lambda p=folder.parent: self.open_folder(p))
+            menu.addSeparator()
+        try:
+            entries = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold()))
+        except OSError as e:
+            act = menu.addAction(f'Error: {e}')
+            act.setEnabled(False)
+            menu.exec_(self.folder_button.mapToGlobal(QtCore.QPoint(0, self.folder_button.height())))
+            return
+        visible = [p for p in entries if not p.name.startswith('.')] or entries
+        dirs = [p for p in visible if p.is_dir()]
+        files = [p for p in visible if not p.is_dir()]
+        for d in dirs[:30]:
+            menu.addAction(f'▸ {d.name}/', lambda p=d: self.open_folder(p))
+        if dirs and files:
+            menu.addSeparator()
+        for f in files[:40]:
+            menu.addAction(f'  {f.name}', lambda p=f: self.load_path(p))
+        if not dirs and not files:
+            act = menu.addAction('(Empty folder)')
+            act.setEnabled(False)
+        menu.exec_(self.folder_button.mapToGlobal(QtCore.QPoint(0, self.folder_button.height())))
 
     def show_adhoc(self):
-        self.context_stack=[]
-        self.show_context([repo/'adhoc' for repo in self.resolver.repos if (repo/'adhoc').is_dir()])
+        self.context_stack = []
+        self.current_folder = None
+        self.update_folder_button()
+        self.show_context([repo / 'adhoc' for repo in self.resolver.repos if (repo / 'adhoc').is_dir()])
+        self.back_button.setEnabled(True)
+
+    def show_projects(self):
+        self.context_stack = []
+        self.current_folder = None
+        self.update_folder_button()
+        home = Path.home()
+        priority_names = ['astralane-quant', 'trailblazer', 'whisper-typer', 'grid-grinder', 'personal-finance']
+        priority_paths = [home / name for name in priority_names if (home / name).is_dir()]
+        other_projects = []
+        try:
+            for p in sorted(home.iterdir(), key=lambda x: x.name.casefold()):
+                if p.name.startswith('.') or not p.is_dir() or p in priority_paths:
+                    continue
+                if (p / '.git').exists() or any((p / marker).exists() for marker in ('Cargo.toml', 'package.json', 'pyproject.toml', 'requirements.txt', 'Makefile')):
+                    other_projects.append(p)
+        except OSError:
+            pass
+        self.show_context(priority_paths + other_projects)
         self.back_button.setEnabled(True)
 
     def open_zip(self,path):
@@ -668,7 +781,9 @@ QTabBar::tab:hover {background:#f0eee5}
         self.path_input.setFocus()
 
     def show_history(self):
-        self.browsing_folder=False
+        self.browsing_folder = False
+        self.current_folder = None
+        self.update_folder_button()
         self.file_list.blockSignals(True)
         self.file_list.clear()
         for batch in self.batches:
@@ -676,7 +791,7 @@ QTabBar::tab:hover {background:#f0eee5}
             header.setData(QtCore.Qt.UserRole,f"context:{batch['id']}")
             header.setData(QtCore.Qt.UserRole+1,True)
             header.setForeground(QtGui.QColor('#a8a8a8' if self.dark else '#595959'))
-            header.setFont(QtGui.QFont('JetBrains Mono',9))
+            header.setFont(QtGui.QFont(self.font_family,9))
             header.setSizeHint(QtCore.QSize(0,36))
             self.file_list.addItem(header)
             for path in batch['paths']:
@@ -720,13 +835,17 @@ QTabBar::tab:hover {background:#f0eee5}
         self.loading_history=False
 
     def show_recent(self):
-        self.context_stack=[]
+        self.context_stack = []
+        self.current_folder = None
+        self.update_folder_button()
         self.show_context(self.history.recent_files())
         self.back_button.setEnabled(True)
 
     def show_downloads(self,folder=None):
         folder=Path(folder) if folder else Path.home()/'Downloads'
-        self.context_stack=[]
+        self.context_stack = []
+        self.current_folder = folder if folder.is_dir() else None
+        self.update_folder_button()
         if folder.is_dir():
             generation=self.paste_generation
             def ready(entries,error):
@@ -890,6 +1009,13 @@ QTabBar::tab:hover {background:#f0eee5}
             self.context_entries=list(entries)
         self.file_list.blockSignals(True)
         self.file_list.clear()
+        if self.current_folder and self.current_folder.parent and self.current_folder.parent != self.current_folder:
+            p_name = self.current_folder.parent.name or str(self.current_folder.parent)
+            parent_item = QtWidgets.QListWidgetItem(f'◂ .. ({p_name})')
+            parent_item.setData(QtCore.Qt.UserRole, str(self.current_folder.parent))
+            parent_item.setForeground(QtGui.QColor('#a8a8a8' if self.dark else '#595959'))
+            parent_item.setSizeHint(QtCore.QSize(0, 30))
+            self.file_list.addItem(parent_item)
         for path in self.context_entries:
             self.add_file_item(path)
         self.file_list.blockSignals(False)
@@ -918,7 +1044,14 @@ QTabBar::tab:hover {background:#f0eee5}
         if self.reading.isVisible():
             self.show_context() if self.browsing_folder else self.show_history()
         elif self.context_stack:
-            self.show_context(self.context_stack.pop())
+            item = self.context_stack.pop()
+            if isinstance(item, tuple) and len(item) == 2:
+                self.current_folder, entries = item
+            else:
+                self.current_folder = None
+                entries = item
+            self.update_folder_button()
+            self.show_context(entries)
         else:
             self.show_history()
 
@@ -962,6 +1095,10 @@ QTabBar::tab:hover {background:#f0eee5}
             self.fit_pdf()
 
     def open_folder(self,path):
+        path = Path(path).resolve()
+        previous = (self.current_folder, list(self.context_entries))
+        self.current_folder = path
+        self.update_folder_button()
         generation=self.paste_generation
         self.navigation_generation+=1
         navigation=self.navigation_generation
@@ -972,7 +1109,7 @@ QTabBar::tab:hover {background:#f0eee5}
             if error:
                 self.status.setText(error)
                 return
-            self.context_stack.append(list(self.context_entries))
+            self.context_stack.append(previous)
             self.show_context(entries)
             if not entries:
                 self.status.setText('Empty folder')
@@ -1118,6 +1255,9 @@ QTabBar::tab:hover {background:#f0eee5}
             self.location.clear()
             return
         self.current = self.documents[item.data(QtCore.Qt.UserRole)]
+        if self.current and self.current.path:
+            self.current_folder = self.current.path.parent
+            self.update_folder_button()
         self.pretty=False
         self.stats_generation+=1
         self.file_list.hide()
@@ -1238,7 +1378,7 @@ QTabBar::tab:hover {background:#f0eee5}
                 os.chmod(target, 0o600)
                 self.web.load(QtCore.QUrl.fromLocalFile(str(target)))
                 self.status.clear()
-            self.submit(lambda:document_html(doc.text,self.dark), ready)
+            self.submit(lambda:document_html(doc.text,self.dark,self.font_family), ready)
 
     def render_pdf(self, unused=None):
         if not self.current or self.current.kind != 'pdf' or self.source_toggle.isChecked():
