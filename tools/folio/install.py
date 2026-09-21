@@ -57,11 +57,12 @@ def install():
     source = Path(__file__).resolve().parent
     library = home / '.local/lib/folio'
     library.mkdir(parents=True, exist_ok=True)
-    for name in ('app.py','qt_app.py','tk_widgets.py','image_zoom.py','render_worker.py','files.py','rendering.py','cell_stats.py','history.py','clipboard.py','syntax.py'):
+    for name in ('app.py','tk_widgets.py','image_zoom.py','render_worker.py','files.py','rendering.py','cell_stats.py','history.py','clipboard.py','syntax.py'):
         shutil.copyfile(source / name, library / name)
+    (library / 'qt_app.py').unlink(missing_ok=True)
     executable = home / '.local/bin/folio'
     executable.parent.mkdir(parents=True, exist_ok=True)
-    executable.write_text('#!/bin/sh\ncase "$1" in\n  --qt) shift; exec /usr/bin/python3 "$HOME/.local/lib/folio/qt_app.py" "$@" ;;\n  *) exec "$HOME/.local/share/folio/venv/bin/python" "$HOME/.local/lib/folio/app.py" "$@" ;;\nesac\n')
+    executable.write_text('#!/bin/sh\nexec "$HOME/.local/share/folio/venv/bin/python" "$HOME/.local/lib/folio/app.py" "$@"\n')
     executable.chmod(0o755)
     FOLIO_MIME_TYPES = [
         'text/plain', 'application/x-zerosize',
@@ -97,17 +98,7 @@ StartupWMClass=Folio
 Categories=Utility;Office;
 MimeType={mimes_str}
 ''')
-    (desktop.parent/'folio-qt.desktop').write_text(f'''[Desktop Entry]
-Type=Application
-Name=Folio (Qt)
-Comment=Compare the Qt reading interface
-Exec={executable} --qt %F
-Icon=accessories-text-editor
-Terminal=false
-StartupWMClass=FolioQt
-Categories=Utility;Office;
-MimeType={mimes_str}
-''')
+    (desktop.parent / 'folio-qt.desktop').unlink(missing_ok=True)
     for mime_file in (home / '.config/mimeapps.list', home / '.config/gnome-mimeapps.list'):
         lines = mime_file.read_text().splitlines() if mime_file.exists() else []
         header_idx = next((i for i, l in enumerate(lines) if l.strip() == '[Default Applications]'), -1)

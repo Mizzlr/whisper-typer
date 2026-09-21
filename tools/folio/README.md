@@ -3,9 +3,8 @@
 Paste context, choose a file, read it, press Escape. JetBrains Mono, cream paper
 or a dark theme, and a compact top line similar to Whisper Typer.
 
-Install: `/usr/bin/python3 tools/folio/install.py`. Launch **Folio** (Tkinter)
-or **Folio (Qt)** from Applications. CLI: `folio [paths…]` or `folio --qt [paths…]`.
-Both interfaces remain available for comparison and share private paste history.
+Install: `/usr/bin/python3 tools/folio/install.py`. Launch **Folio** from Applications.
+CLI: `folio [paths…]`.
 
 ## Paste and read
 
@@ -18,11 +17,11 @@ Back returns to that list; Escape returns to Paths,
 clears the input and prepares the next paste. Earlier groups stay available.
 Click a group's timestamp to view its original dump or screenshot.
 
-Top-line controls: **Paths**, **Recent**, **Downloads**, **Ad hoc**, theme, and
+Top-line controls: **Paths**, **Recent**, **Downloads**, **Adhoc**, **Projects**, theme, and
 **Top**. Recent lists files opened in Folio. Downloads lists newest downloads first.
-Ad hoc lists the discovered repos' `adhoc` folders. Theme and optional always-on-top
-are saved independently for each interface. Top keeps the window above others
-without repeatedly forcing keyboard focus.
+Adhoc lists the discovered repos' `adhoc` folders. Projects lists prioritized project folders.
+Theme, font family, font size, and optional always-on-top are saved in `~/.config/folio/settings.json`.
+Top keeps the window above others without repeatedly forcing keyboard focus.
 
 Folders list their files/subfolders. ZIP files open as browsable contents in a
 private temporary directory. Extraction rejects escaping paths, symbolic links,
@@ -40,8 +39,7 @@ terminal links. Original screenshots/dumps remain available when OCR is imperfec
 
 Markdown and `.txt` files render as Markdown. Mermaid and mathematical LaTeX use
 local, pinned renderer assets. Tkinter displays the typeset diagrams/math as images
-from a separate worker on an isolated display; Qt renders them in its document
-widget. Full original content remains copyable from the menu. Source files use
+from a separate worker on an isolated display. Full original content remains copyable from the menu. Source files use
 Pygments, theme-aware colors, original line numbers and word wrapping. JSON has a reversible **Prettify / Original** display control. Prettifying keeps
 exact number/string literals and does not change the file or full-content copy.
 Other text must be UTF-8 or BOM-marked UTF-16; unsupported encodings/binary files report errors.
@@ -61,8 +59,8 @@ Ctrl++/Ctrl+- zoom. Screenshot views support two-axis drag/scroll panning.
 
 Paste groups, OCR text, original screenshots and recent paths live in a mode-0600
 SQLite database: `~/.local/share/folio/history.sqlite3`, outside Git. Temporary HTML
-and ZIP contents are removed on normal exit. Tk settings live in
-`~/.config/folio/settings.json`; Qt settings in `~/.config/Folio/Reader.conf`.
+and ZIP contents are removed on normal exit. Settings live in
+`~/.config/folio/settings.json`.
 Tests use synthetic temporary fixtures only. Private reports, screenshots, OCR
 output, history and credentials must never become public fixtures or commits.
 
@@ -79,7 +77,6 @@ Tests (isolated displays; no desktop input injection):
 
 ```sh
 xvfb-run -a ~/.local/share/folio/venv/bin/python tools/folio/test_folio.py --render
-xvfb-run -a env QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu QT_QUICK_BACKEND=software /usr/bin/python3 tools/folio/test_folio_qt.py --render
 ```
 
 [Folio's Tk HTML widget](https://tkinterweb.readthedocs.io/en/latest/api/htmlframe.html),
@@ -88,11 +85,10 @@ xvfb-run -a env QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu QT_QUICK_BACKEND=softwa
 
 Image pastes prefer image data when the clipboard also offers alternate text.
 Encoded PNG/JPEG/BMP/TIFF/WebP formats are supported. Tk reads the X11 selection
-in a worker with bounded subprocess waits; Qt accepts both native and encoded
-image MIME data. Original images remain in private history even when OCR yields
-no text or fails. Folder links carry a small ▸ arrow.
+in a worker with bounded subprocess waits. Original images remain in private history
+even when OCR yields no text or fails. Folder links carry a small ▸ arrow.
 
-Both interfaces use white/light and black/dark backgrounds, neutral controls and
+Folio uses cream paper/light and black/dark backgrounds, neutral controls and
 [Coldark-inspired syntax colors](https://github.com/PrismJS/prism-themes).
 Source views skip tokenization for files above 150,000 characters or lines above
 2,000 characters, displaying the complete raw text instead. Full-content Copy
