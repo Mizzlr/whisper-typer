@@ -420,8 +420,11 @@ class Folio(QtWidgets.QMainWindow):
         self.source_toggle.triggered.connect(self.refresh_view)
         self.path_button = menu.addAction('Copy path', self.copy_path)
         menu.addAction('Find', self.show_find)
-        menu.addAction('Zoom in', lambda:self.zoom(1))
-        menu.addAction('Zoom out', lambda:self.zoom(-1))
+        menu.addSeparator()
+        menu.addAction('Increase font · Ctrl++', lambda:self.zoom(1))
+        menu.addAction('Decrease font · Ctrl+-', lambda:self.zoom(-1))
+        menu.addAction('Reset font · Ctrl+0', lambda:self.zoom(0))
+        menu.addSeparator()
         menu.addAction('Fit PDF width', self.fit_pdf)
         menu.addAction('Previous PDF page',lambda:self.change_page(-1))
         menu.addAction('Next PDF page',lambda:self.change_page(1))
@@ -429,10 +432,14 @@ class Folio(QtWidgets.QMainWindow):
         menu.addAction('Close · Esc',self.escape)
         menu.addAction('Open file…', self.choose_files)
         self.copy_button = self.button('Copy', self.copy_visible)
+        self.font_down_button = self.button('A-', lambda:self.zoom(-1))
+        self.font_up_button = self.button('A+', lambda:self.zoom(1))
         self.nav.insertWidget(self.nav.indexOf(self.back_button),self.copy_button)
         self.nav.removeWidget(self.theme_button)
+        self.nav.insertWidget(self.nav.indexOf(self.copy_button),self.font_down_button)
+        self.nav.insertWidget(self.nav.indexOf(self.copy_button),self.font_up_button)
         self.nav.insertWidget(self.nav.indexOf(self.copy_button),self.theme_button)
-        for button,width in [(self.copy_button,64),(self.back_button,80),(self.theme_button,32),(self.top_button,64)]:button.setFixedWidth(width)
+        for button,width in [(self.copy_button,64),(self.back_button,80),(self.theme_button,32),(self.top_button,64),(self.font_down_button,36),(self.font_up_button,36)]:button.setFixedWidth(width)
         more = QtWidgets.QToolButton()
         more.setText('…')
         more.setMenu(menu)
@@ -544,7 +551,7 @@ QTabBar::tab:hover {background:#f0eee5}
         self.path_button.setEnabled(False)
         self.source.setPlaceholderText('')
         self.views.setCurrentWidget(self.source)
-        for shortcut, callback in [('Ctrl+L', self.ready_for_paste), ('Ctrl+O', self.choose_files), ('Ctrl+F', self.show_find), ('Escape', self.escape),('Ctrl+Shift+C',self.copy_content),('Ctrl++',lambda:self.zoom(1)),('Ctrl+-',lambda:self.zoom(-1)),('Alt+Right',lambda:self.change_page(1)),('Alt+Left',lambda:self.change_page(-1))]:
+        for shortcut, callback in [('Ctrl+L', self.ready_for_paste), ('Ctrl+O', self.choose_files), ('Ctrl+F', self.show_find), ('Escape', self.escape),('Ctrl+Shift+C',self.copy_content),('Ctrl++',lambda:self.zoom(1)),('Ctrl+=',lambda:self.zoom(1)),('Ctrl+-',lambda:self.zoom(-1)),('Ctrl+0',lambda:self.zoom(0)),('Alt+Right',lambda:self.change_page(1)),('Alt+Left',lambda:self.change_page(-1))]:
             QtWidgets.QShortcut(QtGui.QKeySequence(shortcut), self, activated=callback)
         QtWidgets.QApplication.instance().installEventFilter(self)
         geometry = self.settings.value('geometry')
@@ -1294,6 +1301,18 @@ QTabBar::tab:hover {background:#f0eee5}
         self.page_number.setValue(self.page_number.value() + amount)
 
     def zoom(self, direction):
+        if direction == 0:
+            if self.views.currentWidget() == self.pdf:
+                self.pdf_zoom = .65
+                self.scale_pdf()
+            elif self.views.currentWidget() == self.web:
+                self.web.setZoomFactor(1.0)
+            else:
+                widget = self.views.currentWidget()
+                font = widget.font()
+                font.setPointSize(11)
+                widget.setFont(font)
+            return
         if self.views.currentWidget() == self.pdf:
             self.pdf_zoom = min(4, max(.05, self.pdf_zoom * (1.2 if direction > 0 else 1/1.2)))
             self.scale_pdf()

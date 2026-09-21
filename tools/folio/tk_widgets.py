@@ -25,6 +25,7 @@ class Table(tk.Frame):
         self.col_widths=[]
         self.col_x=[42]
         self.total_width=42
+        self.font_size=10
         self.row_height=30
         self.canvas=tk.Canvas(self,bg=palette['panel'],highlightthickness=0)
         self.vertical=ttk.Scrollbar(self,orient='vertical',command=self.yview)
@@ -49,6 +50,9 @@ class Table(tk.Frame):
         self.canvas.bind('<Button-4>',lambda e:self.wheel(-1,e))
         self.canvas.bind('<Button-5>',lambda e:self.wheel(1,e))
         self.canvas.bind('<MouseWheel>',lambda e:self.wheel(-1 if e.delta>0 else 1,e))
+        for key in ('<Control-plus>','<Control-equal>','<Control-KP_Add>'):self.canvas.bind(key,lambda e:self.zoom(1))
+        for key in ('<Control-minus>','<Control-KP_Subtract>'):self.canvas.bind(key,lambda e:self.zoom(-1))
+        for key in ('<Control-0>','<Control-KP_0>'):self.canvas.bind(key,lambda e:self.zoom(0))
         self.canvas.bind('<Button-3>',self.menu)
 
     def scrollbar(self,bar,first,last):
@@ -71,8 +75,10 @@ class Table(tk.Frame):
                     if len(val)>max_len:max_len=len(val)
             header_len=len(self.column_label(col))
             char_len=max(max_len,header_len,4)
-            needed=char_len*8+16
-            natural_w.append(max(120,min(800,needed)))
+            char_px=self.font_size*0.8
+            needed=int(char_len*char_px+16)
+            min_col_w=int(self.font_size*12)
+            natural_w.append(max(min_col_w,min(800,needed)))
         total_natural=sum(natural_w)
         if total_natural<=avail_w:
             extra=avail_w-total_natural
@@ -111,12 +117,20 @@ class Table(tk.Frame):
         self.canvas.xview(*args);self.draw()
 
     def wheel(self,direction,event):
-        if event.state & 1:self.xview('scroll',direction,'units')
+        if event.state & 4:self.zoom(-direction)
+        elif event.state & 1:self.xview('scroll',direction,'units')
         else:self.yview('scroll',direction,'units')
         return 'break'
 
     def value(self,row,col):
         return self.rows[row][col] if col<len(self.rows[row]) else ''
+
+    def zoom(self,direction):
+        if direction==0:self.font_size=10
+        else:self.font_size=max(7,min(24,self.font_size+direction))
+        self.row_height=max(24,int(self.font_size*3.0))
+        self.summary.configure(font=('JetBrains Mono',max(8,self.font_size-1)))
+        self.draw()
 
     def draw(self):
         c=self.canvas;p=self.palette;c.delete('all')
@@ -129,6 +143,8 @@ class Table(tk.Frame):
         c.configure(scrollregion=(0,0,region_w,region_h))
         first_row=max(0,int(y0//self.row_height)-1)
         last_row=min(len(self.rows),int((y0+c_h)//self.row_height)+1)
+        y_mid_offset=self.row_height//2
+        char_w=self.font_size*0.76
         for row in range(first_row,last_row):
             y=(row+1)*self.row_height
             for col in range(self.columns):
@@ -139,17 +155,17 @@ class Table(tk.Frame):
                 bg=p['selected'] if chosen else (p['button'] if row==0 else p['alt'] if row%2==0 else p['panel'])
                 c.create_rectangle(x,y,x+w,y+self.row_height,fill=bg,outline=p['line'])
                 text=str(self.value(row,col)).replace('\n',' ↵ ')
-                max_chars=max(3,int((w-14)/7.6))
+                max_chars=max(3,int((w-14)/char_w))
                 if len(text)>max_chars:text=text[:max_chars-1]+'…'
-                c.create_text(x+6,y+15,anchor='w',text=text,font=('JetBrains Mono',10),fill=p['selected_fg'] if chosen else p['fg'])
+                c.create_text(x+6,y+y_mid_offset,anchor='w',text=text,font=('JetBrains Mono',self.font_size),fill=p['selected_fg'] if chosen else p['fg'])
             c.create_rectangle(x0,y,x0+42,y+self.row_height,fill=p['alt'],outline=p['line'])
-            c.create_text(x0+21,y+15,text=str(row+1),font=('JetBrains Mono',9),fill=p['muted'])
+            c.create_text(x0+21,y+y_mid_offset,text=str(row+1),font=('JetBrains Mono',max(7,self.font_size-1)),fill=p['muted'])
         for col in range(self.columns):
             x=self.col_x[col]
             w=self.col_widths[col]
             if x+w<x0 or x>x0+c_w:continue
             c.create_rectangle(x,y0,x+w,y0+self.row_height,fill=p['alt'],outline=p['line'])
-            c.create_text(x+w/2,y0+15,text=self.column_label(col),font=('JetBrains Mono',10),fill=p['green'])
+            c.create_text(x+w/2,y0+y_mid_offset,text=self.column_label(col),font=('JetBrains Mono',self.font_size),fill=p['green'])
         c.create_rectangle(x0,y0,x0+42,y0+self.row_height,fill=p['alt'],outline=p['line'])
 
     def location(self,event):
@@ -214,4 +230,8 @@ class Table(tk.Frame):
     def menu(self,event):
         menu=tk.Menu(self,tearoff=False)
         menu.add_command(label='Copy selection',command=self.copy)
+        menu.add_separator()
+        menu.add_command(label='Increase font',command=lambda:self.zoom(1))
+        menu.add_command(label='Decrease font',command=lambda:self.zoom(-1))
+        menu.add_command(label='Reset font',command=lambda:self.zoom(0))
         menu.tk_popup(event.x_root,event.y_root)

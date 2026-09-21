@@ -369,6 +369,36 @@ class TkTests(unittest.TestCase):
         self.assertEqual(sum(table.col_widths), avail_w)
         table.destroy()
 
+    def test_font_size_controls_and_persistence(self):
+        initial_font = self.window.font_size
+        initial_scale = self.window.font_scale
+        self.assertEqual(initial_font, 10)
+        self.assertEqual(initial_scale, 1.0)
+        self.window.font_up_button.invoke()
+        self.root.update()
+        self.assertEqual(self.window.font_size, 11)
+        self.assertAlmostEqual(self.window.font_scale, 1.1)
+        self.assertIn('11', str(self.window.source['font']))
+        self.assertIn('11', str(self.window.list_text['font']))
+        self.window.font_down_button.invoke()
+        self.window.font_down_button.invoke()
+        self.root.update()
+        self.assertEqual(self.window.font_size, 9)
+        self.assertAlmostEqual(self.window.font_scale, 0.9)
+        self.window.zoom(0)
+        self.root.update()
+        self.assertEqual(self.window.font_size, 10)
+        self.assertEqual(self.window.font_scale, 1.0)
+        rows = [['col1', 'col2'], ['val1', 'val2']]
+        self.window.select_document(Document(self.path/'test_font.csv', 'csv', 'col1,col2', rows))
+        self.root.update()
+        self.assertEqual(self.window.table.font_size, 10)
+        self.window.font_up_button.invoke()
+        self.root.update()
+        self.assertEqual(self.window.table.font_size, 11)
+        settings = json.loads(self.window.settings_path.read_text())
+        self.assertEqual(settings['font_size'], 11)
+
 
 
 

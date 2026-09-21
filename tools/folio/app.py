@@ -101,6 +101,8 @@ class Folio:
         try:self.settings=json.loads(self.settings_path.read_text())
         except (OSError,ValueError):self.settings={}
         self.dark=bool(self.settings.get('dark',False));self.top=bool(self.settings.get('top',True))
+        self.font_size=int(self.settings.get('font_size',10))
+        self.font_scale=float(self.settings.get('font_scale',1.0))
         root.geometry(self.settings.get('geometry','1180x820'))
         root.attributes('-topmost',self.top)
         self.resolver=PathResolver();self.batches=self.history.recent();self.history_complete=False
@@ -119,6 +121,10 @@ class Folio:
         self.back_button=self.button(self.nav,'← Back',self.go_back);self.back_button.configure(width=7);self.back_button.pack(side='right',padx=5)
         self.copy_button=self.button(self.nav,'Copy',self.copy_visible);self.copy_button.configure(width=5);self.copy_button.pack(side='right',padx=(0,5))
         self.theme_button=self.button(self.nav,'◐',self.toggle_theme);self.theme_button.configure(width=2);self.theme_button.pack(side='right',padx=(0,6))
+        self.font_up_button=self.button(self.nav,'A+',lambda:self.zoom(1));self.font_up_button.configure(width=3);self.font_up_button.pack(side='right',padx=(0,2))
+        self.font_down_button=self.button(self.nav,'A-',lambda:self.zoom(-1));self.font_down_button.configure(width=3);self.font_down_button.pack(side='right',padx=(0,6))
+        self.font_up_button.bind('<Button-3>',lambda e:self.zoom(0))
+        self.font_down_button.bind('<Button-3>',lambda e:self.zoom(0))
         self.prettify_button=self.button(self.nav,'Prettify',self.toggle_prettify)
         self.pretty=False
         self.switcher=tk.Frame(self.nav)
@@ -128,24 +134,25 @@ class Folio:
         self.switcher.pack(side='right',padx=7)
         self.reader_tabs=tk.Frame(self.nav)
         self.input_frame=tk.Frame(self.frame);self.input_frame.pack(fill='x',pady=(0,10))
-        self.path_input=tk.Text(self.input_frame,height=2,wrap='word',font=('JetBrains Mono',10),bd=1,relief='solid',padx=10,pady=8,undo=True)
+        self.path_input=tk.Text(self.input_frame,height=2,wrap='word',font=('JetBrains Mono',self.font_size),bd=1,relief='solid',padx=10,pady=8,undo=True)
         self.path_input.pack(fill='x')
         self.path_input.bind('<<Modified>>',self.input_changed)
         for key in ('<Control-v>','<Control-V>','<Shift-Insert>','<<Paste>>'):self.path_input.bind(key,self.paste)
         self.content=tk.Frame(self.frame);self.content.pack(fill='both',expand=True)
         self.list_frame=tk.Frame(self.content)
-        self.list_text=tk.Text(self.list_frame,wrap='none',font=('JetBrains Mono',10),cursor='hand2',bd=0,padx=5,pady=2)
+        self.list_text=tk.Text(self.list_frame,wrap='none',font=('JetBrains Mono',self.font_size),cursor='hand2',bd=0,padx=5,pady=2)
         self.list_scroll=ttk.Scrollbar(self.list_frame,command=self.list_text.yview)
         self.list_text.configure(yscrollcommand=self.list_scrolled)
         self.list_scroll.pack(side='right',fill='y');self.list_text.pack(fill='both',expand=True)
         self.html=HtmlFrame(self.content,messages_enabled=False,javascript_enabled=False,
                            request_func=local_resource,on_link_click=self.open_link,threading_enabled=False,
+                           fontscale=self.font_scale,
                            selected_text_highlight_color=LIGHT['selected'],selected_text_color=LIGHT['selected_fg'])
         self.html.bind('<Button-3>',self.menu,add='+');self.html.html.bind('<Button-3>',self.menu,add='+')
         self.source_frame=tk.Frame(self.content)
-        self.gutter=tk.Text(self.source_frame,width=5,wrap='none',state='disabled',bd=0,font=('JetBrains Mono',10),padx=5,pady=12)
+        self.gutter=tk.Text(self.source_frame,width=5,wrap='none',state='disabled',bd=0,font=('JetBrains Mono',self.font_size),padx=5,pady=12)
         self.gutter.pack(side='left',fill='y')
-        self.source=tk.Text(self.source_frame,wrap='word',font=('JetBrains Mono',10),bd=0,padx=12,pady=12)
+        self.source=tk.Text(self.source_frame,wrap='word',font=('JetBrains Mono',self.font_size),bd=0,padx=12,pady=12)
         self.source_scroll=ttk.Scrollbar(self.source_frame,command=self.source_yview)
         self.source.configure(yscrollcommand=self.source_scrolled)
         self.source_scroll.pack(side='right',fill='y');self.source.pack(fill='both',expand=True)
@@ -168,7 +175,9 @@ class Folio:
         root.bind('<Shift-Insert>',self.paste);root.bind('<<Paste>>',self.paste)
         root.bind('<Escape>',lambda e:self.escape());root.bind('<Control-l>',lambda e:self.escape())
         root.bind('<Control-f>',lambda e:self.find());root.bind('<Control-Shift-C>',lambda e:self.copy_content())
-        root.bind('<Control-plus>',lambda e:self.zoom(1));root.bind('<Control-minus>',lambda e:self.zoom(-1))
+        for key in ('<Control-plus>','<Control-equal>','<Control-KP_Add>'):root.bind(key,lambda e:self.zoom(1))
+        for key in ('<Control-minus>','<Control-KP_Subtract>'):root.bind(key,lambda e:self.zoom(-1))
+        for key in ('<Control-0>','<Control-KP_0>'):root.bind(key,lambda e:self.zoom(0))
         root.protocol('WM_DELETE_WINDOW',self.close)
         self.apply_theme();self.show_history();self.tick();self.clock()
 
@@ -178,7 +187,7 @@ class Folio:
 
     def save_settings(self):
         self.settings_path.parent.mkdir(parents=True,exist_ok=True)
-        self.settings_path.write_text(json.dumps(dict(dark=self.dark,top=self.top,geometry=self.root.geometry())))
+        self.settings_path.write_text(json.dumps(dict(dark=self.dark,top=self.top,font_size=self.font_size,font_scale=self.font_scale,geometry=self.root.geometry())))
         os.chmod(self.settings_path,0o600)
 
     def toggle_top(self):
@@ -216,6 +225,8 @@ class Folio:
         p=self.palette
         self.top_button.configure(text=('✓ ' if self.top else '')+'Top',bg=p['button'] if self.top else p['bg'],fg=p['green'])
         self.theme_button.configure(text='☀' if self.dark else '◐',fg=p['muted'])
+        self.font_down_button.configure(bg=p['bg'],fg=p['muted'])
+        self.font_up_button.configure(bg=p['bg'],fg=p['muted'])
         for label,button in self.tab_buttons.items():button.configure(bg=p['button'] if label==self.root_tab else p['bg'],fg=p['green'] if label==self.root_tab else p['muted'])
 
     def clock(self):
@@ -520,7 +531,10 @@ class Folio:
             self.image_frame.pack(fill='both',expand=True);self.draw_image();return
         if document.kind=='text':self.show_source();return
         if document.kind=='csv':
-            self.table=Table(self.content,document.rows,p,self.copy_text,self.submit);self.table.pack(fill='both',expand=True)
+            self.table=Table(self.content,document.rows,p,self.copy_text,self.submit)
+            self.table.font_size=self.font_size
+            self.table.row_height=max(24,int(self.font_size*3.0))
+            self.table.pack(fill='both',expand=True)
             return
         self.html.pack(fill='both',expand=True)
         key=(str(document.path),document.text,self.dark)
@@ -580,6 +594,8 @@ class Folio:
         self.html.load_html('<html><head><style>'+css+'</style></head><body><div class="article">'+body+'</div></body></html>',base_url=base)
         for index,values in enumerate(rows):
             table=Table(self.html,values,self.palette,self.copy_text,self.submit)
+            table.font_size=self.font_size
+            table.row_height=max(24,int(self.font_size*3.0))
             self.html.document.getElementById('folio-table-'+str(index)).widget=table
             self.embedded_tables.append(table)
 
@@ -669,14 +685,32 @@ class Folio:
         return 'break'
 
     def zoom(self,direction):
-        if self.current and self.current.kind=='image':
-            self.image_scale=max(.05,min(4,self.image_scale*(1.2 if direction>0 else 1/1.2)));self.draw_image()
-        elif self.view=='source':
-            import tkinter.font as font
-            current=font.Font(font=self.source['font']).actual('size');size=max(7,min(28,current+direction))
-            self.source.configure(font=('JetBrains Mono',size));self.gutter.configure(font=('JetBrains Mono',size));self.update_gutter()
-        elif self.view=='document' and self.current and self.current.kind=='markdown':
-            scale=float(self.html['fontscale']);self.html.configure(fontscale=max(.6,min(2.5,scale+direction*.1)))
+        if direction==0:
+            self.font_size=10
+            self.font_scale=1.0
+            self.image_scale=1.0
+        else:
+            self.font_size=max(7,min(28,self.font_size+direction))
+            self.font_scale=max(0.6,min(2.5,round(self.font_scale+direction*0.1,2)))
+            if self.current and self.current.kind=='image':
+                self.image_scale=max(.05,min(4,self.image_scale*(1.2 if direction>0 else 1/1.2)))
+                self.draw_image()
+        try:self.html.configure(fontscale=self.font_scale)
+        except Exception:pass
+        self.source.configure(font=('JetBrains Mono',self.font_size))
+        self.gutter.configure(font=('JetBrains Mono',self.font_size))
+        self.update_gutter()
+        self.list_text.configure(font=('JetBrains Mono',self.font_size))
+        self.path_input.configure(font=('JetBrains Mono',self.font_size))
+        if self.table:
+            self.table.font_size=self.font_size
+            self.table.row_height=max(24,int(self.font_size*3.0))
+            self.table.draw()
+        for t in self.embedded_tables:
+            t.font_size=self.font_size
+            t.row_height=max(24,int(self.font_size*3.0))
+            t.draw()
+        self.save_settings()
 
     def copy_text(self,text):
         self.root.clipboard_clear();self.root.clipboard_append(text);self.root.update_idletasks()
@@ -719,7 +753,11 @@ class Folio:
         if self.current.kind=='image':menu.add_command(label='Copy image',command=self.copy_image)
         else:menu.add_command(label='Rendered' if self.view=='source' and self.current.kind=='markdown' else 'Source',command=self.return_rendered if self.view=='source' and self.current.kind=='markdown' else self.show_source)
         menu.add_command(label='Find',command=self.find)
-        menu.add_command(label='Zoom in',command=lambda:self.zoom(1));menu.add_command(label='Zoom out',command=lambda:self.zoom(-1))
+        menu.add_separator()
+        menu.add_command(label='Increase font · Ctrl++',command=lambda:self.zoom(1))
+        menu.add_command(label='Decrease font · Ctrl+-',command=lambda:self.zoom(-1))
+        menu.add_command(label='Reset font · Ctrl+0',command=lambda:self.zoom(0))
+        menu.add_separator()
         menu.add_command(label='Back · Esc',command=self.escape);menu.tk_popup(event.x_root,event.y_root)
 
     def return_rendered(self):
