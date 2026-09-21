@@ -146,7 +146,6 @@ class Folio:
         for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Adhoc',self.show_adhoc),('Projects',self.show_projects)]:
             button=self.button(self.switcher,label,callback);button.pack(side='left',padx=3);self.tab_buttons[label]=button
         self.switcher.pack(side='right',padx=7)
-        self.reader_tabs=tk.Frame(self.nav)
         self.input_frame=tk.Frame(self.frame);self.input_frame.pack(fill='x',pady=(0,10))
         self.path_input=tk.Text(self.input_frame,height=2,wrap='word',font=(self.font_family,self.font_size),bd=1,relief='solid',padx=10,pady=8,undo=True)
         self.path_input.pack(fill='x')
@@ -370,7 +369,7 @@ class Folio:
 
     def show_list_controls(self):
         self.prettify_button.pack_forget()
-        self.root.title('Folio');self.reader_tabs.pack_forget();self.switcher.pack(side='right',padx=7)
+        self.root.title('Folio');self.switcher.pack(side='right',padx=7)
         self.date.pack(side='left');self.folder_button.pack(side='left',padx=(8,0),after=self.date)
         self.input_frame.pack(fill='x',before=self.content,pady=(0,10))
         self.back_button.configure(state='disabled' if self.context_label=='Paths' else 'normal')
@@ -618,27 +617,7 @@ class Folio:
         self.input_frame.pack_forget();self.date.pack_forget();self.switcher.pack_forget()
         self.folder_button.pack(side='left',padx=(0,8))
         self.back_button.configure(state='normal')
-        self.populate_tabs();self.status.configure(text='');self.render_document()
-
-    def populate_tabs(self):
-        for child in self.reader_tabs.winfo_children():child.destroy()
-        entries=list(dict.fromkeys(p for p in self.context_entries if p.is_file()))
-        path=self.current.path
-        if path and path not in entries:entries.insert(0,path)
-        self.tab_paths=entries
-        if len(entries)<2:self.reader_tabs.pack_forget();return
-        selected=entries.index(path) if path in entries else 0
-        start=max(0,min(selected-1,len(entries)-4));self.tab_start=start
-        if start:self.button(self.reader_tabs,'‹',lambda:self.load_path(entries[start-1])).pack(side='left')
-        for entry in entries[start:start+4]:
-            label=entry.name
-            if sum(p.name==entry.name for p in entries)>1:label=entry.parent.name+'/'+label
-            if len(label)>24:label=label[:12]+'…'+label[-10:]
-            button=self.button(self.reader_tabs,label,lambda p=entry:self.load_path(p))
-            button.configure(relief='flat',fg=self.palette['green'],bg=self.palette['button'] if entry==path else self.palette['bg'])
-            button.pack(side='left',padx=2)
-        if start+4<len(entries):self.button(self.reader_tabs,'›',lambda:self.load_path(entries[start+4])).pack(side='left')
-        self.reader_tabs.pack(side='left',fill='x',expand=True,padx=(0,10))
+        self.status.configure(text='');self.render_document()
 
     def render_document(self):
         if not self.current:return

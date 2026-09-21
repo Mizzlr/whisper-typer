@@ -153,7 +153,7 @@ class TkTests(unittest.TestCase):
         self.window.open_group_path(a,self.window.batches[0]);self.idle()
         self.assertEqual(self.window.current.kind,'markdown')
         self.assertIn('A heading',self.window.html.document.body.textContent)
-        self.assertEqual(self.window.tab_paths,[a,b])
+        self.assertEqual(self.window.folder_button['text'], f'📁 {self.path.name} ▾')
         self.assertTrue(self.window.back_button.winfo_ismapped())
         self.window.load_path(b);self.idle();self.assertEqual(self.window.table.rows[1],['A','4'])
         self.window.go_back();self.assertEqual(self.window.view,'list')

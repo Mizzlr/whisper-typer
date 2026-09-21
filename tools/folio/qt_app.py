@@ -409,14 +409,6 @@ class Folio(QtWidgets.QMainWindow):
         self.reading=reading
         reader = QtWidgets.QVBoxLayout(reading)
         reader.setContentsMargins(0, 0, 0, 0)
-        self.file_tabs=QtWidgets.QTabBar()
-        self.file_tabs.setExpanding(False)
-        self.file_tabs.setUsesScrollButtons(True)
-        self.file_tabs.setDrawBase(False)
-        self.file_tabs.setElideMode(QtCore.Qt.ElideMiddle)
-        self.file_tabs.currentChanged.connect(self.switch_file)
-        self.nav.insertWidget(1,self.file_tabs,1)
-        self.file_tabs.hide()
         self.location = QtWidgets.QLabel('')
         self.location.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self.location.setWordWrap(True)
@@ -810,7 +802,6 @@ QTabBar::tab:hover {background:#f0eee5}
         self.date.show()
         self.root_controls.show()
         self.prettify_button.hide()
-        self.file_tabs.hide()
         self.transpose_button.hide()
         self.back_button.setEnabled(False)
         self.status.clear()
@@ -1026,7 +1017,6 @@ QTabBar::tab:hover {background:#f0eee5}
         self.date.show()
         self.root_controls.show()
         self.prettify_button.hide()
-        self.file_tabs.hide()
         self.transpose_button.hide()
         self.back_button.setEnabled(bool(self.context_stack))
         self.status.clear()
@@ -1271,7 +1261,6 @@ QTabBar::tab:hover {background:#f0eee5}
         self.find.hide()
         self.status.clear()
         self.setWindowTitle(self.current.path.name if self.current.path else 'Folio')
-        self.populate_switcher()
         self.location.setText(str(self.current.path) if self.current.path else '')
         self.copy_button.setEnabled(True)
         self.path_button.setEnabled(bool(self.current.path))
@@ -1284,41 +1273,6 @@ QTabBar::tab:hover {background:#f0eee5}
         self.page_count.setText(f'of {self.current.pages}')
         self.pdf_image = None
         self.refresh_view()
-
-    def populate_switcher(self):
-        path=self.current.path
-        entries=[]
-        if path:
-            if self.browsing_folder:
-                entries=self.context_entries
-            else:
-                batch=next((b for b in self.batches if b['id']==self.active_batch),None)
-                if batch is None:
-                    batch=next((b for b in self.batches if str(path) in b['paths']),None)
-                entries=[Path(p) for p in batch['paths']] if batch else [path]
-            entries=list(dict.fromkeys(p for p in entries if p.is_file()))
-            if path not in entries:
-                entries.insert(0,path)
-        self.file_tabs.blockSignals(True)
-        while self.file_tabs.count():
-            self.file_tabs.removeTab(0)
-        names=Counter(p.name for p in entries)
-        for entry in entries:
-            label=entry.name
-            if names[entry.name]>1:
-                label=entry.parent.name+'/'+entry.name
-            index=self.file_tabs.addTab(label)
-            self.file_tabs.setTabData(index,str(entry))
-            self.file_tabs.setTabToolTip(index,str(entry))
-            if entry==path:
-                self.file_tabs.setCurrentIndex(index)
-        self.file_tabs.blockSignals(False)
-        self.file_tabs.setVisible(len(entries)>1)
-
-    def switch_file(self,index):
-        path=self.file_tabs.tabData(index)
-        if path and (not self.current or str(self.current.path)!=path):
-            self.load_path(Path(path))
 
     def refresh_view(self):
         if not self.current:
