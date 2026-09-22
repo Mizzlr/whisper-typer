@@ -62,8 +62,9 @@ class ImageZoom(tk.Frame):
                                activebackground=style.COPY_HOVER, padx=5, pady=1, takefocus=False)
             widget.pack(side='right', padx=2)
             return widget
+        self.copy_action = lambda: copy(self.copy_button) if copy else None
         self.close_button = button('Close', close)
-        self.copy_button = button('Copy',lambda:copy(self.copy_button) if copy else None)
+        self.copy_button = button('Copy', self.copy_action)
         if copy is None:self.copy_button.configure(state='disabled')
         self.fit_button = button('Fit', self.fit)
         self.plus_button = button('+', lambda: self.zoom(1.25))
@@ -84,6 +85,26 @@ class ImageZoom(tk.Frame):
         self.canvas.bind('<Configure>', self.resized)
         self.canvas.bind('<Button-1>', self.pan_start)
         self.canvas.bind('<B1-Motion>', self.pan_move)
+
+        def copy_path():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(str(path))
+            self.copy_button.configure(text='Copied')
+            self.after(1500, lambda: self.copy_button.configure(text='Copy') if not self.closed and self.copy_button.winfo_exists() else None)
+
+        def context_menu(event):
+            menu = tk.Menu(self, tearoff=False, font=(style.FONT, 9), bg=style.BG, fg=style.FG,
+                           activebackground=style.PANEL, activeforeground=style.FG)
+            menu.add_command(label='Copy image (Ctrl+C)', command=self.copy_action)
+            menu.add_command(label='Copy image path (Ctrl+Shift+C)', command=copy_path)
+            menu.add_separator()
+            menu.add_command(label='Fit to window (0)', command=self.fit)
+            menu.add_command(label='Close (Esc)', command=close)
+            menu.tk_popup(event.x_root, event.y_root)
+
+        self.canvas.bind('<Button-3>', context_menu)
+        self.bind('<Button-3>', context_menu)
+
         for widget in (self, toolbar, *toolbar.winfo_children(), self.canvas, horizontal, vertical):
             widget.bind('<Button-4>', lambda event: self.wheel(event, 1.25))
             widget.bind('<Button-5>', lambda event: self.wheel(event, 1 / 1.25))
@@ -101,7 +122,17 @@ class ImageZoom(tk.Frame):
                                   ('<equal>', lambda: self.zoom(1.25)),
                                   ('<minus>', lambda: self.zoom(1 / 1.25)), ('<Key-0>', self.fit),
                                   ('<Left>',lambda:self.pan('x',-3)),('<Right>',lambda:self.pan('x',3)),
-                                  ('<Up>',lambda:self.pan('y',-3)),('<Down>',lambda:self.pan('y',3))):
+                                  ('<Up>',lambda:self.pan('y',-3)),('<Down>',lambda:self.pan('y',3)),
+                                  ('<Control-c>', self.copy_action),
+                                  ('<Control-C>', self.copy_action),
+                                  ('<Control-j>', self.copy_action),
+                                  ('<Control-J>', self.copy_action),
+                                  ('<Key-c>', self.copy_action),
+                                  ('<Key-C>', self.copy_action),
+                                  ('<Control-Shift-C>', copy_path),
+                                  ('<Control-Shift-c>', copy_path),
+                                  ('<Control-Shift-J>', copy_path),
+                                  ('<Control-Shift-j>', copy_path)):
             def handler(_, action=command):
                 action()
                 return 'break'

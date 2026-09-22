@@ -278,6 +278,37 @@ results are private JSONL in `~/.cache/whisper-typer/grammar-review.jsonl`.
 Set `ollama.background_review: false` to restore synchronous correction; the
 pre-deployment binary/config are also saved for a complete revert.
 
+Any dictation containing the whole word **sorry** (case-insensitive) bypasses
+the grammar judgment stage and short-text skip threshold. In Ollama mode it
+also bypasses immediate paste/background review: the grammar LLM resolves the
+correction before paste. Its prompt handles single-word and phrase replacements,
+including numbers and names:
+
+- “Payouts for September, sorry, October” → “Payouts for October”
+- “Meet at five, sorry, at six” → “Meet at six”
+- “Visit New York, sorry, Los Angeles” → “Visit Los Angeles”
+- “Send 5 SOL, sorry, 6 SOL” → “Send 6 SOL”
+- “When I said that, sorry, this” → “When I said this”
+
+The LLM preserves genuine apologies, quoted uses, explicit references to the
+word “sorry,” and incomplete or ambiguous corrections. The LLM receives the
+transcription first, then labeled contexts in spoken order (before/after each
+marker), and is instructed to retain the replacement after “sorry.” Corrections
+also apply inside sentences about dictation. Validation rejects edits that keep
+the old wording while discarding the supplied replacement, or strip only
+“sorry” without replacing an abandoned phrase. Validation allows the abandoned local
+phrase to be removed while protecting facts outside that repair. If all
+attempts fail or time out, the original dictation is preserved. After two invalid edits,
+clear terminal single-word replacements have a constrained fallback: the same
+LLM chooses a literal last-word replacement, with optional article adjustment,
+then restores punctuation and capitalization while preserving those words.
+This fallback excludes compound names, broader replacements, apologies, and
+literal references; those retain the original if normal correction fails. All
+attempts share the existing correction timeout budget. Raw ASR stays in private
+history. Explicit Whisper mode or disabled Ollama still skips the LLM. This
+corrects the current dictation before delivery; it does not edit earlier pasted
+or sent messages.
+
 An optional `ollama.grammar_gate` asks TypeSafe's Jev (`provider: typesafe`)
 for typed error probabilities via `/v1/systemone`. Rust skips rewriting only
 when the probability of a required repair is at most `clean_threshold` (0.2).

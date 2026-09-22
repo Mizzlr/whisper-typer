@@ -8,7 +8,9 @@ import itertools
 import os
 from pathlib import Path
 import queue
+import shutil
 import sqlite3
+import subprocess
 import time
 
 from PIL import Image, ImageOps
@@ -246,9 +248,32 @@ class ClipboardMonitor:
     def copy(self, item):
         if item['kind'] == 'text':
             self.clipboard.set_text(item['text'], -1)
+            try: self.clipboard.store()
+            except Exception: pass
         else:
-            pixbuf = self.GdkPixbuf.Pixbuf.new_from_file(str(self.store.images / item['image']))
-            self.clipboard.set_image(pixbuf)
+            image_path = self.store.images / item['image']
+            copied = False
+            if shutil.which('xclip') and image_path.exists():
+                try:
+                    subprocess.run(['xclip', '-selection', 'clipboard', '-target', 'image/png', str(image_path)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2, check=True)
+                    copied = True
+                except (subprocess.SubprocessError, OSError):
+                    copied = False
+            if not copied and shutil.which('wl-copy') and image_path.exists():
+                try:
+                    subprocess.run(['wl-copy', '--type', 'image/png'],
+                                   input=image_path.read_bytes(), timeout=2, check=True)
+                    copied = True
+                except (subprocess.SubprocessError, OSError):
+                    copied = False
+            if not copied:
+                try:
+                    pixbuf = self.GdkPixbuf.Pixbuf.new_from_file(str(image_path))
+                    self.clipboard.set_image(pixbuf)
+                    self.clipboard.store()
+                except Exception:
+                    pass
 
     def close(self):
         self.closed = True

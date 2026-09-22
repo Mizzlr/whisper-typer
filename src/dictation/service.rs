@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::history::{self, TranscriptionRecord};
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
-use crate::processor::{is_pathological_stutter, CorrectionMetadata, OllamaProcessor};
+use crate::processor::{contains_sorry, is_pathological_stutter, CorrectionMetadata, OllamaProcessor};
 use crate::punctuation::PunctuationClient;
 use crate::recorder::AudioRecorder;
 use crate::remote_asr::RemoteAsrClient;
@@ -654,11 +654,12 @@ impl DictationService {
             let t_ollama_start = Instant::now();
             let word_count = punctuated_text.split_whitespace().count();
             let skip_threshold = self.config.ollama.skip_threshold;
+            let spoken_correction = contains_sorry(&punctuated_text);
             let (pt, ot) = match output_mode {
                 OutputMode::Whisper => (Some(punctuated_text.clone()), None),
                 _ if !runtime.ollama_enabled => (Some(punctuated_text.clone()), None),
-                _ if self.config.ollama.background_review && output_mode==OutputMode::Ollama => (Some(punctuated_text.clone()), None),
-                _ if skip_threshold > 0 && word_count <= skip_threshold => {
+                _ if self.config.ollama.background_review && output_mode==OutputMode::Ollama && !spoken_correction => (Some(punctuated_text.clone()), None),
+                _ if skip_threshold > 0 && word_count <= skip_threshold && !spoken_correction => {
                     info!("Skipped Ollama ({word_count} words <= {skip_threshold} threshold)");
                     (Some(punctuated_text.clone()), None)
                 }
@@ -741,7 +742,7 @@ impl DictationService {
             ollama_text,
             final_text: final_text.clone(),
             output_mode: output_mode.as_str().to_string(),
-            background_review: (self.config.ollama.background_review && runtime.ollama_enabled && output_mode==OutputMode::Ollama).then_some(true),
+            background_review: (self.config.ollama.background_review && runtime.ollama_enabled && output_mode==OutputMode::Ollama && correction_metadata.is_none()).then_some(true),
             whisper_latency_ms: t_whisper as i64,
             spelling_latency_ms: self.spell_corrector.as_ref().map(|_| t_spelling),
             spelling_edits,
@@ -785,7 +786,7 @@ impl DictationService {
         };
         history::save_record(&record);
         self.ui_publisher.publish("dictation", &record);
-        if runtime.ollama_enabled && output_mode==OutputMode::Ollama {
+        if runtime.ollama_enabled && output_mode==OutputMode::Ollama && correction_metadata.is_none() {
             if let Some(reviewer)=&self.background_reviewer {
                 reviewer.enqueue(ReviewJob {timestamp:record.timestamp.clone(),original:record.whisper_text.clone(),pasted:final_text.clone()});
             }

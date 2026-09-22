@@ -1,0 +1,9 @@
+# Local tracker data and logs
+data/*.db
+data/*.db-journal
+data/*.db-shm
+data/*.db-wal
+data/*.lock
+data/*.log
+data/*.json
+data/*.jsonl

@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antigravity Quota & Token Burn Monitor</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
+
+    :root {
+      --bg-main: #090d16;
+      --bg-card: #121824;
+      --bg-card-hover: #172030;
+      --border: #202b3f;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent-blue: #38bdf8;
+      --accent-green: #22c55e;
+      --accent-yellow: #eab308;
+      --accent-red: #ef4444;
+      --accent-purple: #a855f7;
+      --font-mono: 'JetBrains Mono', 'JetBrainsMono Nerd Font', 'JetBrainsMono NF', monospace;
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: var(--font-mono) !important;
+    }
+    body {
+      background: var(--bg-main);
+      color: var(--text-main);
+      font-family: var(--font-mono) !important;
+      line-height: 1.5;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .container {
+      max-width: 1300px;
+      margin: 0 auto;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .header-title {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .header-title h1 {
+      font-size: 20px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      letter-spacing: -0.5px;
+    }
+    .header-title .tag {
+      font-size: 11px;
+      font-weight: 600;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-blue);
+      padding: 2px 8px;
+      border-radius: 9999px;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+    .header-meta {
+      font-size: 12.5px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .header-meta strong {
+      color: var(--text-main);
+    }
+    .refresh-badge {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .live-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      background: var(--accent-green);
+      border-radius: 50%;
+      margin-right: 6px;
+      box-shadow: 0 0 8px var(--accent-green);
+    }
+
+    /* Top Grid Metrics (Single Line) */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      transition: border-color 0.15s ease;
+      min-width: 0;
+    }
+    .metric-card:hover {
+      border-color: #334155;
+    }
+
+    /* Velocity Stats Grid */
+    .velocity-stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .vstat-box {
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 8px;
+      padding: 12px 14px;
+      min-width: 0;
+    }
+    .vstat-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+      margin-bottom: 5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .vstat-value {
+      font-size: 19px;
+      font-weight: 800;
+      color: var(--text-main);
+      margin-bottom: 4px;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .vstat-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .metric-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .metric-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .metric-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-family: var(--font-mono);
+    }
+    .badge-green { background: rgba(34, 197, 94, 0.15); color: var(--accent-green); border: 1px solid rgba(34, 197, 94, 0.3); }
+    .badge-yellow { background: rgba(234, 179, 8, 0.15); color: var(--accent-yellow); border: 1px solid rgba(234, 179, 8, 0.3); }
+    .badge-red { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); border: 1px solid rgba(239, 68, 68, 0.3); }
+    .badge-blue { background: rgba(56, 189, 248, 0.15); color: var(--accent-blue); border: 1px solid rgba(56, 189, 248, 0.3); }
+
+    .metric-value {
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -1px;
+      margin-bottom: 8px;
+      font-family: var(--font-mono);
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+    .metric-value .unit {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+    .progress-bar-bg {
+      height: 8px;
+      background: #1e293b;
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+    .metric-footer {
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      margin-top: 6px;
+    }
+    .metric-footer strong {
+      color: var(--text-main);
+    }
+
+    /* Charts Section */
+    .chart-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+      margin-bottom: 24px;
+    }
+    .section-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .chart-container {
+      width: 100%;
+      height: 220px;
+      position: relative;
+    }
+    svg.timeline-svg {
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+    }
+
+    /* Tables */
+    .table-container {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+      margin-bottom: 24px;
+      overflow-x: auto;
+      min-width: 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      text-align: left;
+    }
+    th {
+      color: var(--text-muted);
+      font-weight: 600;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
+    tr:hover td {
+      background: var(--bg-card-hover);
+    }
+    .td-title {
+      font-family: var(--font-mono) !important;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .status-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    /* Split layout */
+    .split-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+    .split-grid > * {
+      min-width: 0;
+    }
+    @media (max-width: 900px) {
+      .split-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-title">
+        <h1>Antigravity Quota Tracker <span class="tag">AI Ultra (20x)</span></h1>
+        <div class="header-meta">
+          <span>Account: <strong>mushtaqueahamed94@gmail.com</strong></span>
+          <span>•</span>
+          <span>Plan: <strong>Antigravity</strong></span>
+          <span>•</span>
+          <span>Model: <strong>Gemini 3.8 Flash (Medium)</strong></span>
+        </div>
+      </div>
+      <div class="refresh-badge">
+        <span class="live-dot"></span>
+        <strong>15m Cron Active</strong>
+        <span style="color: var(--border);">|</span>
+        <span style="color: var(--text-muted);">Updated: <span id="last-update">2026-09-23 02:30:16 IST</span></span>
+      </div>
+    </header>
+
+    <!-- KPI Metric Cards (Single Line) -->
+    <div class="metrics-grid">
+      <!-- 5-Hour Quota -->
+      <div class="metric-card">
+        <div class="metric-header">
+          <span class="metric-label">Gemini 5-Hour Limit</span>
+          <span class="metric-badge badge-green">
+            78.6% Left
+          </span>
+        </div>
+        <div class="metric-value">
+          78.6<span class="unit">%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" style="width: 78.57%; background: var(--accent-green);"></div>
+        </div>
+        <div class="metric-footer">
+          <span>Resets: <strong>23 Sep 06:20 (in 3h 50m)</strong></span>
+          <span>15m Change: <strong>0.0%</strong></span>
+        </div>
+      </div>
+
+      <!-- Weekly Quota -->
+      <div class="metric-card">
+        <div class="metric-header">
+          <span class="metric-label">Gemini 7-Day Limit</span>
+          <span class="metric-badge badge-green">
+            80.3% Left
+          </span>
+        </div>
+        <div class="metric-value">
+          80.3<span class="unit">%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" style="width: 80.26%; background: var(--accent-green);"></div>
+        </div>
+        <div class="metric-footer">
+          <span>Resets: <strong>28 Sep 00:50 (in 4d 22h)</strong></span>
+          <span>Weekly Cap Tier: <strong>Ultra (20x)</strong></span>
+        </div>
+      </div>
+
+      <!-- Token Consumption Today -->
+      <div class="metric-card">
+        <div class="metric-header">
+          <span class="metric-label">Tokens Consumed Today</span>
+          <span class="metric-badge badge-blue">3,545 Req</span>
+        </div>
+        <div class="metric-value">
+          46.05M
+        </div>
+        <div class="metric-footer">
+          <span>In: <strong>44.64M</strong> | Out: <strong>1.41M</strong></span>
+          <span>Last 15m: <strong>+2.2K</strong></span>
+        </div>
+        <div class="metric-footer" style="margin-top: 4px;">
+          <span>1h Consumption: <strong>~16.12M/hr</strong></span>
+          <span>Lifetime: <strong>552.62M</strong></span>
+        </div>
+      </div>
+
+      <!-- Active Running Instances -->
+      <div class="metric-card">
+        <div class="metric-header">
+          <span class="metric-label">Active CLI Instances</span>
+          <span class="metric-badge badge-yellow">15 Processes</span>
+        </div>
+        <div class="metric-value">
+          15<span class="unit">instances</span>
+        </div>
+        <div class="metric-footer">
+          <span>Claude/GPT 5h: <strong>100% left</strong></span>
+          <span>Claude/GPT 7d: <strong>100% left</strong></span>
+        </div>
+        <div class="metric-footer" style="margin-top: 4px;">
+          <span>Primary Workspace: <strong>~/astralane-quant</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Burn Down Velocity & 5-Hour Average Forecast Section -->
+    <div class="table-container" style="border: 1px solid rgba(56, 189, 248, 0.35); background: linear-gradient(180deg, rgba(18, 24, 36, 0.95) 0%, rgba(10, 14, 23, 0.95) 100%); margin-bottom: 24px;">
+      <div class="section-title">
+        <span style="display: flex; align-items: center; gap: 8px;">
+          <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" style="color: var(--accent-blue);"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
+          Burn Down Velocity & 5-Hour Limit Forecast
+        </span>
+        <span id="forecast-pill" class="status-pill badge-green">CALCULATING...</span>
+      </div>
+
+      <!-- Quick Velocity & Token Metrics Bar -->
+      <div class="velocity-stats-grid">
+        <div class="vstat-box">
+          <div class="vstat-label">Total Tokens Used Today</div>
+          <div class="vstat-value">46.05M</div>
+          <div class="vstat-sub">Prompt: <strong>44.64M</strong> (96.9%) | Gen: <strong>1.41M</strong> (3.1%)</div>
+        </div>
+
+        <div class="vstat-box">
+          <div class="vstat-label">Available Tokens in 5h Window</div>
+          <div class="vstat-value" style="color: var(--accent-blue);">~66.78M <span style="font-size: 13px; font-weight: normal; color: var(--text-muted);">(78.6% left)</span></div>
+          <div class="vstat-sub">Est. 5h Window Capacity: <strong>~85M</strong> tokens (Google AI Ultra)</div>
+        </div>
+
+        <div class="vstat-box">
+          <div class="vstat-label">Current Burn Velocity</div>
+          <div class="vstat-value" style="color: var(--accent-purple);">+2.2K <span style="font-size: 13px; font-weight: normal; color: var(--text-muted);">/ 15m</span></div>
+          <div class="vstat-sub">Velocity: <strong>~16.12M/hr</strong> &nbsp;|&nbsp; <strong>~149/min</strong></div>
+        </div>
+
+        <div class="vstat-box">
+          <div class="vstat-label">5-Hour Quota Runway / Forecast</div>
+          <div class="vstat-value" id="runway-val" style="color: var(--accent-green);">UNDERSHOOT (SAFE)</div>
+          <div class="vstat-sub" id="runway-sub">Resets: <strong>23 Sep 06:20 (in 3h 50m)</strong></div>
+        </div>
+      </div>
+
+      <!-- Detailed Burn Down Table -->
+      <div style="overflow-x: auto; margin-top: 10px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Total Used</th>
+              <th>Input (Prompt)</th>
+              <th>Output (Gen)</th>
+              <th>15m Burn</th>
+              <th>Burn Velocity</th>
+              <th>5h Quota</th>
+              <th>5h Delta</th>
+              <th>5h Forecast</th>
+              <th>Instances</th>
+            </tr>
+          </thead>
+          <tbody id="burndown-rows">
+            <!-- Rendered dynamically by script from embedded data -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Timeline Charts Section -->
+    <div class="chart-section">
+      <div class="section-title">
+        <span>Quota & Token Burn Timeline (Past 24 Hours)</span>
+        <span style="font-size: 12px; color: var(--text-muted); font-weight: normal;">Recorded in 15-minute intervals</span>
+      </div>
+      <div class="chart-container" id="timeline-chart">
+        <svg id="chart-svg" class="timeline-svg" viewBox="0 0 1000 200" preserveAspectRatio="none">
+          <!-- Rendered dynamically by script -->
+        </svg>
+      </div>
+      <div style="display: flex; gap: 20px; font-size: 12px; color: var(--text-muted); margin-top: 12px; justify-content: flex-end;">
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 3px; background: #38bdf8; border-radius: 2px;"></span> Gemini 5-Hour Quota (%)</span>
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 3px; background: #22c55e; border-radius: 2px;"></span> Gemini 7-Day Quota (%)</span>
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; background: rgba(168, 85, 247, 0.4); border: 1px solid #a855f7; border-radius: 2px;"></span> Tokens Burned in 15m (Delta)</span>
+      </div>
+    </div>
+
+    <!-- Split View: Active Processes & Top Token Sessions -->
+    <div class="split-grid">
+      <!-- Active Processes Table -->
+      <div class="table-container">
+        <div class="section-title">
+          <span>Currently Running agy CLI Processes (15)</span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>PID</th>
+              <th>Directory</th>
+              <th>Session / Title</th>
+              <th>Uptime</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+            <tr>
+              <td>15205</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">bam-1000-usd-tips</td>
+              <td>3d 10h</td>
+            </tr>
+            
+            <tr>
+              <td>546146</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">arbor-report</td>
+              <td>5h 40m</td>
+            </tr>
+            
+            <tr>
+              <td>1025439</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">skaro-es-hoflabs</td>
+              <td>10h 4m</td>
+            </tr>
+            
+            <tr>
+              <td>1044862</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">bruce-confusion</td>
+              <td>10h 3m</td>
+            </tr>
+            
+            <tr>
+              <td>1093745</td>
+              <td>~/trailblazer</td>
+              <td class="td-title">Data Flow Architecture Review</td>
+              <td>41m</td>
+            </tr>
+            
+            <tr>
+              <td>1094863</td>
+              <td>~/trailblazer</td>
+              <td class="td-title">Zerodha Data Flow Architecture</td>
+              <td>41m</td>
+            </tr>
+            
+            <tr>
+              <td>1106802</td>
+              <td>~/trailblazer</td>
+              <td class="td-title">Codebase Cleanup And Realignment</td>
+              <td>38m</td>
+            </tr>
+            
+            <tr>
+              <td>1158266</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">trex-query</td>
+              <td>4h 54m</td>
+            </tr>
+            
+            <tr>
+              <td>1241673</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">Terra Indexer Disk Space</td>
+              <td>7m</td>
+            </tr>
+            
+            <tr>
+              <td>1425018</td>
+              <td>~/grid-grinder</td>
+              <td class="td-title">data-quality</td>
+              <td>1d 1h</td>
+            </tr>
+            
+            <tr>
+              <td>1562693</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">sniper-kol-numbers-for-arbor</td>
+              <td>4h 27m</td>
+            </tr>
+            
+            <tr>
+              <td>1630843</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">enable-more</td>
+              <td>4h 22m</td>
+            </tr>
+            
+            <tr>
+              <td>3271280</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">fti-pipeline</td>
+              <td>3d 11h</td>
+            </tr>
+            
+            <tr>
+              <td>3347147</td>
+              <td>~/grid-grinder</td>
+              <td class="td-title">architecture</td>
+              <td>17h 26m</td>
+            </tr>
+            
+            <tr>
+              <td>3413642</td>
+              <td>~/astralane-quant</td>
+              <td class="td-title">db-garbage</td>
+              <td>2h 37m</td>
+            </tr>
+            
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Top Active Sessions from DB -->
+      <div class="table-container">
+        <div class="section-title">
+          <span>Recent High-Step Conversations</span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Conversation</th>
+              <th>Total Steps</th>
+              <th>Status</th>
+              <th>Last Active</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+            <tr>
+              <td class="td-title">Zerodha Data Flow Architecture</td>
+              <td style="color: var(--accent-blue); font-weight: 700;">407</td>
+              <td><span class="status-pill badge-blue">IDLE</span></td>
+              <td style="color: var(--text-muted); font-size: 11px;">2026-09-22 20:59:43</td>
+            </tr>
+            
+            <tr>
+              <td class="td-title">Terra Indexer Disk Space</td>
+              <td style="color: var(--accent-blue); font-weight: 700;">164</td>
+              <td><span class="status-pill badge-green">ACTIVE</span></td>
+              <td style="color: var(--text-muted); font-size: 11px;">2026-09-22 20:58:17</td>
+            </tr>
+            
+            <tr>
+              <td class="td-title">Codebase Cleanup And Realignment</td>
+              <td style="color: var(--accent-blue); font-weight: 700;">486</td>
+              <td><span class="status-pill badge-green">ACTIVE</span></td>
+              <td style="color: var(--text-muted); font-size: 11px;">2026-09-22 20:57:01</td>
+            </tr>
+            
+            <tr>
+              <td class="td-title">Data Flow Architecture Review</td>
+              <td style="color: var(--accent-blue); font-weight: 700;">750</td>
+              <td><span class="status-pill badge-blue">IDLE</span></td>
+              <td style="color: var(--text-muted); font-size: 11px;">2026-09-22 20:55:34</td>
+            </tr>
+            
+            <tr>
+              <td class="td-title">data-quality</td>
+              <td style="color: var(--accent-blue); font-weight: 700;">3,254</td>
+              <td><span class="status-pill badge-green">ACTIVE</span></td>
+              <td style="color: var(--text-muted); font-size: 11px;">2026-09-22 20:54:59</td>
+            </tr>
+            
+            <tr>
+              <td class="td-title">White Wolf Disk Space</td>
+              <td style="color: var(--accent-blue); font-weight: 700;">120</td>
+              <td><span class="status-pill badge-blue">IDLE</span></td>
+              <td style="color: var(--text-muted); font-size: 11px;">2026-09-22 20:54:14</td>
+            </tr>
+            
+            <tr>
+              <td class="td-title">fti-pipeline</td>
+              <td style="color: var(--accent-blue); font-weight: 700;">3,350</td>
+              <td><span class="status-pill badge-green">ACTIVE</span></td>
+              <td style="color: var(--text-muted); font-size: 11px;">2026-09-22 20:52:26</td>
+            </tr>
+            
+            <tr>
+              <td class="td-title">skaro-es-hoflabs</td>
+              <td style="color: var(--accent-blue); font-weight: 700;">481</td>
+              <td><span class="status-pill badge-blue">IDLE</span></td>
+              <td style="color: var(--text-muted); font-size: 11px;">2026-09-22 20:33:46</td>
+            </tr>
+            
+          </tbody>
+        </table>
+    </div>
+
+    <!-- Hourly Rollup Analytics (Full Width SQLite View) -->
+    <div class="table-container">
+      <div class="section-title">
+        <span style="display: flex; align-items: center; gap: 8px;">
+          <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" style="color: var(--accent-purple);"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          Hourly Rollup Analytics (SQLite View)
+        </span>
+        <span class="status-pill badge-purple">Aggregated Hourly</span>
+      </div>
+      <div style="overflow-x: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Hour Window</th>
+              <th>Tokens Burned</th>
+              <th>Requests</th>
+              <th>Avg 5h Quota</th>
+              <th>Avg Instances</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+            <tr>
+              <td><strong>2026-09-22 21:00</strong></td>
+              <td style="color: var(--accent-purple); font-weight: 700;">+2.38M</td>
+              <td>437</td>
+              <td><strong>78.6%</strong></td>
+              <td><span class="status-pill badge-yellow">15.0</span></td>
+            </tr>
+            
+            <tr>
+              <td><strong>2026-09-22 20:00</strong></td>
+              <td style="color: var(--accent-purple); font-weight: 700;">+19.30M</td>
+              <td>1.6K</td>
+              <td><strong>90.5%</strong></td>
+              <td><span class="status-pill badge-yellow">12.6</span></td>
+            </tr>
+            
+            <tr>
+              <td><strong>2026-09-22 19:00</strong></td>
+              <td style="color: var(--accent-purple); font-weight: 700;">+22.01M</td>
+              <td>1.4K</td>
+              <td><strong>50.5%</strong></td>
+              <td><span class="status-pill badge-yellow">11.0</span></td>
+            </tr>
+            
+            <tr>
+              <td><strong>2026-09-22 18:00</strong></td>
+              <td style="color: var(--accent-purple); font-weight: 700;">+10.55M</td>
+              <td>591</td>
+              <td><strong>66.8%</strong></td>
+              <td><span class="status-pill badge-yellow">11.6</span></td>
+            </tr>
+            
+            <tr>
+              <td><strong>2026-09-22 17:00</strong></td>
+              <td style="color: var(--accent-purple); font-weight: 700;">+17.44M</td>
+              <td>800</td>
+              <td><strong>80.8%</strong></td>
+              <td><span class="status-pill badge-yellow">12.8</span></td>
+            </tr>
+            
+            <tr>
+              <td><strong>2026-09-22 16:00</strong></td>
+              <td style="color: var(--accent-purple); font-weight: 700;">+10.17M</td>
+              <td>534</td>
+              <td><strong>92.6%</strong></td>
+              <td><span class="status-pill badge-yellow">12.8</span></td>
+            </tr>
+            
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SQLite Database Architecture Panel -->
+    <div class="table-container" style="padding: 18px 22px;">
+      <div class="section-title" style="margin-bottom: 12px;">
+        <span style="display: flex; align-items: center; gap: 8px;">
+          <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" style="color: var(--accent-green);"><path d="M4 7v10c0 2 1.5 3 3.5 3h9c2 0 3.5-1 3.5-3V7c0-2-1.5-3-3.5-3h-9C5.5 4 4 5 4 7z"></path><path d="M4 12c0 2 1.5 3 3.5 3h9c2 0 3.5-1 3.5-3"></path></svg>
+          SQLite Storage & View Architecture
+        </span>
+        <span class="status-pill badge-green">WAL Active</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+        <div class="vstat-box">
+          <div class="vstat-label">Database Path</div>
+          <div style="font-size: 13px; font-weight: 600; color: var(--text-main); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="/home/mizzlr/whisper-typer/ag-tracker/data/usage_history.db">~/whisper-typer/ag-tracker/data/usage_history.db</div>
+          <div class="vstat-sub">2768.0 KB &nbsp;|&nbsp; WAL Mode</div>
+        </div>
+        <div class="vstat-box">
+          <div class="vstat-label">Persisted Records</div>
+          <div class="vstat-value" style="color: var(--accent-purple);">302 <span style="font-size: 13px; font-weight: normal; color: var(--text-muted);">snapshots</span></div>
+          <div class="vstat-sub">Logged states: <strong>3.1K</strong> rows</div>
+        </div>
+        <div class="vstat-box">
+          <div class="vstat-label">Analytical Views</div>
+          <div style="font-size: 13px; font-weight: 600; color: var(--accent-blue); font-family: var(--font-mono); margin-top: 4px;">v_hourly_burn</div>
+          <div class="vstat-sub">v_instance_activity</div>
+        </div>
+        <div class="vstat-box">
+          <div class="vstat-label">CLI Query Access</div>
+          <div style="font-size: 11px; color: #cbd5e1; font-family: var(--font-mono); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title='python3 tracker.py sql "SELECT * FROM v_hourly_burn"'><code>python3 tracker.py sql "..."</code></div>
+          <div class="vstat-sub">Fast atomic SQLite reads</div>
+        </div>
+      </div>
+    </div>
+
+  <!-- Embedded JSON Data for Instant Offline / file:// Loading -->
+  <script id="tracker-data" type="application/json">
+{"latest": {"timestamp": "2026-09-23T02:30:16.152503+05:30", "epoch": 1790110816, "account": {"email": "mushtaqueahamed94@gmail.com", "plan": "Antigravity", "model": "Gemini 3.8 Flash (Medium)", "projectId": "default-cli-project"}, "quotas": {"gemini_5h_pct": 78.57, "gemini_5h_reset": "2026-09-23T00:50:42Z", "gemini_weekly_pct": 80.26, "gemini_weekly_reset": "2026-09-27T19:20:11Z", "claude_5h_pct": 100, "claude_5h_reset": "2026-09-23T02:00:14Z", "claude_weekly_pct": 100, "claude_weekly_reset": "2026-09-29T21:00:14Z"}, "today_usage": {"total_tokens": 46048337, "input_tokens": 44643131, "output_tokens": 1405206, "requests": 3545}, "lifetime_tokens": 552617538, "deltas": {"tokens_delta": 2246, "requests_delta": 1, "gemini_5h_delta": 0.0, "gemini_weekly_delta": 0.0, "interval_seconds": 11}, "instances": [{"args": "", "conversationId": "b65ef1ba-0da3-44d0-b9f7-162f05529d58", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 296298, "pid": 15205, "sessionName": "bam-1000-usd-tips"}, {"args": "", "conversationId": "b42aa56f-ff3e-4c93-8c52-4b8ed23e3310", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 20440, "pid": 546146, "sessionName": "arbor-report"}, {"args": "", "conversationId": "53df820b-e652-439d-8f5c-798fef5f41d8", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 36278, "pid": 1025439, "sessionName": "skaro-es-hoflabs"}, {"args": "--conversation=f9e5e94f-c843-4eba-8413-26a522823670", "conversationId": "f9e5e94f-c843-4eba-8413-26a522823670", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 36192, "pid": 1044862, "sessionName": "bruce-confusion"}, {"args": "", "conversationId": "da538b65-0237-4ffa-8336-08bba347ed45", "cwd": "/home/mizzlr/trailblazer", "elapsedSeconds": 2518, "pid": 1093745, "sessionName": "Data Flow Architecture Review"}, {"args": "", "conversationId": "9eb948e2-41fb-4863-8fac-6a59ce334c09", "cwd": "/home/mizzlr/trailblazer", "elapsedSeconds": 2481, "pid": 1094863, "sessionName": "Zerodha Data Flow Architecture"}, {"args": "", "conversationId": "375ef937-ff58-436c-b974-db4093947646", "cwd": "/home/mizzlr/trailblazer", "elapsedSeconds": 2288, "pid": 1106802, "sessionName": "Codebase Cleanup And Realignment"}, {"args": "", "conversationId": "9be1e1ec-aeb0-4983-936c-cf7b34a77e64", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 17687, "pid": 1158266, "sessionName": "trex-query"}, {"args": "", "conversationId": "25ef96e8-9bd5-4bd2-8461-a5adc59bd813", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 472, "pid": 1241673, "sessionName": "Terra Indexer Disk Space"}, {"args": "", "conversationId": "3713fb63-69bb-4318-9bb1-1d9b47ac1ad2", "cwd": "/home/mizzlr/grid-grinder", "elapsedSeconds": 90166, "pid": 1425018, "sessionName": "data-quality"}, {"args": "", "conversationId": "0cedfb5d-6706-4f69-96b7-b750852d7da6", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 16027, "pid": 1562693, "sessionName": "sniper-kol-numbers-for-arbor"}, {"args": "", "conversationId": "d61dfcab-1c55-4676-b433-24a690eb72ba", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 15758, "pid": 1630843, "sessionName": "enable-more"}, {"args": "", "conversationId": "0b6fb38d-a3f6-489f-baba-3b6d5ead7101", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 299017, "pid": 3271280, "sessionName": "fti-pipeline"}, {"args": "", "conversationId": "c8a7bdee-564f-4deb-859e-09058ebca156", "cwd": "/home/mizzlr/grid-grinder", "elapsedSeconds": 62784, "pid": 3347147, "sessionName": "architecture"}, {"args": "--conversation=9152ff8e-d529-433f-bcf6-b9985d2e8883", "conversationId": "9152ff8e-d529-433f-bcf6-b9985d2e8883", "cwd": "/home/mizzlr/astralane-quant", "elapsedSeconds": 9439, "pid": 3413642, "sessionName": "db-garbage"}], "top_conversations": [{"conversation_id": "9eb948e2-41fb-4863-8fac-6a59ce334c09", "title": "Zerodha Data Flow Architecture", "step_count": 407, "last_modified": "2026-09-22 20:59:43.972057033+00:00", "is_active": false, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/trailblazer\"]"}, {"conversation_id": "25ef96e8-9bd5-4bd2-8461-a5adc59bd813", "title": "Terra Indexer Disk Space", "step_count": 164, "last_modified": "2026-09-22 20:58:17.793356318+00:00", "is_active": true, "status": "CASCADE_RUN_STATUS_RUNNING", "workspace": "[\"file:///home/mizzlr/astralane-quant\"]"}, {"conversation_id": "375ef937-ff58-436c-b974-db4093947646", "title": "Codebase Cleanup And Realignment", "step_count": 486, "last_modified": "2026-09-22 20:57:01.623260268+00:00", "is_active": true, "status": "CASCADE_RUN_STATUS_RUNNING", "workspace": "[\"file:///home/mizzlr/trailblazer\"]"}, {"conversation_id": "da538b65-0237-4ffa-8336-08bba347ed45", "title": "Data Flow Architecture Review", "step_count": 750, "last_modified": "2026-09-22 20:55:34.73179268+00:00", "is_active": false, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/trailblazer\"]"}, {"conversation_id": "3713fb63-69bb-4318-9bb1-1d9b47ac1ad2", "title": "data-quality", "step_count": 3254, "last_modified": "2026-09-22 20:54:59.301021654+00:00", "is_active": true, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/grid-grinder\"]"}, {"conversation_id": "75e880d6-c76a-4f55-9084-90b2a3734ee4", "title": "White Wolf Disk Space", "step_count": 120, "last_modified": "2026-09-22 20:54:14.03384696+00:00", "is_active": false, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/grid-grinder\"]"}, {"conversation_id": "0b6fb38d-a3f6-489f-baba-3b6d5ead7101", "title": "fti-pipeline", "step_count": 3350, "last_modified": "2026-09-22 20:52:26.692902207+00:00", "is_active": true, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/astralane-quant\"]"}, {"conversation_id": "53df820b-e652-439d-8f5c-798fef5f41d8", "title": "skaro-es-hoflabs", "step_count": 481, "last_modified": "2026-09-22 20:33:46.321138243+00:00", "is_active": false, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/astralane-quant\"]"}, {"conversation_id": "b42aa56f-ff3e-4c93-8c52-4b8ed23e3310", "title": "arbor-report", "step_count": 615, "last_modified": "2026-09-22 20:32:30.733809281+00:00", "is_active": false, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/astralane-quant\"]"}, {"conversation_id": "0cedfb5d-6706-4f69-96b7-b750852d7da6", "title": "sniper-kol-numbers-for-arbor", "step_count": 250, "last_modified": "2026-09-22 20:31:36.802424207+00:00", "is_active": false, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/astralane-quant\"]"}, {"conversation_id": "c8a7bdee-564f-4deb-859e-09058ebca156", "title": "architecture", "step_count": 2280, "last_modified": "2026-09-22 20:06:29.327999944+00:00", "is_active": false, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/grid-grinder\"]"}, {"conversation_id": "9152ff8e-d529-433f-bcf6-b9985d2e8883", "title": "db-garbage", "step_count": 2446, "last_modified": "2026-09-22 20:03:26.002247465+00:00", "is_active": true, "status": "CASCADE_RUN_STATUS_IDLE", "workspace": "[\"file:///home/mizzlr/astralane-quant\"]"}], "raw_agl_usage": {"summary": {"currentStreakDays": 6, "lifetimeTokens": 552617538, "peakDailyTokens": 157073924}, "windows": {"30d": {"input_tokens": 538644007, "output_tokens": 13973531, "requests": 31935, "total_tokens": 552617538}, "7d": {"input_tokens": 524828212, "output_tokens": 13199220, "requests": 29915, "total_tokens": 538027432}, "lifetime": {"input_tokens": 538644007, "output_tokens": 13973531, "requests": 31935, "total_tokens": 552617538}, "today": {"input_tokens": 44643131, "output_tokens": 1405206, "requests": 3545, "total_tokens": 46048337}}}}, "history": [{"timestamp": "2026-09-22T13:00:14.878022+05:30", "epoch": 1790062214, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 7, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T13:15:05.980081+05:30", "epoch": 1790063105, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 891, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T13:15:15.905455+05:30", "epoch": 1790063115, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T13:30:05.692161+05:30", "epoch": 1790064005, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T13:30:17.671244+05:30", "epoch": 1790064017, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 12, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T13:45:05.628284+05:30", "epoch": 1790064905, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 888, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T13:45:16.881843+05:30", "epoch": 1790064916, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T14:00:05.654942+05:30", "epoch": 1790065805, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T14:00:15.704382+05:30", "epoch": 1790065815, "gemini_5h_pct": 92.66, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T08:30:41Z"}, {"timestamp": "2026-09-22T14:15:05.037824+05:30", "epoch": 1790066705, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 7.34, "active_instances_count": 8, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T13:30:41Z"}, {"timestamp": "2026-09-22T14:15:16.314869+05:30", "epoch": 1790066716, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T13:30:41Z"}, {"timestamp": "2026-09-22T14:30:05.190737+05:30", "epoch": 1790067605, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T13:30:41Z"}, {"timestamp": "2026-09-22T14:30:14.686216+05:30", "epoch": 1790067614, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 9, "gemini_5h_reset": "2026-09-22T13:30:41Z"}, {"timestamp": "2026-09-22T14:45:05.208415+05:30", "epoch": 1790068505, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 891, "gemini_5h_reset": "2026-09-22T14:15:04Z"}, {"timestamp": "2026-09-22T14:45:16.159430+05:30", "epoch": 1790068516, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T14:15:15Z"}, {"timestamp": "2026-09-22T15:00:05.714246+05:30", "epoch": 1790069405, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T14:30:04Z"}, {"timestamp": "2026-09-22T15:00:14.104208+05:30", "epoch": 1790069414, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 9, "gemini_5h_reset": "2026-09-22T14:30:13Z"}, {"timestamp": "2026-09-22T15:15:06.911141+05:30", "epoch": 1790070306, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 892, "gemini_5h_reset": "2026-09-22T14:45:05Z"}, {"timestamp": "2026-09-22T15:15:15.902054+05:30", "epoch": 1790070315, "gemini_5h_pct": 100.0, "gemini_weekly_pct": 90.57, "today_tokens": 25921615, "today_input_tokens": 25271077, "today_output_tokens": 650538, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 8, "interval_seconds": 9, "gemini_5h_reset": "2026-09-22T14:45:14Z"}, {"timestamp": "2026-09-22T15:30:04.361577+05:30", "epoch": 1790071204, "gemini_5h_pct": 97.8, "gemini_weekly_pct": 90.42, "today_tokens": 26967239, "today_input_tokens": 26288402, "today_output_tokens": 678837, "tokens_delta": 1045624, "requests_delta": 77, "gemini_5h_delta": -2.2, "active_instances_count": 11, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T15:30:16.621698+05:30", "epoch": 1790071216, "gemini_5h_pct": 97.8, "gemini_weekly_pct": 90.42, "today_tokens": 26967239, "today_input_tokens": 26288402, "today_output_tokens": 678837, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 11, "interval_seconds": 12, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T15:45:04.349671+05:30", "epoch": 1790072104, "gemini_5h_pct": 95.35, "gemini_weekly_pct": 90.26, "today_tokens": 29839755, "today_input_tokens": 29087090, "today_output_tokens": 752665, "tokens_delta": 2872516, "requests_delta": 146, "gemini_5h_delta": -2.45, "active_instances_count": 13, "interval_seconds": 888, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T15:45:15.693022+05:30", "epoch": 1790072115, "gemini_5h_pct": 94.87, "gemini_weekly_pct": 90.05, "today_tokens": 30010180, "today_input_tokens": 29255171, "today_output_tokens": 755009, "tokens_delta": 170425, "requests_delta": 2, "gemini_5h_delta": -0.48, "active_instances_count": 13, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T16:00:04.040087+05:30", "epoch": 1790073004, "gemini_5h_pct": 93.12, "gemini_weekly_pct": 89.98, "today_tokens": 32845967, "today_input_tokens": 32026029, "today_output_tokens": 819938, "tokens_delta": 2835787, "requests_delta": 94, "gemini_5h_delta": -1.75, "active_instances_count": 13, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T16:00:29.893177+05:30", "epoch": 1790073029, "gemini_5h_pct": 93.53, "gemini_weekly_pct": 89.92, "today_tokens": 32856621, "today_input_tokens": 32034675, "today_output_tokens": 821946, "tokens_delta": 10654, "requests_delta": 2, "gemini_5h_delta": 0.41, "active_instances_count": 13, "interval_seconds": 25, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T16:15:04.928304+05:30", "epoch": 1790073904, "gemini_5h_pct": 91.89, "gemini_weekly_pct": 89.88, "today_tokens": 33925106, "today_input_tokens": 33006340, "today_output_tokens": 918766, "tokens_delta": 1068485, "requests_delta": 70, "gemini_5h_delta": -1.64, "active_instances_count": 13, "interval_seconds": 875, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T16:15:14.076034+05:30", "epoch": 1790073914, "gemini_5h_pct": 91.72, "gemini_weekly_pct": 89.95, "today_tokens": 33934482, "today_input_tokens": 33012886, "today_output_tokens": 921596, "tokens_delta": 9376, "requests_delta": 2, "gemini_5h_delta": -0.17, "active_instances_count": 13, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T16:30:03.325912+05:30", "epoch": 1790074803, "gemini_5h_pct": 89.04, "gemini_weekly_pct": 89.78, "today_tokens": 37502847, "today_input_tokens": 36468801, "today_output_tokens": 1034046, "tokens_delta": 3568365, "requests_delta": 167, "gemini_5h_delta": -2.68, "active_instances_count": 14, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T16:30:13.819110+05:30", "epoch": 1790074813, "gemini_5h_pct": 89.01, "gemini_weekly_pct": 89.78, "today_tokens": 37516277, "today_input_tokens": 36480745, "today_output_tokens": 1035532, "tokens_delta": 13430, "requests_delta": 3, "gemini_5h_delta": -0.03, "active_instances_count": 14, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T16:45:18.279758+05:30", "epoch": 1790075718, "gemini_5h_pct": 86.5, "gemini_weekly_pct": 89.72, "today_tokens": 43122612, "today_input_tokens": 41967965, "today_output_tokens": 1154647, "tokens_delta": 5606335, "requests_delta": 236, "gemini_5h_delta": -2.51, "active_instances_count": 14, "interval_seconds": 905, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T17:00:04.312204+05:30", "epoch": 1790076604, "gemini_5h_pct": 81.58, "gemini_weekly_pct": 88.92, "today_tokens": 49364872, "today_input_tokens": 48032406, "today_output_tokens": 1332466, "tokens_delta": 6242260, "requests_delta": 304, "gemini_5h_delta": -4.92, "active_instances_count": 14, "interval_seconds": 886, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T17:15:03.576350+05:30", "epoch": 1790077503, "gemini_5h_pct": 77.32, "gemini_weekly_pct": 89.0, "today_tokens": 55614456, "today_input_tokens": 54166331, "today_output_tokens": 1448125, "tokens_delta": 6249584, "requests_delta": 239, "gemini_5h_delta": -4.26, "active_instances_count": 14, "interval_seconds": 899, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T17:15:15.533686+05:30", "epoch": 1790077515, "gemini_5h_pct": 76.76, "gemini_weekly_pct": 88.65, "today_tokens": 55757035, "today_input_tokens": 54305885, "today_output_tokens": 1451150, "tokens_delta": 142579, "requests_delta": 6, "gemini_5h_delta": -0.56, "active_instances_count": 14, "interval_seconds": 12, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T17:30:05.482233+05:30", "epoch": 1790078405, "gemini_5h_pct": 73.54, "gemini_weekly_pct": 88.86, "today_tokens": 59566510, "today_input_tokens": 57998834, "today_output_tokens": 1567676, "tokens_delta": 3809475, "requests_delta": 238, "gemini_5h_delta": -3.22, "active_instances_count": 14, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T17:30:16.547541+05:30", "epoch": 1790078416, "gemini_5h_pct": 74.19, "gemini_weekly_pct": 88.48, "today_tokens": 59575291, "today_input_tokens": 58007268, "today_output_tokens": 1568023, "tokens_delta": 8781, "requests_delta": 2, "gemini_5h_delta": 0.65, "active_instances_count": 14, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T17:45:06.407306+05:30", "epoch": 1790079306, "gemini_5h_pct": 70.85, "gemini_weekly_pct": 88.26, "today_tokens": 64377498, "today_input_tokens": 62689270, "today_output_tokens": 1688228, "tokens_delta": 4802207, "requests_delta": 244, "gemini_5h_delta": -3.34, "active_instances_count": 15, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T17:45:14.675348+05:30", "epoch": 1790079314, "gemini_5h_pct": 70.84, "gemini_weekly_pct": 88.26, "today_tokens": 64386447, "today_input_tokens": 62697809, "today_output_tokens": 1688638, "tokens_delta": 8949, "requests_delta": 2, "gemini_5h_delta": -0.01, "active_instances_count": 15, "interval_seconds": 8, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T18:00:04.302122+05:30", "epoch": 1790080204, "gemini_5h_pct": 67.92, "gemini_weekly_pct": 88.13, "today_tokens": 67238619, "today_input_tokens": 65482846, "today_output_tokens": 1755773, "tokens_delta": 2852172, "requests_delta": 133, "gemini_5h_delta": -2.92, "active_instances_count": 14, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T18:00:16.750562+05:30", "epoch": 1790080216, "gemini_5h_pct": 67.8, "gemini_weekly_pct": 88.12, "today_tokens": 67420708, "today_input_tokens": 65663317, "today_output_tokens": 1757391, "tokens_delta": 182089, "requests_delta": 4, "gemini_5h_delta": -0.12, "active_instances_count": 14, "interval_seconds": 12, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T18:15:04.681934+05:30", "epoch": 1790081104, "gemini_5h_pct": 64.11, "gemini_weekly_pct": 87.94, "today_tokens": 72563608, "today_input_tokens": 70751408, "today_output_tokens": 1812200, "tokens_delta": 5142900, "requests_delta": 150, "gemini_5h_delta": -3.69, "active_instances_count": 13, "interval_seconds": 888, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T18:15:15.656573+05:30", "epoch": 1790081115, "gemini_5h_pct": 64.1, "gemini_weekly_pct": 87.94, "today_tokens": 72569163, "today_input_tokens": 70756809, "today_output_tokens": 1812354, "tokens_delta": 5555, "requests_delta": 1, "gemini_5h_delta": -0.01, "active_instances_count": 13, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T18:30:06.844716+05:30", "epoch": 1790082006, "gemini_5h_pct": 62.68, "gemini_weekly_pct": 87.85, "today_tokens": 74191450, "today_input_tokens": 72304491, "today_output_tokens": 1886959, "tokens_delta": 1622287, "requests_delta": 128, "gemini_5h_delta": -1.42, "active_instances_count": 13, "interval_seconds": 891, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T18:30:16.082220+05:30", "epoch": 1790082016, "gemini_5h_pct": 62.67, "gemini_weekly_pct": 87.84, "today_tokens": 74196790, "today_input_tokens": 72309681, "today_output_tokens": 1887109, "tokens_delta": 5340, "requests_delta": 1, "gemini_5h_delta": -0.01, "active_instances_count": 13, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T18:45:05.067793+05:30", "epoch": 1790082905, "gemini_5h_pct": 59.48, "gemini_weekly_pct": 87.63, "today_tokens": 78171028, "today_input_tokens": 76190583, "today_output_tokens": 1980445, "tokens_delta": 3974238, "requests_delta": 197, "gemini_5h_delta": -3.19, "active_instances_count": 13, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T19:00:04.546457+05:30", "epoch": 1790083804, "gemini_5h_pct": 58.81, "gemini_weekly_pct": 87.59, "today_tokens": 79035300, "today_input_tokens": 77033330, "today_output_tokens": 2001970, "tokens_delta": 864272, "requests_delta": 41, "gemini_5h_delta": -0.67, "active_instances_count": 14, "interval_seconds": 899, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T19:00:15.645647+05:30", "epoch": 1790083815, "gemini_5h_pct": 58.8, "gemini_weekly_pct": 87.59, "today_tokens": 79037520, "today_input_tokens": 77035422, "today_output_tokens": 2002098, "tokens_delta": 2220, "requests_delta": 1, "gemini_5h_delta": -0.01, "active_instances_count": 14, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T19:15:04.738866+05:30", "epoch": 1790084704, "gemini_5h_pct": 52.66, "gemini_weekly_pct": 87.18, "today_tokens": 86762144, "today_input_tokens": 84559205, "today_output_tokens": 2202939, "tokens_delta": 7724624, "requests_delta": 385, "gemini_5h_delta": -6.14, "active_instances_count": 13, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T19:15:16.639270+05:30", "epoch": 1790084716, "gemini_5h_pct": 52.51, "gemini_weekly_pct": 87.17, "today_tokens": 87048122, "today_input_tokens": 84839745, "today_output_tokens": 2208377, "tokens_delta": 285978, "requests_delta": 2, "gemini_5h_delta": -0.15, "active_instances_count": 13, "interval_seconds": 12, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T19:30:05.256673+05:30", "epoch": 1790085605, "gemini_5h_pct": 43.69, "gemini_weekly_pct": 86.51, "today_tokens": 98768561, "today_input_tokens": 96366027, "today_output_tokens": 2402534, "tokens_delta": 11720439, "requests_delta": 530, "gemini_5h_delta": -8.82, "active_instances_count": 13, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T19:30:15.326355+05:30", "epoch": 1790085615, "gemini_5h_pct": 43.55, "gemini_weekly_pct": 86.5, "today_tokens": 99024741, "today_input_tokens": 96620843, "today_output_tokens": 2403898, "tokens_delta": 256180, "requests_delta": 7, "gemini_5h_delta": -0.14, "active_instances_count": 13, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T19:45:05.292378+05:30", "epoch": 1790086505, "gemini_5h_pct": 37.32, "gemini_weekly_pct": 86.09, "today_tokens": 106514666, "today_input_tokens": 104003928, "today_output_tokens": 2510738, "tokens_delta": 7489925, "requests_delta": 388, "gemini_5h_delta": -6.23, "active_instances_count": 12, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T19:45:15.906599+05:30", "epoch": 1790086515, "gemini_5h_pct": 37.28, "gemini_weekly_pct": 86.09, "today_tokens": 106585079, "today_input_tokens": 104073168, "today_output_tokens": 2511911, "tokens_delta": 70413, "requests_delta": 1, "gemini_5h_delta": -0.04, "active_instances_count": 12, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T20:00:05.558330+05:30", "epoch": 1790087405, "gemini_5h_pct": 33.37, "gemini_weekly_pct": 85.82, "today_tokens": 111413893, "today_input_tokens": 108800944, "today_output_tokens": 2612949, "tokens_delta": 4828814, "requests_delta": 271, "gemini_5h_delta": -3.91, "active_instances_count": 12, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T20:00:15.992106+05:30", "epoch": 1790087415, "gemini_5h_pct": 33.36, "gemini_weekly_pct": 85.82, "today_tokens": 111421080, "today_input_tokens": 108806436, "today_output_tokens": 2614644, "tokens_delta": 7187, "requests_delta": 1, "gemini_5h_delta": -0.01, "active_instances_count": 12, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T20:15:06.396027+05:30", "epoch": 1790088306, "gemini_5h_pct": 30.77, "gemini_weekly_pct": 85.65, "today_tokens": 113875789, "today_input_tokens": 111202038, "today_output_tokens": 2673751, "tokens_delta": 2454709, "requests_delta": 146, "gemini_5h_delta": -2.59, "active_instances_count": 12, "interval_seconds": 891, "gemini_5h_reset": "2026-09-22T14:50:42Z"}, {"timestamp": "2026-09-22T20:30:04.359605+05:30", "epoch": 1790089204, "gemini_5h_pct": 99.74, "gemini_weekly_pct": 85.61, "today_tokens": 114701067, "today_input_tokens": 112006710, "today_output_tokens": 2694357, "tokens_delta": 825278, "requests_delta": 65, "gemini_5h_delta": 68.97, "active_instances_count": 12, "interval_seconds": 898, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T20:45:05.796962+05:30", "epoch": 1790090105, "gemini_5h_pct": 99.63, "gemini_weekly_pct": 85.61, "today_tokens": 114838792, "today_input_tokens": 112140962, "today_output_tokens": 2697830, "tokens_delta": 137725, "requests_delta": 9, "gemini_5h_delta": -0.11, "active_instances_count": 12, "interval_seconds": 901, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T20:45:16.120494+05:30", "epoch": 1790090116, "gemini_5h_pct": 99.63, "gemini_weekly_pct": 85.61, "today_tokens": 114838792, "today_input_tokens": 112140962, "today_output_tokens": 2697830, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": 0.0, "active_instances_count": 12, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T21:00:05.037813+05:30", "epoch": 1790091005, "gemini_5h_pct": 98.52, "gemini_weekly_pct": 85.53, "today_tokens": 116368651, "today_input_tokens": 113641738, "today_output_tokens": 2726913, "tokens_delta": 1529859, "requests_delta": 90, "gemini_5h_delta": -1.11, "active_instances_count": 13, "interval_seconds": 889, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T21:00:15.405120+05:30", "epoch": 1790091015, "gemini_5h_pct": 98.51, "gemini_weekly_pct": 85.53, "today_tokens": 116376551, "today_input_tokens": 113649226, "today_output_tokens": 2727325, "tokens_delta": 7900, "requests_delta": 1, "gemini_5h_delta": -0.01, "active_instances_count": 13, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T21:15:05.985146+05:30", "epoch": 1790091905, "gemini_5h_pct": 96.96, "gemini_weekly_pct": 85.43, "today_tokens": 118235153, "today_input_tokens": 115452070, "today_output_tokens": 2783083, "tokens_delta": 1858602, "requests_delta": 63, "gemini_5h_delta": -1.55, "active_instances_count": 13, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T21:15:15.609776+05:30", "epoch": 1790091915, "gemini_5h_pct": 96.93, "gemini_weekly_pct": 85.43, "today_tokens": 118265064, "today_input_tokens": 115478764, "today_output_tokens": 2786300, "tokens_delta": 29911, "requests_delta": 1, "gemini_5h_delta": -0.03, "active_instances_count": 12, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T21:30:05.090339+05:30", "epoch": 1790092805, "gemini_5h_pct": 95.85, "gemini_weekly_pct": 85.35, "today_tokens": 119688992, "today_input_tokens": 116873631, "today_output_tokens": 2815361, "tokens_delta": 1423928, "requests_delta": 68, "gemini_5h_delta": -1.08, "active_instances_count": 12, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T21:30:15.533978+05:30", "epoch": 1790092815, "gemini_5h_pct": 95.83, "gemini_weekly_pct": 85.35, "today_tokens": 119700685, "today_input_tokens": 116885032, "today_output_tokens": 2815653, "tokens_delta": 11693, "requests_delta": 2, "gemini_5h_delta": -0.02, "active_instances_count": 12, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T21:45:07.726550+05:30", "epoch": 1790093707, "gemini_5h_pct": 93.31, "gemini_weekly_pct": 85.18, "today_tokens": 123201258, "today_input_tokens": 120323260, "today_output_tokens": 2877998, "tokens_delta": 3500573, "requests_delta": 166, "gemini_5h_delta": -2.52, "active_instances_count": 13, "interval_seconds": 892, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T22:00:07.400011+05:30", "epoch": 1790094607, "gemini_5h_pct": 92.02, "gemini_weekly_pct": 85.1, "today_tokens": 125118377, "today_input_tokens": 122196892, "today_output_tokens": 2921485, "tokens_delta": 1917119, "requests_delta": 107, "gemini_5h_delta": -1.29, "active_instances_count": 12, "interval_seconds": 900, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T22:15:04.937888+05:30", "epoch": 1790095504, "gemini_5h_pct": 89.41, "gemini_weekly_pct": 84.92, "today_tokens": 128410532, "today_input_tokens": 125347726, "today_output_tokens": 3062806, "tokens_delta": 3292155, "requests_delta": 187, "gemini_5h_delta": -2.61, "active_instances_count": 14, "interval_seconds": 897, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T22:15:23.091201+05:30", "epoch": 1790095523, "gemini_5h_pct": 89.39, "gemini_weekly_pct": 84.92, "today_tokens": 128430162, "today_input_tokens": 125366544, "today_output_tokens": 3063618, "tokens_delta": 19630, "requests_delta": 4, "gemini_5h_delta": -0.02, "active_instances_count": 14, "interval_seconds": 19, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T22:30:05.724517+05:30", "epoch": 1790096405, "gemini_5h_pct": 87.7, "gemini_weekly_pct": 84.81, "today_tokens": 130113395, "today_input_tokens": 126980686, "today_output_tokens": 3132709, "tokens_delta": 1683233, "requests_delta": 93, "gemini_5h_delta": -1.69, "active_instances_count": 14, "interval_seconds": 882, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T22:30:16.928777+05:30", "epoch": 1790096416, "gemini_5h_pct": 87.69, "gemini_weekly_pct": 84.81, "today_tokens": 130121017, "today_input_tokens": 126987629, "today_output_tokens": 3133388, "tokens_delta": 7622, "requests_delta": 1, "gemini_5h_delta": -0.01, "active_instances_count": 14, "interval_seconds": 11, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T22:45:07.245917+05:30", "epoch": 1790097307, "gemini_5h_pct": 83.07, "gemini_weekly_pct": 84.5, "today_tokens": 135501971, "today_input_tokens": 132259095, "today_output_tokens": 3242876, "tokens_delta": 5380954, "requests_delta": 249, "gemini_5h_delta": -4.62, "active_instances_count": 14, "interval_seconds": 891, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T23:00:13.057200+05:30", "epoch": 1790098213, "gemini_5h_pct": 76.32, "gemini_weekly_pct": 84.05, "today_tokens": 143972649, "today_input_tokens": 140538184, "today_output_tokens": 3434465, "tokens_delta": 8470678, "requests_delta": 398, "gemini_5h_delta": -6.75, "active_instances_count": 13, "interval_seconds": 906, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T23:15:05.804680+05:30", "epoch": 1790099105, "gemini_5h_pct": 74.99, "gemini_weekly_pct": 83.96, "today_tokens": 145639643, "today_input_tokens": 142163234, "today_output_tokens": 3476409, "tokens_delta": 1666994, "requests_delta": 56, "gemini_5h_delta": -1.33, "active_instances_count": 11, "interval_seconds": 892, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T23:15:23.056719+05:30", "epoch": 1790099123, "gemini_5h_pct": 74.92, "gemini_weekly_pct": 83.96, "today_tokens": 145865421, "today_input_tokens": 142387394, "today_output_tokens": 3478027, "tokens_delta": 225778, "requests_delta": 3, "gemini_5h_delta": -0.07, "active_instances_count": 11, "interval_seconds": 18, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T23:30:05.571977+05:30", "epoch": 1790100005, "gemini_5h_pct": 72.08, "gemini_weekly_pct": 83.77, "today_tokens": 149114312, "today_input_tokens": 145529203, "today_output_tokens": 3585109, "tokens_delta": 3248891, "requests_delta": 216, "gemini_5h_delta": -2.84, "active_instances_count": 11, "interval_seconds": 882, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T23:30:15.853783+05:30", "epoch": 1790100015, "gemini_5h_pct": 72.05, "gemini_weekly_pct": 83.77, "today_tokens": 149120345, "today_input_tokens": 145534954, "today_output_tokens": 3585391, "tokens_delta": 6033, "requests_delta": 2, "gemini_5h_delta": -0.03, "active_instances_count": 11, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-22T23:45:10.647636+05:30", "epoch": 1790100910, "gemini_5h_pct": 67.69, "gemini_weekly_pct": 83.48, "today_tokens": 154058744, "today_input_tokens": 150377866, "today_output_tokens": 3680878, "tokens_delta": 4938399, "requests_delta": 215, "gemini_5h_delta": -4.36, "active_instances_count": 11, "interval_seconds": 895, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T00:00:06.263480+05:30", "epoch": 1790101806, "gemini_5h_pct": 65.05, "gemini_weekly_pct": 83.3, "today_tokens": 0, "today_input_tokens": 0, "today_output_tokens": 0, "tokens_delta": 0, "requests_delta": 0, "gemini_5h_delta": -2.64, "active_instances_count": 12, "interval_seconds": 896, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T00:00:16.105918+05:30", "epoch": 1790101816, "gemini_5h_pct": 65.0, "gemini_weekly_pct": 83.3, "today_tokens": 89522, "today_input_tokens": 88867, "today_output_tokens": 655, "tokens_delta": 89522, "requests_delta": 2, "gemini_5h_delta": -0.05, "active_instances_count": 12, "interval_seconds": 10, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T00:15:06.159568+05:30", "epoch": 1790102706, "gemini_5h_pct": 63.0, "gemini_weekly_pct": 83.16, "today_tokens": 2338657, "today_input_tokens": 2260906, "today_output_tokens": 77751, "tokens_delta": 2249135, "requests_delta": 153, "gemini_5h_delta": -2.0, "active_instances_count": 12, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T00:15:15.825652+05:30", "epoch": 1790102715, "gemini_5h_pct": 62.97, "gemini_weekly_pct": 83.16, "today_tokens": 2352665, "today_input_tokens": 2271583, "today_output_tokens": 81082, "tokens_delta": 14008, "requests_delta": 3, "gemini_5h_delta": -0.03, "active_instances_count": 12, "interval_seconds": 9, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T00:30:07.566666+05:30", "epoch": 1790103607, "gemini_5h_pct": 57.22, "gemini_weekly_pct": 82.78, "today_tokens": 9348558, "today_input_tokens": 9124386, "today_output_tokens": 224172, "tokens_delta": 6995893, "requests_delta": 293, "gemini_5h_delta": -5.75, "active_instances_count": 11, "interval_seconds": 892, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T00:30:16.075814+05:30", "epoch": 1790103616, "gemini_5h_pct": 57.21, "gemini_weekly_pct": 82.78, "today_tokens": 9356797, "today_input_tokens": 9131426, "today_output_tokens": 225371, "tokens_delta": 8239, "requests_delta": 2, "gemini_5h_delta": -0.01, "active_instances_count": 11, "interval_seconds": 9, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T00:45:26.421403+05:30", "epoch": 1790104526, "gemini_5h_pct": 52.04, "gemini_weekly_pct": 82.43, "today_tokens": 15095334, "today_input_tokens": 14682814, "today_output_tokens": 412520, "tokens_delta": 5738537, "requests_delta": 408, "gemini_5h_delta": -5.17, "active_instances_count": 11, "interval_seconds": 910, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T01:00:06.372510+05:30", "epoch": 1790105406, "gemini_5h_pct": 47.06, "gemini_weekly_pct": 82.1, "today_tokens": 19906602, "today_input_tokens": 19360210, "today_output_tokens": 546392, "tokens_delta": 4811268, "requests_delta": 360, "gemini_5h_delta": -4.98, "active_instances_count": 11, "interval_seconds": 880, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T01:00:15.856287+05:30", "epoch": 1790105415, "gemini_5h_pct": 47.03, "gemini_weekly_pct": 82.1, "today_tokens": 19919338, "today_input_tokens": 19372379, "today_output_tokens": 546959, "tokens_delta": 12736, "requests_delta": 3, "gemini_5h_delta": -0.03, "active_instances_count": 11, "interval_seconds": 9, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T01:15:05.675543+05:30", "epoch": 1790106305, "gemini_5h_pct": 42.41, "gemini_weekly_pct": 81.79, "today_tokens": 24362493, "today_input_tokens": 23710872, "today_output_tokens": 651621, "tokens_delta": 4443155, "requests_delta": 293, "gemini_5h_delta": -4.62, "active_instances_count": 11, "interval_seconds": 890, "gemini_5h_reset": "2026-09-22T19:50:42Z"}, {"timestamp": "2026-09-23T01:30:05.304659+05:30", "epoch": 1790107205, "gemini_5h_pct": 96.69, "gemini_weekly_pct": 81.47, "today_tokens": 29908467, "today_input_tokens": 29139873, "today_output_tokens": 768594, "tokens_delta": 5545974, "requests_delta": 314, "gemini_5h_delta": 54.28, "active_instances_count": 11, "interval_seconds": 900, "gemini_5h_reset": "2026-09-23T00:50:42Z"}, {"timestamp": "2026-09-23T01:30:15.607147+05:30", "epoch": 1790107215, "gemini_5h_pct": 96.6, "gemini_weekly_pct": 81.46, "today_tokens": 29926006, "today_input_tokens": 29156692, "today_output_tokens": 769314, "tokens_delta": 17539, "requests_delta": 4, "gemini_5h_delta": -0.09, "active_instances_count": 11, "interval_seconds": 10, "gemini_5h_reset": "2026-09-23T00:50:42Z"}, {"timestamp": "2026-09-23T01:45:04.836506+05:30", "epoch": 1790108104, "gemini_5h_pct": 94.03, "gemini_weekly_pct": 81.29, "today_tokens": 32493790, "today_input_tokens": 31636963, "today_output_tokens": 856827, "tokens_delta": 2567784, "requests_delta": 206, "gemini_5h_delta": -2.57, "active_instances_count": 11, "interval_seconds": 889, "gemini_5h_reset": "2026-09-23T00:50:42Z"}, {"timestamp": "2026-09-23T01:45:15.219399+05:30", "epoch": 1790108115, "gemini_5h_pct": 94.01, "gemini_weekly_pct": 81.29, "today_tokens": 32499452, "today_input_tokens": 31641761, "today_output_tokens": 857691, "tokens_delta": 5662, "requests_delta": 1, "gemini_5h_delta": -0.02, "active_instances_count": 11, "interval_seconds": 11, "gemini_5h_reset": "2026-09-23T00:50:42Z"}, {"timestamp": "2026-09-23T02:00:06.253798+05:30", "epoch": 1790109006, "gemini_5h_pct": 88.69, "gemini_weekly_pct": 80.94, "today_tokens": 37847276, "today_input_tokens": 36789787, "today_output_tokens": 1057489, "tokens_delta": 5347824, "requests_delta": 498, "gemini_5h_delta": -5.32, "active_instances_count": 14, "interval_seconds": 891, "gemini_5h_reset": "2026-09-23T00:50:42Z"}, {"timestamp": "2026-09-23T02:15:05.440192+05:30", "epoch": 1790109905, "gemini_5h_pct": 81.68, "gemini_weekly_pct": 80.47, "today_tokens": 43611512, "today_input_tokens": 42351558, "today_output_tokens": 1259954, "tokens_delta": 5764236, "requests_delta": 555, "gemini_5h_delta": -7.01, "active_instances_count": 15, "interval_seconds": 899, "gemini_5h_reset": "2026-09-23T00:50:42Z"}, {"timestamp": "2026-09-23T02:15:15.226466+05:30", "epoch": 1790109915, "gemini_5h_pct": 81.61, "gemini_weekly_pct": 80.47, "today_tokens": 43666164, "today_input_tokens": 42402449, "today_output_tokens": 1263715, "tokens_delta": 54652, "requests_delta": 13, "gemini_5h_delta": -0.07, "active_instances_count": 15, "interval_seconds": 10, "gemini_5h_reset": "2026-09-23T00:50:42Z"}, {"timestamp": "2026-09-23T02:30:05.411996+05:30", "epoch": 1790110805, "gemini_5h_pct": 78.57, "gemini_weekly_pct": 80.26, "today_tokens": 46046091, "today_input_tokens": 44641047, "today_output_tokens": 1405044, "tokens_delta": 2379927, "requests_delta": 436, "gemini_5h_delta": -3.04, "active_instances_count": 15, "interval_seconds": 890, "gemini_5h_reset": "2026-09-23T00:50:42Z"}, {"timestamp": "2026-09-23T02:30:16.152503+05:30", "epoch": 1790110816, "gemini_5h_pct": 78.57, "gemini_weekly_pct": 80.26, "today_tokens": 46048337, "today_input_tokens": 44643131, "today_output_tokens": 1405206, "tokens_delta": 2246, "requests_delta": 1, "gemini_5h_delta": 0.0, "active_instances_count": 15, "interval_seconds": 11, "gemini_5h_reset": "2026-09-23T00:50:42Z"}], "db_metrics": {"size_kb": 2768.0, "snapshots_count": 302, "instances_count": 3124, "journal_mode": "WAL"}, "hourly_summary": [{"hour": "2026-09-22 21:00", "snapshots": 2, "tokens": 2382173, "requests": 437, "min_5h": 78.57, "max_5h": 78.57, "avg_5h": 78.57, "avg_instances": 15.0}, {"hour": "2026-09-22 20:00", "snapshots": 7, "tokens": 19303671, "requests": 1591, "min_5h": 81.61, "max_5h": 96.69, "avg_5h": 90.47, "avg_instances": 12.6}, {"hour": "2026-09-22 19:00", "snapshots": 6, "tokens": 22009828, "requests": 1359, "min_5h": 42.41, "max_5h": 57.22, "avg_5h": 50.5, "avg_instances": 11.0}, {"hour": "2026-09-22 18:00", "snapshots": 7, "tokens": 10545988, "requests": 591, "min_5h": 62.97, "max_5h": 72.08, "avg_5h": 66.83, "avg_instances": 11.6}, {"hour": "2026-09-22 17:00", "snapshots": 6, "tokens": 17435259, "requests": 800, "min_5h": 74.92, "max_5h": 87.7, "avg_5h": 80.78, "avg_instances": 12.8}, {"hour": "2026-09-22 16:00", "snapshots": 6, "tokens": 10165098, "requests": 534, "min_5h": 89.39, "max_5h": 95.85, "avg_5h": 92.63, "avg_instances": 12.8}], "generated_at": "2026-09-23 02:30:16 IST"}
+  </script>
+
+  <script>
+    (function() {
+      const rawData = document.getElementById('tracker-data').textContent;
+      let data = {};
+      try {
+        data = JSON.parse(rawData);
+      } catch (e) {
+        console.error("Failed to parse embedded tracker data", e);
+        return;
+      }
+
+      const history = data.history || [];
+      const burndownRows = document.getElementById('burndown-rows');
+      if (burndownRows && history.length > 0) {
+        const reversed = [...history].reverse();
+
+        // Calculate latest forecast for the top banner
+        const latest = reversed[0];
+        const secLatest = latest.interval_seconds || 900;
+        const latestPctDropHr = (latest.gemini_5h_delta < 0 && secLatest > 0) ? Math.abs(latest.gemini_5h_delta) * (3600 / secLatest) : 0;
+        const runwayHours = latestPctDropHr > 0 ? (latest.gemini_5h_pct / latestPctDropHr) : 999;
+        
+        const forecastPill = document.getElementById('forecast-pill');
+        const runwayVal = document.getElementById('runway-val');
+        const runwaySub = document.getElementById('runway-sub');
+
+        if (runwayVal) {
+          if (latestPctDropHr > 20) {
+            runwayVal.textContent = 'OVERSHOOT RISK';
+            runwayVal.style.color = 'var(--accent-red)';
+            if (forecastPill) {
+              forecastPill.className = 'status-pill badge-red';
+              forecastPill.textContent = 'OVERSHOOT RISK (' + runwayHours.toFixed(1) + 'h left)';
+            }
+            if (runwaySub) runwaySub.innerHTML = 'Burn <strong>' + latestPctDropHr.toFixed(1) + '%/hr</strong> &nbsp;|&nbsp; 0% in <strong>' + runwayHours.toFixed(1) + 'h</strong> (< 5h reset)';
+          } else if (latestPctDropHr > 0) {
+            runwayVal.textContent = 'UNDERSHOOT (SAFE)';
+            runwayVal.style.color = 'var(--accent-green)';
+            if (forecastPill) {
+              forecastPill.className = 'status-pill badge-green';
+              forecastPill.textContent = 'UNDERSHOOT (SAFE ' + runwayHours.toFixed(1) + 'h)';
+            }
+            if (runwaySub) runwaySub.innerHTML = 'Burn <strong>' + latestPctDropHr.toFixed(1) + '%/hr</strong> &nbsp;|&nbsp; 0% in <strong>' + runwayHours.toFixed(1) + 'h</strong> (> 5h window)';
+          } else {
+            runwayVal.textContent = 'RECOVERING / STEADY';
+            runwayVal.style.color = 'var(--accent-blue)';
+            if (forecastPill) {
+              forecastPill.className = 'status-pill badge-blue';
+              forecastPill.textContent = 'RECOVERING / STEADY';
+            }
+            if (runwaySub) runwaySub.innerHTML = 'Burn rate is <strong>0%/hr</strong> or quota replenishing';
+          }
+        }
+
+        burndownRows.innerHTML = reversed.map(h => {
+          const timeStr = h.timestamp ? h.timestamp.substring(11, 19) : '—';
+          const totT = h.today_tokens != null ? formatNumber(h.today_tokens) : '—';
+          const inT = h.today_input_tokens != null ? formatNumber(h.today_input_tokens) : '—';
+          const outT = h.today_output_tokens != null ? formatNumber(h.today_output_tokens) : '—';
+          const inPct = (h.today_tokens && h.today_input_tokens) ? ((h.today_input_tokens / h.today_tokens) * 100).toFixed(1) + '%' : '—';
+          const outPct = (h.today_tokens && h.today_output_tokens) ? ((h.today_output_tokens / h.today_tokens) * 100).toFixed(1) + '%' : '—';
+
+          const tDelta = h.tokens_delta != null ? (h.tokens_delta > 0 ? '+' : '') + formatNumber(h.tokens_delta) : '—';
+          const sec = h.interval_seconds || 900;
+          const hourlyTokens = (h.tokens_delta != null && sec > 0) ? formatNumber((h.tokens_delta / sec) * 3600) + '/hr' : '—';
+          const q5 = h.gemini_5h_pct != null ? h.gemini_5h_pct.toFixed(2) + '%' : '—';
+          const d5 = h.gemini_5h_delta != null ? (h.gemini_5h_delta > 0 ? '+' : '') + h.gemini_5h_delta.toFixed(2) + '%' : '—';
+          
+          let d5Color = 'var(--text-muted)';
+          if (h.gemini_5h_delta < 0) d5Color = 'var(--accent-red)';
+          else if (h.gemini_5h_delta > 0) d5Color = 'var(--accent-green)';
+
+          const pctDropHr = (h.gemini_5h_delta < 0 && sec > 0) ? Math.abs(h.gemini_5h_delta) * (3600 / sec) : 0;
+          let forecastTag = '';
+          if (pctDropHr > 20) {
+            const hrs = (h.gemini_5h_pct / pctDropHr).toFixed(1);
+            forecastTag = `<span class="status-pill badge-red">OVERSHOOT (${hrs}h left)</span>`;
+          } else if (pctDropHr > 0) {
+            const hrs = (h.gemini_5h_pct / pctDropHr).toFixed(1);
+            forecastTag = `<span class="status-pill badge-green">UNDERSHOOT (${hrs}h)</span>`;
+          } else {
+            forecastTag = `<span class="status-pill badge-blue">STEADY / RECOVERY</span>`;
+          }
+
+          const inst = h.active_instances_count != null ? h.active_instances_count : '—';
+
+          return `
+            <tr>
+              <td><strong>${timeStr}</strong></td>
+              <td style="color: var(--text-main); font-weight: 700;" title="${h.today_tokens ? h.today_tokens.toLocaleString('en-US') + ' tokens' : ''}">${totT}</td>
+              <td style="color: var(--accent-blue);" title="${h.today_input_tokens ? h.today_input_tokens.toLocaleString('en-US') + ' tokens' : ''}">${inT} <span style="font-size: 11px; color: var(--text-muted);">(${inPct})</span></td>
+              <td style="color: var(--accent-yellow);" title="${h.today_output_tokens ? h.today_output_tokens.toLocaleString('en-US') + ' tokens' : ''}">${outT} <span style="font-size: 11px; color: var(--text-muted);">(${outPct})</span></td>
+              <td style="color: var(--accent-purple); font-weight: 700;" title="${h.tokens_delta ? (h.tokens_delta > 0 ? '+' : '') + h.tokens_delta.toLocaleString('en-US') + ' tokens' : ''}">${tDelta}</td>
+              <td>${hourlyTokens}</td>
+              <td><strong>${q5}</strong></td>
+              <td style="color: ${d5Color}; font-weight: 600;">${d5}</td>
+              <td>${forecastTag}</td>
+              <td><span class="status-pill badge-yellow">${inst}</span></td>
+            </tr>
+          `;
+        }).join('');
+      }
+
+      // Render SVG timeline chart
+      const svg = document.getElementById('chart-svg');
+      if (svg && history.length >= 1) {
+        renderChart(svg, history);
+      }
+
+      function formatNumber(val) {
+        if (val == null) return '—';
+        const n = Math.abs(val);
+        if (n >= 1e9) return (val / 1e9).toFixed(2) + 'B';
+        if (n >= 1e6) return (val / 1e6).toFixed(2) + 'M';
+        if (n >= 1e3) return (val / 1e3).toFixed(1) + 'K';
+        return val.toLocaleString();
+      }
+
+      function renderChart(svg, points) {
+        const width = 1000;
+        const height = 200;
+        const padX = 40;
+        const padY = 25;
+        const chartW = width - padX * 2;
+        const chartH = height - padY * 2;
+
+        let content = '';
+
+        // Grid lines (y = 100%, 75%, 50%, 25%, 0%)
+        [100, 75, 50, 25, 0].forEach(level => {
+          const y = padY + chartH * (1 - level / 100);
+          content += `<line x1="${padX}" y1="${y}" x2="${width - padX}" y2="${y}" stroke="#1e293b" stroke-dasharray="4 4" stroke-width="1" />`;
+          content += `<text x="${padX - 8}" y="${y + 4}" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">${level}%</text>`;
+        });
+
+        if (points.length < 2) {
+          // Single point or empty
+          const p = points[0];
+          const y5 = padY + chartH * (1 - (p.gemini_5h_pct || 100) / 100);
+          content += `<circle cx="${width / 2}" cy="${y5}" r="6" fill="#38bdf8" />`;
+          content += `<text x="${width / 2}" y="${y5 - 12}" fill="#38bdf8" font-size="12" font-weight="bold" text-anchor="middle">${p.gemini_5h_pct}%</text>`;
+          svg.innerHTML = content;
+          return;
+        }
+
+        // Calculate max token delta for bar heights
+        const maxTokens = Math.max(...points.map(p => p.tokens_delta || 0), 100000);
+
+        // Draw Token Delta Bars in background
+        const barW = Math.max(4, Math.min(24, (chartW / points.length) * 0.5));
+        points.forEach((p, idx) => {
+          const x = padX + (idx / (points.length - 1)) * chartW;
+          const tokenFrac = Math.min(1, (p.tokens_delta || 0) / maxTokens);
+          const barH = tokenFrac * (chartH * 0.7);
+          const barY = padY + chartH - barH;
+          content += `<rect x="${x - barW / 2}" y="${barY}" width="${barW}" height="${barH}" fill="rgba(168, 85, 247, 0.25)" rx="2" />`;
+        });
+
+        // Build path for gemini_5h_pct
+        const pts5h = points.map((p, idx) => {
+          const x = padX + (idx / (points.length - 1)) * chartW;
+          const y = padY + chartH * (1 - (p.gemini_5h_pct != null ? p.gemini_5h_pct : 100) / 100);
+          return [x, y];
+        });
+        const d5h = pts5h.map((pt, i) => (i === 0 ? 'M' : 'L') + `${pt[0]},${pt[1]}`).join(' ');
+        content += `<path d="${d5h}" fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" />`;
+
+        // Draw dots for 5h
+        pts5h.forEach((pt, i) => {
+          content += `<circle cx="${pt[0]}" cy="${pt[1]}" r="3.5" fill="#38bdf8" />`;
+        });
+
+        // Build path for gemini_weekly_pct
+        const pts7d = points.map((p, idx) => {
+          const x = padX + (idx / (points.length - 1)) * chartW;
+          const y = padY + chartH * (1 - (p.gemini_weekly_pct != null ? p.gemini_weekly_pct : 100) / 100);
+          return [x, y];
+        });
+        const d7d = pts7d.map((pt, i) => (i === 0 ? 'M' : 'L') + `${pt[0]},${pt[1]}`).join(' ');
+        content += `<path d="${d7d}" fill="none" stroke="#22c55e" stroke-width="1.8" stroke-dasharray="5 3" />`;
+
+        svg.innerHTML = content;
+      }
+
+      // Live auto-refresh when accessed via HTTP server
+      if (window.location.protocol.startsWith('http')) {
+        setInterval(() => {
+          fetch('/api/latest')
+            .then(res => res.json())
+            .then(latest => {
+              if (latest && latest.timestamp !== (data.latest && data.latest.timestamp)) {
+                window.location.reload();
+              }
+            })
+            .catch(() => {});
+        }, 30000);
+      }
+    })();
+  </script>
+</body>
+</html>

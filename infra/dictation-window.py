@@ -565,14 +565,24 @@ class DictationWindow:
             return False
 
     def copy(self, row, button):
-        if row.get('kind') in ('text', 'image') and self.clipboard_monitor:
-            self.clipboard_monitor.copy(row['item'])
-        else:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(row['corrected'])
-        self.root.update_idletasks()
-        button.configure(text='Copied')
-        self.root.after(1500, lambda: button.configure(text='Copy') if button.winfo_exists() else None)
+        try:
+            if row.get('kind') in ('text', 'image') and self.clipboard_monitor:
+                self.clipboard_monitor.copy(row['item'])
+            elif row.get('kind') == 'image':
+                import shutil, subprocess
+                image_path = self.clipboard_store.images / row['item']['image']
+                if shutil.which('xclip') and image_path.exists():
+                    subprocess.run(['xclip', '-selection', 'clipboard', '-target', 'image/png', str(image_path)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            else:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(row['corrected'])
+            self.root.update_idletasks()
+            button.configure(text='Copied')
+            self.root.after(1500, lambda: button.configure(text='Copy') if button.winfo_exists() else None)
+        except Exception:
+            button.configure(text='Error')
+            self.root.after(1500, lambda: button.configure(text='Copy') if button.winfo_exists() else None)
 
     def queue_header_resize(self, _=None):
         if self.header_resize_timer is None and not self.closing:
