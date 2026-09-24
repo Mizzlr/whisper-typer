@@ -45,6 +45,8 @@ mkdir -p "$UNIT_DIR"
 for unit in logi-mouse-daemon.service mouse-button-guard.service whisper-hotkey-daemon.service; do
   install -m 0644 "$REPO_DIR/infra/systemd/$unit" "$UNIT_DIR/$unit"
 done
+mkdir -p "$UNIT_DIR/app-solaar@autostart.service.d"
+install -m 0644 "$REPO_DIR/infra/systemd/app-solaar@autostart.service.d/restart.conf" "$UNIT_DIR/app-solaar@autostart.service.d/restart.conf"
 systemctl --user daemon-reload
 
 # Retire Input Remapper: keep the package and preset for rollback, but stop the
@@ -70,6 +72,7 @@ fi
 
 say "starting daemon and guard"
 systemctl --user enable --now whisper-hotkey-daemon.service mouse-button-guard.service logi-mouse-daemon.service
+systemctl --user restart whisper-hotkey-daemon.service mouse-button-guard.service logi-mouse-daemon.service
 
 say "restarting Solaar so keyed settings are re-applied"
 systemctl --user restart app-solaar@autostart.service

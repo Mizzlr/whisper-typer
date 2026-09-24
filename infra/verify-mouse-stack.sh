@@ -32,6 +32,7 @@ check "whisper-hotkey daemon matches repo" "cmp -s '$REPO_DIR/infra/whisper-hotk
 check "solaar rules.yaml matches repo" "cmp -s '$REPO_DIR/infra/solaar/rules.yaml' '$SOLAAR_DIR/rules.yaml'"
 check "logi-mouse-daemon.service matches repo" "cmp -s '$REPO_DIR/infra/systemd/logi-mouse-daemon.service' '$UNIT_DIR/logi-mouse-daemon.service'"
 check "mouse-button-guard.service matches repo" "cmp -s '$REPO_DIR/infra/systemd/mouse-button-guard.service' '$UNIT_DIR/mouse-button-guard.service'"
+check "solaar restart override matches repo" "cmp -s '$REPO_DIR/infra/systemd/app-solaar@autostart.service.d/restart.conf' '$UNIT_DIR/app-solaar@autostart.service.d/restart.conf'"
 
 echo "input remapper retired"
 check "no input-remapper autoload entries" \

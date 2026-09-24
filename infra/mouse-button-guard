@@ -1,26 +1,41 @@
 #!/usr/bin/env python3
-"""Clear a stale button-down state on the grabbed Logitech receiver node.
+"""Supervise the mouse input stack, clear stuck buttons, and auto-heal failures.
 
-Input Remapper grabs the physical node ("Logitech USB Receiver Mouse") and
-re-emits through the virtual "input-remapper ... forwarded" node. If the
-injector restarts while a button is physically held, the release never reaches
-X, and the raw node keeps reporting e.g. button[1]=down forever. The server then
-treats every later click as part of an ongoing drag, so clicks look dead.
+Responsibilities:
+1. Stuck Button Clearing:
+   Watches for inconsistencies where the raw receiver node claims a button
+   is held while the forwarded node reports it released. Toggles the raw device
+   to clear stuck button state.
 
-This guard watches for that specific inconsistency: the raw node claims a
-button is held while the forwarded node (the one X actually reads) reports it
-released. It clears it by toggling the device, which re-initialises its state.
+2. Hotplug / Reconnect Recovery:
+   Detects when the Logitech USB receiver drops and reconnects (or changes X device ID).
+   Automatically restarts Solaar and whisper-hotkey-daemon so fresh /dev/hidraw file
+   descriptors are opened and HID++ key diversions (0xc3 gesture, 0xc4 smart shift)
+   are immediately re-applied to the mouse hardware.
+
+3. Process & Socket Watchdog:
+   Periodically ensures app-solaar@autostart, whisper-hotkey-daemon, logi-mouse-daemon,
+   and whisper-typer-rs are active. If any service is dead or the Unix datagram socket
+   (/run/user/<uid>/whisper-hotkey.sock) is missing, restarts the failed service.
+   Terminates any rogue unmanaged GNOME transient scopes so systemd restart policies apply.
+
+4. HID++ Diversion Health Check:
+   Periodically confirms that Solaar is actively reporting the gesture button as Diverted.
+   If diversion is dropped or Solaar is unresponsive, restarts Solaar.
 """
 
 import os
 import re
 import subprocess
+import threading
 import time
 
 RAW = os.environ.get("LOGI_MOUSE_RAW", "Logitech USB Receiver Mouse")
 FORWARDED = os.environ.get("LOGI_MOUSE_SINK", "logi-mouse forwarded")
 BUTTONS = (1, 2, 3)
 INTERVAL = 2.0
+LIVENESS_INTERVAL = 10.0
+DIVERSION_CHECK_INTERVAL = 300.0
 
 
 def xinput(*args):
@@ -52,30 +67,151 @@ def clear_stale(raw_id):
     xinput("enable", raw_id)
 
 
+def check_service_active(service_name: str) -> bool:
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", service_name],
+            timeout=3,
+            check=False,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def restart_service(service_name: str, reason: str = ""):
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "restart", service_name],
+            timeout=10,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        msg = f"Auto-healed {service_name}"
+        if reason:
+            msg += f" ({reason})"
+        subprocess.run(
+            ["notify-send", "Mouse Stack Healer", msg],
+            capture_output=True,
+            timeout=3,
+        )
+    except Exception:
+        pass
+
+
+def check_hotkey_socket() -> bool:
+    sock_path = f"/run/user/{os.getuid()}/whisper-hotkey.sock"
+    return os.path.exists(sock_path)
+
+
+def clean_unmanaged_solaar_scopes():
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "list-units", "app-gnome-solaar-*.scope", "--plain", "--no-legend"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        ).stdout
+        for line in out.strip().splitlines():
+            scope = line.split()[0] if line else None
+            if scope and "app-gnome-solaar" in scope:
+                subprocess.run(["systemctl", "--user", "stop", scope], timeout=5, check=False)
+    except Exception:
+        pass
+
+
+def verify_diversion_in_background():
+    """Run in a background thread so slow solaar show commands never block main loop."""
+    def worker():
+        try:
+            res = subprocess.run(
+                ["solaar", "show"],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=False,
+            )
+            if res.returncode != 0 or "Mouse Gesture Button:Diverted" not in res.stdout:
+                restart_service("app-solaar@autostart.service", "lost gesture diversion")
+        except Exception:
+            restart_service("app-solaar@autostart.service", "solaar show timed out")
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+
 def main():
+    prev_raw_id = None
+    was_disconnected = False
+    last_liveness = 0.0
+    last_diversion = time.time()
+
+    clean_unmanaged_solaar_scopes()
+
     while True:
         time.sleep(INTERVAL)
-        fwd_id = device_id(FORWARDED)
-        if fwd_id is None:
-            # Input Remapper is not forwarding; the raw node is the live path.
-            continue
+        now = time.time()
+
         raw_id = device_id(RAW)
+        fwd_id = device_id(FORWARDED)
+
+        # 1. Hotplug & reconnect detection
         if raw_id is None:
+            was_disconnected = True
+            prev_raw_id = None
             continue
 
-        fwd_down = buttons_down(fwd_id)
-        raw_down = buttons_down(raw_id)
-        stale = {b for b in BUTTONS if b in raw_down and b not in fwd_down}
-        if stale:
-            clear_stale(raw_id)
-            subprocess.run(
-                [
-                    "notify-send",
-                    "Mouse",
-                    f"Cleared stuck button(s) {sorted(stale)} on the receiver node",
-                ],
-                capture_output=True,
-            )
+        if was_disconnected or (prev_raw_id is not None and raw_id != prev_raw_id):
+            time.sleep(0.5)
+            clean_unmanaged_solaar_scopes()
+            restart_service("app-solaar@autostart.service", "USB receiver reconnect")
+            restart_service("whisper-hotkey-daemon.service", "USB receiver reconnect")
+            was_disconnected = False
+
+        prev_raw_id = raw_id
+
+        # 2. Stuck button detection on raw node vs forwarded node
+        if fwd_id is not None:
+            fwd_down = buttons_down(fwd_id)
+            raw_down = buttons_down(raw_id)
+            stale = {b for b in BUTTONS if b in raw_down and b not in fwd_down}
+            if stale:
+                clear_stale(raw_id)
+                subprocess.run(
+                    [
+                        "notify-send",
+                        "Mouse",
+                        f"Cleared stuck button(s) {sorted(stale)} on the receiver node",
+                    ],
+                    capture_output=True,
+                    timeout=3,
+                )
+
+        # 3. Liveness supervision of services and socket (every 10s)
+        if now - last_liveness >= LIVENESS_INTERVAL:
+            last_liveness = now
+            clean_unmanaged_solaar_scopes()
+
+            if not check_service_active("app-solaar@autostart.service"):
+                restart_service("app-solaar@autostart.service", "service inactive")
+
+            if not check_service_active("whisper-hotkey-daemon.service"):
+                restart_service("whisper-hotkey-daemon.service", "service inactive")
+            elif not check_hotkey_socket():
+                restart_service("whisper-hotkey-daemon.service", "socket missing")
+
+            if not check_service_active("logi-mouse-daemon.service"):
+                restart_service("logi-mouse-daemon.service", "service inactive")
+
+            if not check_service_active("whisper-typer-rs.service"):
+                restart_service("whisper-typer-rs.service", "service inactive")
+
+        # 4. Periodic deep diversion check (every 5m)
+        if now - last_diversion >= DIVERSION_CHECK_INTERVAL:
+            last_diversion = now
+            verify_diversion_in_background()
 
 
 if __name__ == "__main__":
