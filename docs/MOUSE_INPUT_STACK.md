@@ -114,6 +114,7 @@ so a control that misbehaves can be reconstructed exactly:
 | `infra/systemd/logi-mouse-daemon.service` | `~/.config/systemd/user/logi-mouse-daemon.service` |
 | `infra/systemd/mouse-button-guard.service` | `~/.config/systemd/user/mouse-button-guard.service` |
 | `infra/systemd/whisper-hotkey-daemon.service` | `~/.config/systemd/user/whisper-hotkey-daemon.service` |
+| `infra/systemd/app-solaar@autostart.service.d/restart.conf` | `~/.config/systemd/user/app-solaar@autostart.service.d/restart.conf` |
 | `infra/input-remapper/Whisper mouse.json` | Input Remapper preset, kept on disk but no longer autoloaded |
 
 Solaar's own keyed settings live in `~/.config/solaar/config.yaml`; the expected
@@ -160,6 +161,8 @@ There is deliberately no Forward rule: the daemon owns that button.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Pointer moves, wheels work, clicks dead | stale button-down on the grabbed raw node | `systemctl --user restart logi-mouse-daemon` (its start-up hygiene repairs it); `mouse-button-guard` also clears it within seconds |
+| Gesture button does not dictate after USB glitch | receiver reset dropped HID++ diversion; Solaar descriptors stale | `mouse-button-guard` automatically detects the reconnect and restarts Solaar within 2s; manual fix: `systemctl --user restart app-solaar@autostart.service` |
+| Solaar exited or killed | process failure | `app-solaar@autostart.service.d/restart.conf` automatically restarts it within 2s; `mouse-button-guard` also enforces active state |
 | Nothing moves at all | daemon cannot open or read the device | `journalctl --user -u logi-mouse-daemon -n 50`; the journal records `source_device_not_available` style info messages |
 | Screenshot selects with the wrong button | swap flag left on | `~/.local/bin/logi-mouse-daemon --control swap-off`; the flag also expires on its own |
 | Gesture button dictates twice | a second `KEY_F24` producer appeared | confirm no Solaar Forward rule and that the daemon emits no `KEY_F24` |
@@ -191,6 +194,20 @@ The installer keeps that backup the first time it clears the autoload map.
   client is needed at runtime (needs verification on this firmware).
 
 ## Change log
+
+2026-09-24:
+
+1. Auto-healing supervisor added to `infra/mouse-button-guard`:
+   - Detects USB receiver disconnect/reconnect and device ID re-enumeration; automatically
+     restarts Solaar within 2 seconds so fresh `/dev/hidraw1` descriptors are opened and
+     HID++ button diversions (`0xc3` gesture, `0xc4` smart shift) are freshly re-applied.
+   - Supervises process and socket liveness every 10 seconds: ensures `app-solaar@autostart`,
+     `whisper-hotkey-daemon`, `logi-mouse-daemon`, and `whisper-typer-rs` remain active, and
+     terminates rogue unmanaged GNOME scopes.
+   - Non-blocking 5-minute background health check verifying active gesture diversion in Solaar.
+2. Systemd drop-in override added at `infra/systemd/app-solaar@autostart.service.d/restart.conf`:
+   configures `Restart=always` and `RestartSec=2` so Solaar restarts automatically if it ever crashes.
+3. Updated `infra/install-mouse-stack.sh` and `infra/verify-mouse-stack.sh` (29/29 checks passing).
 
 2026-09-14:
 

@@ -131,26 +131,19 @@ Verify the complete live device state with `solaar show`. With Solaar
 as a read-only query: that incomplete keyed-setting command can serialize the
 key name as a scalar and break the persisted diversion map.
 
-## Recovery checks
+## Recovery checks & automated healing
 
-If the pointer moves and scrolls but **clicks do nothing**, the grabbed
-receiver node is holding a stale button-down state: Input Remapper restarted
-between a button press and its release, so X treats every later click as part
-of an ongoing drag. Check and clear it with:
+The mouse stack is actively supervised and auto-healed by `mouse-button-guard.service`
+(`~/.local/bin/mouse-button-guard`):
+- **Stale button clearing**: If a button gets stuck on the raw receiver node, the guard clears it within 2 seconds.
+- **USB hotplug recovery**: If the USB receiver disconnects and reconnects, the guard detects the re-enumeration and restarts Solaar and `whisper-hotkey-daemon` within 2 seconds so fresh `/dev/hidraw1` descriptors are opened and HID++ key diversions are re-applied.
+- **Crash restart policy**: `app-solaar@autostart.service.d/restart.conf` configures `Restart=always` with a 2-second restart delay.
+- **Liveness watchdog**: The guard actively verifies that all 4 daemons are running every 10 seconds, and periodically verifies active gesture diversion every 5 minutes.
 
-```bash
-xinput query-state "Logitech USB Receiver Mouse" | grep 'button\[1\]'
-xinput disable "Logitech USB Receiver Mouse"
-xinput enable  "Logitech USB Receiver Mouse"
-```
-
-`mouse-button-guard.service` (`~/.local/bin/mouse-button-guard`) watches for
-this and clears it within a couple of seconds: it only acts when the raw node
-claims a button is held while the forwarded node — the one X actually reads —
-reports it released.
+If manual diagnostic is needed:
 
 ```bash
-systemctl --user status app-solaar@autostart.service
+systemctl --user status app-solaar@autostart.service mouse-button-guard.service
 solaar show
 xinput get-button-map "input-remapper Logitech USB Receiver Mouse forwarded"
 gsettings get \
