@@ -49,7 +49,7 @@ ollama:
   skip_threshold: 0             # Short fragments also need the grammar gate.
   correction_timeout_ms: 3000   # Includes retry; keep cleaned text on timeout.
   audio_mode: false             # Deprecated compatibility key; Whisper is always used for ASR.
-  background_review: true  # Paste now; review/copy suggestions in the floating window.
+  background_review: true  # Paste immediately (~70ms); review suggestions in background window.
   grammar_gate:
     enabled: false
     provider: "ollama"

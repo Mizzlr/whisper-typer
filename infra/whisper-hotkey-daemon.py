@@ -9,7 +9,7 @@ The dedicated keyboard is disabled in X only. Whisper Typer still reads its
 evdev events directly, but desktop applications no longer receive F24 and hide
 the mouse pointer as if the user had typed. If X isolation is unavailable,
 disable F24 auto-repeat as a fallback against flicker. Reapply the guard at
-start-up, before every press, and on an idle tick for device/keymap changes.
+start-up and on an idle tick for device/keymap changes.
 """
 
 import os
@@ -18,6 +18,10 @@ import subprocess
 import time
 
 import evdev
+
+from pathlib import Path
+import select
+import threading
 
 SOCKET_PATH = f"/run/user/{os.getuid()}/whisper-hotkey.sock"
 
@@ -64,6 +68,94 @@ def disable_f24_repeat() -> bool:
         return False
 
 
+class GestureState:
+    """Thread-safe state manager for push-to-talk press and release.
+
+    Deduplicates events arriving concurrently from direct hidraw and the Unix socket.
+    """
+
+    def __init__(self, ui: evdev.UInput):
+        self.ui = ui
+        self.lock = threading.Lock()
+        self.is_down = False
+
+    def emit(self, down: bool):
+        with self.lock:
+            if down and not self.is_down:
+                self.is_down = True
+                self.ui.write(evdev.ecodes.EV_KEY, evdev.ecodes.KEY_F24, 1)
+                self.ui.syn()
+            elif not down and self.is_down:
+                self.is_down = False
+                self.ui.write(evdev.ecodes.EV_KEY, evdev.ecodes.KEY_F24, 0)
+                self.ui.syn()
+
+
+def find_receiver_hidraw() -> str | None:
+    """Locate the Logitech Bolt receiver hidraw device node."""
+    hidraw_dir = Path("/sys/class/hidraw")
+    if not hidraw_dir.exists():
+        return None
+    for p in hidraw_dir.iterdir():
+        try:
+            uevent = (p / "device/uevent").read_text()
+            if "0000046D:0000C548" in uevent and "input2" in uevent:
+                return f"/dev/{p.name}"
+        except Exception:
+            pass
+    return None
+
+
+def hidraw_listener(state: GestureState, stop_event: threading.Event):
+    """Directly monitor Logitech receiver for Mouse Gesture Button (0x00C3).
+
+    Bypasses Solaar entirely so voice typing has sub-millisecond latency and
+    never drops out even if Solaar's GUI process or listener thread freezes.
+    """
+    feature_index = 0x09  # Default on MX Master 3S for REPROG_CONTROLS_V4
+    while not stop_event.is_set():
+        dev_path = find_receiver_hidraw()
+        if not dev_path or not os.path.exists(dev_path):
+            time.sleep(1.0)
+            continue
+
+        try:
+            fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            time.sleep(1.0)
+            continue
+
+        try:
+            while not stop_event.is_set():
+                r, _, _ = select.select([fd], [], [], 1.0)
+                if not r:
+                    continue
+                try:
+                    data = os.read(fd, 64)
+                except OSError:
+                    break
+                if not data:
+                    break
+
+                # HID++ Long Report (0x11), Device Index 2 (MX Master 3S)
+                if len(data) >= 6 and data[0] == 0x11 and data[1] == 0x02:
+                    if data[2] == feature_index and data[3] == 0x00:
+                        cid = (data[4] << 8) | data[5]
+                        if cid == 0x00C3:  # Mouse Gesture Button pressed
+                            state.emit(True)
+                        elif cid == 0x0000:  # Button released
+                            state.emit(False)
+        except Exception:
+            pass
+        finally:
+            state.emit(False)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            time.sleep(1.0)
+
+
 def main() -> None:
     # Remove stale socket if present
     if os.path.exists(SOCKET_PATH):
@@ -82,6 +174,7 @@ def main() -> None:
         ]
     }
     ui = evdev.UInput(cap, name="whisper-gesture-keyboard")
+    state = GestureState(ui)
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     server.bind(SOCKET_PATH)
@@ -89,6 +182,13 @@ def main() -> None:
     server.settimeout(GUARD_INTERVAL)
 
     guard_hotkey_device()
+
+    # Start direct hardware listener in background
+    stop_event = threading.Event()
+    listener_thread = threading.Thread(
+        target=hidraw_listener, args=(state, stop_event), daemon=True
+    )
+    listener_thread.start()
 
     try:
         while True:
@@ -99,15 +199,11 @@ def main() -> None:
                 continue
             msg = data.decode().strip()
             if msg in ("1", "press", "down"):
-                # X must stop consuming this device before emitting the key;
-                # Whisper Typer's direct evdev reader still receives it.
-                guard_hotkey_device()
-                ui.write(evdev.ecodes.EV_KEY, evdev.ecodes.KEY_F24, 1)
-                ui.syn()
+                state.emit(True)
             elif msg in ("0", "release", "up"):
-                ui.write(evdev.ecodes.EV_KEY, evdev.ecodes.KEY_F24, 0)
-                ui.syn()
+                state.emit(False)
     finally:
+        stop_event.set()
         ui.close()
         server.close()
         if os.path.exists(SOCKET_PATH):

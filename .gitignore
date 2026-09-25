@@ -59,3 +59,7 @@ wa-logs.txt
 tools/folio/vendor/
 tools/folio/screenshots/
 tools/folio/history.sqlite3*
+
+# Local private data and voice correction tables
+*.csv
+*.tsv
