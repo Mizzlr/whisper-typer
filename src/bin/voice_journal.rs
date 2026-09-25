@@ -339,9 +339,13 @@ fn current_date_string() -> String {
 }
 
 fn voice_journal_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("voice-journal")
+    if let Ok(dir) = std::env::var("WHISPER_VOICE_JOURNAL_DIR") {
+        PathBuf::from(dir)
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".voice-journal")
+    }
 }
 
 fn output_file_for_session() -> io::Result<PathBuf> {
@@ -598,9 +602,7 @@ impl VadDebugRecorder {
 }
 
 fn hallucination_config_path() -> PathBuf {
-    let base = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("voice-journal");
+    let base = voice_journal_dir();
     let _ = fs::create_dir_all(&base);
     base.join(HALLUCINATION_CONFIG_NAME)
 }
