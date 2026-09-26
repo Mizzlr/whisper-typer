@@ -257,7 +257,16 @@ impl OllamaProcessor {
         } else if self.config.grammar_gate.enabled {
             let started = std::time::Instant::now();
             let fragment_candidate = leading_fragment_candidate(text);
-            let decision = self.grammar_decision(text, fragment_candidate).await;
+
+            // Speculatively launch Ollama correction in parallel with the gate decision
+            let gate_fut = self.grammar_decision(text, fragment_candidate);
+            let correct_fut = tokio::time::timeout(
+                std::time::Duration::from_millis(self.config.correction_timeout_ms),
+                self.correct(text),
+            );
+            tokio::pin!(gate_fut, correct_fut);
+
+            let decision = gate_fut.await;
             gate_metadata.grammar_gate_decision = Some(decision.reason.into());
             gate_metadata.grammar_gate_provider = Some(decision.provider.into());
             gate_metadata.grammar_gate_latency_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
@@ -267,6 +276,8 @@ impl OllamaProcessor {
                 correction_input = fragment_candidate.expect("validated fragment decision");
             }
             if !decision.needs_correction {
+                // Drop correct_fut immediately so we don't wait for Ollama!
+                drop(correct_fut);
                 if decision.remove_leading_fragment {
                     return CorrectionResult {
                         text: correction_input.into(),
@@ -278,6 +289,26 @@ impl OllamaProcessor {
                 }
                 return fallback_result(text, "grammar_gate_clean", Some(gate_metadata));
             }
+
+            // Gate says repair is needed: await the speculative correction that was already started
+            let mut corrected = if decision.remove_leading_fragment && correction_input != text {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(self.config.correction_timeout_ms),
+                    self.correct(correction_input),
+                ).await {
+                    Ok(res) => res,
+                    Err(_) => fallback_result(correction_input, "correction_timeout", None),
+                }
+            } else {
+                match correct_fut.await {
+                    Ok(res) => res,
+                    Err(_) => fallback_result(correction_input, "correction_timeout", None),
+                }
+            };
+            corrected.metadata.grammar_gate_provider = gate_metadata.grammar_gate_provider;
+            corrected.metadata.grammar_gate_decision = gate_metadata.grammar_gate_decision;
+            corrected.metadata.grammar_gate_latency_ms = gate_metadata.grammar_gate_latency_ms;
+            return corrected;
         }
         let mut corrected = match tokio::time::timeout(
             std::time::Duration::from_millis(self.config.correction_timeout_ms),
@@ -301,7 +332,11 @@ impl OllamaProcessor {
 
     async fn grammar_decision(&self, text: &str, candidate: Option<&str>) -> GrammarGateDecision {
         if self.config.grammar_gate.provider != "race" {
-            let provider = if self.config.grammar_gate.provider == "typesafe" { "typesafe" } else { "ollama" };
+            let provider = match self.config.grammar_gate.provider.as_str() {
+                "typesafe" => "typesafe",
+                "modernbert" => "modernbert",
+                _ => "ollama",
+            };
             return self.judge_provider(provider, text, candidate).await;
         }
         let jev = self.judge_provider("typesafe", text, candidate);
@@ -327,6 +362,28 @@ impl OllamaProcessor {
     ) -> GrammarGateDecision {
         let gate = &self.config.grammar_gate;
         let request = async {
+            if provider == "modernbert" {
+                let response = self
+                    .client
+                    .post(format!("{}/judge", gate.host.trim_end_matches('/')))
+                    .json(&json!({"text": text, "threshold": gate.clean_threshold}))
+                    .send()
+                    .await
+                    .map_err(|_| "request_failed")?
+                    .error_for_status()
+                    .map_err(|_| "http_error")?;
+                let body = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_err(|_| "invalid_response")?;
+                let needs_correction = body["needs_correction"]
+                    .as_bool()
+                    .ok_or("invalid_decision")?;
+                return Ok(GrammarGateResponse {
+                    needs_correction,
+                    remove_leading_fragment: false,
+                });
+            }
             if provider == "typesafe" {
                 let authorization = self.typesafe_authorization.as_ref().ok_or("credential_unavailable")?;
                 let response = self.client

@@ -377,7 +377,7 @@ impl DictationService {
         }
 
         // Create hotkey channel
-        if self.config.ollama.background_review {
+        if self.config.ollama.background_review || self.config.ollama.grammar_gate.enabled {
             let runtime=self.runtime_settings.clone();
             let corrections=self.voice_corrections.clone();
             self.background_reviewer=Some(BackgroundReviewer::new(
@@ -386,7 +386,7 @@ impl DictationService {
                 Arc::new(move |s|corrections.apply(strip_trailing_hallucination(s))),
                 self.ui_publisher.clone(),
             ));
-            info!("Immediate paste with background grammar suggestions enabled");
+            info!("Background grammar suggestions enabled for review and data collection");
         }
         let (hotkey_tx, mut hotkey_rx) = mpsc::channel::<HotkeyEvent>(16);
 
@@ -658,7 +658,7 @@ impl DictationService {
             let (pt, ot) = match output_mode {
                 OutputMode::Whisper => (Some(punctuated_text.clone()), None),
                 _ if !runtime.ollama_enabled => (Some(punctuated_text.clone()), None),
-                _ if self.config.ollama.background_review && output_mode==OutputMode::Ollama && !spoken_correction => (Some(punctuated_text.clone()), None),
+                _ if self.config.ollama.background_review && !self.config.ollama.grammar_gate.enabled && output_mode==OutputMode::Ollama && !spoken_correction => (Some(punctuated_text.clone()), None),
                 _ if skip_threshold > 0 && word_count <= skip_threshold && !spoken_correction => {
                     info!("Skipped Ollama ({word_count} words <= {skip_threshold} threshold)");
                     (Some(punctuated_text.clone()), None)
@@ -786,7 +786,8 @@ impl DictationService {
         };
         history::save_record(&record);
         self.ui_publisher.publish("dictation", &record);
-        if runtime.ollama_enabled && output_mode==OutputMode::Ollama && correction_metadata.is_none() {
+        let is_clean_gate_bypass = correction_metadata.as_ref().and_then(|m| m.fallback_reason.as_deref()) == Some("grammar_gate_clean");
+        if runtime.ollama_enabled && output_mode==OutputMode::Ollama && (correction_metadata.is_none() || is_clean_gate_bypass) {
             if let Some(reviewer)=&self.background_reviewer {
                 reviewer.enqueue(ReviewJob {timestamp:record.timestamp.clone(),original:record.whisper_text.clone(),pasted:final_text.clone()});
             }

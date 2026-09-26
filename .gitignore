@@ -40,6 +40,8 @@ recovered-dictations-*.md
 
 # Model files (large binaries, download separately)
 *.onnx
+*.safetensors
+models/modernbert-grammar-gate/
 voices-v1.0.bin
 ggml-*.bin
 .ruff_cache/

@@ -49,16 +49,16 @@ ollama:
   skip_threshold: 0             # Short fragments also need the grammar gate.
   correction_timeout_ms: 3000   # Includes retry; keep cleaned text on timeout.
   audio_mode: false             # Deprecated compatibility key; Whisper is always used for ASR.
-  background_review: true  # Paste immediately (~70ms); review suggestions in background window.
+  background_review: true  # Continue logging background reviews for continuous data collection.
   grammar_gate:
-    enabled: false
-    provider: "ollama"
-    decision_format: "pass_repair"
-    model: "granite4:350m"
-    host: "http://192.168.0.103:11434"
+    enabled: true
+    provider: "modernbert"
+    decision_format: "structured"
+    model: "modernbert-grammar-gate"
+    host: "http://127.0.0.1:8771"
     api_key_file: "~/.config/typesafe/api-key"  # Private file outside this repository.
-    timeout_ms: 500
-    clean_threshold: 0.2        # Uncertain results also receive a correction pass.
+    timeout_ms: 1000
+    clean_threshold: 0.30       # Conservative threshold: catches ~84% of errors, immediate paste for clean.
     fragment_threshold: 0.9
 
 typer:

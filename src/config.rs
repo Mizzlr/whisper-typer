@@ -420,7 +420,7 @@ impl Config {
         }
         if self.ollama.grammar_gate.enabled {
             let gate = &self.ollama.grammar_gate;
-            if !matches!(gate.provider.as_str(), "ollama" | "typesafe" | "race") {
+            if !matches!(gate.provider.as_str(), "ollama" | "typesafe" | "race" | "modernbert") {
                 return Err(ConfigError("unknown grammar gate provider".into()));
             }
             if !matches!(gate.decision_format.as_str(), "structured" | "pass_repair") {
@@ -432,13 +432,17 @@ impl Config {
                 if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
                     return Err(ConfigError("TypeSafe host must use HTTPS without embedded credentials".into()));
                 }
-                if gate.api_key_file.trim().is_empty()
-                    || !gate.clean_threshold.is_finite()
-                    || !(0.0..0.5).contains(&gate.clean_threshold)
+                if gate.api_key_file.trim().is_empty() {
+                    return Err(ConfigError("invalid TypeSafe credential path".into()));
+                }
+            }
+            if matches!(gate.provider.as_str(), "typesafe" | "race" | "modernbert") {
+                if !gate.clean_threshold.is_finite()
+                    || !(0.0..1.0).contains(&gate.clean_threshold)
                     || !gate.fragment_threshold.is_finite()
                     || !(0.5..=1.0).contains(&gate.fragment_threshold)
                 {
-                    return Err(ConfigError("invalid TypeSafe credential path or probability thresholds".into()));
+                    return Err(ConfigError("invalid probability thresholds".into()));
                 }
             }
             if self.ollama.grammar_gate.model.trim().is_empty() {
