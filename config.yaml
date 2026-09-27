@@ -15,6 +15,11 @@ hotkey:
     - [KEY_F24]                     # Logitech Back button via Input Remapper
     - [KEY_PAGEDOWN, KEY_RIGHT]     # Page Down + Right Arrow
     - [KEY_PAGEDOWN, KEY_DOWN]      # Page Down + Down Arrow
+    - [KEY_LEFTCTRL, KEY_LEFTALT]   # Ctrl+Alt
+    - [KEY_RIGHTCTRL, KEY_RIGHTALT] # Right Ctrl+Right Alt
+    - [KEY_RIGHTMETA, KEY_RIGHTALT] # Right Win+Right Alt
+    - [KEY_LEFTMETA, KEY_RIGHTALT]  # Left Win+Right Alt
+    - [KEY_RIGHTMETA, KEY_LEFTALT]  # Right Win+Left Alt
 
 audio:
   sample_rate: 16000      # Whisper expects 16kHz

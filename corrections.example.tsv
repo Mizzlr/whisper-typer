@@ -1,0 +1,20 @@
+# Example voice typing corrections and protection rules.
+# Live corrections live outside this repo at ~/.config/whisper-typer/corrections.tsv
+#
+# Format:
+# replace<TAB>regex<TAB>replacement
+# protect<TAB>regex
+
+# Protect spans against accidental overwrites
+protect	(?i)\b(?:in|into)\s+(?:the\s+)?background\b
+protect	(?i)\bbackground\s+(?:task|tasks|process|processes|job|jobs|worker|workers|thread|threads|agent|agents|session|sessions|service|services|color|noise)\b
+
+# Common corrections
+replace	(?i)^\s*wrap\s+it\s+up[.!?]*\s*$	/wrap
+replace	(?i)^\s*slash\s+exit[.!?]*\s*$	/exit
+replace	(?i)^\s*exit[.!?]*\s*$	exit
+replace	(?i)\b(?:skus|skues)\b	skews
+replace	(?i)\bsku\b	skew
+replace	(?i)\bstatus\s+(?:backf?\s*filler|backflow\s*status|bachelor)\b	status backfiller
+replace	(?i)\bbackf\s*filler\b	backfiller
+replace	(?i)\b(?:vitals|white\s+tools?)\b	white wolf

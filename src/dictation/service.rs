@@ -847,4 +847,49 @@ mod tests {
         let expanded = super::expand_home_path("~/.config/whisper-typer/corrections.tsv");
         assert!(expanded.is_absolute());
     }
+
+    #[test]
+    fn applies_vocabulary_corrections() {
+        let corrections = VoiceCorrections {
+            replacements: vec![
+                VoiceReplacement {
+                    pattern: Regex::new(r"(?i)\b(?:skus|skues)\b").unwrap(),
+                    replacement: "skews".into(),
+                },
+                VoiceReplacement {
+                    pattern: Regex::new(r"(?i)\bsku\b").unwrap(),
+                    replacement: "skew".into(),
+                },
+                VoiceReplacement {
+                    pattern: Regex::new(
+                        r"(?i)\bstatus\s+(?:backf?\s*filler|backflow\s*status|bachelor)\b",
+                    )
+                    .unwrap(),
+                    replacement: "status backfiller".into(),
+                },
+                VoiceReplacement {
+                    pattern: Regex::new(r"(?i)\bbackf\s*filler\b").unwrap(),
+                    replacement: "backfiller".into(),
+                },
+                VoiceReplacement {
+                    pattern: Regex::new(r"(?i)\b(?:vitals|white\s+tools?)\b").unwrap(),
+                    replacement: "white wolf".into(),
+                },
+            ],
+            protectors: vec![],
+        };
+
+        assert_eq!(
+            corrections.apply("Power the skus and check the sku"),
+            "Power the skews and check the skew"
+        );
+        assert_eq!(
+            corrections.apply("Restart the status backf filler and backf filler"),
+            "Restart the status backfiller and backfiller"
+        );
+        assert_eq!(
+            corrections.apply("Check vitals and white tools host"),
+            "Check white wolf and white wolf host"
+        );
+    }
 }
