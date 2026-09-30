@@ -309,29 +309,15 @@ history. Explicit Whisper mode or disabled Ollama still skips the LLM. This
 corrects the current dictation before delivery; it does not edit earlier pasted
 or sent messages.
 
-An optional `ollama.grammar_gate` asks TypeSafe's Jev (`provider: typesafe`)
-for typed error probabilities via `/v1/systemone`. Rust skips rewriting only
-when the probability of a required repair is at most `clean_threshold` (0.2).
-Uncertain, failed, or timed-out judgments use the existing validated Granite
-correction pass. Jev never generates replacement text. With `provider: race`, Jev and the configured `ollama.model` on `ollama.host`
-judge concurrently. The first valid decision wins; a fast failed response does
-not win. The pending request is dropped, though a provider may finish already
-accepted work. If both judges fail, the normal correction pass runs. History
-records `grammar_gate_provider` so the winner is observable. A legacy
-`provider: ollama` gate remains available for offline setups.
-For a fast local Granite 350M judge, set `provider: ollama`, `model: granite4:350m`,
-`host` to its Ollama endpoint, and `decision_format: pass_repair`. This short
-classifier returns PASS or REPAIR; PASS keeps the input unchanged, while REPAIR
-runs the separately configured `ollama.model` corrector. It does not authorize
-direct prefix removal. Invalid or timed-out decisions also run the corrector.
-Use `keep_alive: -1` and an Ollama loaded-model limit of at least two to keep
-the judge and corrector hot together. The White Wolf warm unit preloads both.
+An optional `ollama.grammar_gate` uses ModernBERT (`provider: modernbert`)
+to classify whether an utterance needs correction. Rust skips rewriting when the
+error probability is at most `clean_threshold` (0.45), allowing clean speech to paste
+instantly in ~90ms while reserving Ollama for genuine transcription errors.
 
-The TypeSafe key is read at startup from `api_key_file`, normally
-`~/.config/typesafe/api-key`; keep this private file outside the repository.
-Only its path belongs in configuration. TypeSafe receives the cleaned,
-punctuated transcript and any proposed prefix candidate, not audio.
-See [TypeSafe's API reference](https://docs.typesafe.ai/api).
+ModernBERT runs locally via HTTP on `http://127.0.0.1:8771/judge`.
+Alternatively, `provider: ollama` with `decision_format: pass_repair` can use a fast local
+Granite 350M classifier (`model: granite4:350m`). Legacy `provider: typesafe` (Jev) and
+`provider: race` remain supported for backward compatibility.
 The judge has its own timeout; `ollama.correction_timeout_ms` bounds the entire
 correction including a retry. The gate only runs when Ollama processing and an
 Ollama/both output mode are enabled. A model's decision is advisory and can miss
@@ -380,12 +366,12 @@ ollama:
   correction_timeout_ms: 5000     # correction + retry budget; cleaned text on timeout
   grammar_gate:
     enabled: false
-    provider: "race"             # first valid Jev/Granite judgment wins
-    model: "jev-latest"
-    host: "https://api.typesafe.ai"
-    api_key_file: "~/.config/typesafe/api-key"
-    timeout_ms: 1500
-    clean_threshold: 0.2
+    provider: "modernbert"         # local ModernBERT grammar gate (or "ollama")
+    decision_format: "structured"
+    model: "modernbert-grammar-gate"
+    host: "http://127.0.0.1:8771"
+    timeout_ms: 1000
+    clean_threshold: 0.45
     fragment_threshold: 0.9
 
 spelling:

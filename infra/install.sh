@@ -68,7 +68,8 @@ for runtime_lib in \
     libonnxruntime_providers_tensorrt.so; do
     install -m 0644 "$REPO_DIR/target/release/$runtime_lib" "$RUNTIME_LIB_DIR/$runtime_lib"
 done
-echo -e "${GREEN}  Installed to ~/.local/bin/${NC}"
+install -m 0755 "$REPO_DIR/target/release/voice-journal" "$RUNTIME_LIB_DIR/voice-journal-recorder"
+echo -e "${GREEN}  Installed to ~/.local/bin/ and ~/.local/lib/whisper-typer/${NC}"
 
 # 5. systemd user services. Substitute __REPO_DIR__ in unit templates
 # with the actual repo path so the same template works for any user/location.

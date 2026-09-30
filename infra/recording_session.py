@@ -105,7 +105,7 @@ class RecordingSessions:
         try:
             process = subprocess.Popen([str(self.binary),'--ui-session',identity,'--config',str(self.config),
                                         '--output',str(output)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, text=True, encoding='utf-8', bufsize=1)
+                                       stderr=subprocess.PIPE, text=True, encoding='utf-8', bufsize=1)
         except OSError:
             self.sessions[identity]['error'] = 'Recorder could not start'
             self.sessions[identity]['status'] = 'stopped'
@@ -124,9 +124,18 @@ class RecordingSessions:
                 code = process.wait()
                 process.stdout.close()
                 if process.stdin and not process.stdin.closed: process.stdin.close()
+                err_msg = 'Recorder exited unexpectedly'
+                if process.stderr:
+                    try:
+                        err_out = process.stderr.read()
+                        process.stderr.close()
+                        if err_out:
+                            last = [l.strip() for l in err_out.splitlines() if l.strip()]
+                            if last: err_msg = last[-1]
+                    except Exception: pass
                 if code:
                     enqueue({'type':'recording','payload':{'session_id':identity,'timestamp':datetime.now().astimezone().isoformat(),
-                                                          'status':'error','message':'Recorder exited unexpectedly'}})
+                                                          'status':'error','message':err_msg}})
                 # Also restores controls if startup failed before writing an event.
                 enqueue({'type':'recording','payload':{'session_id':identity,'timestamp':datetime.now().astimezone().isoformat(),
                                                       'status':'stopped'}})

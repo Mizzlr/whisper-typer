@@ -61,7 +61,6 @@ ollama:
     decision_format: "structured"
     model: "modernbert-grammar-gate"
     host: "http://127.0.0.1:8771"
-    api_key_file: "~/.config/typesafe/api-key"  # Private file outside this repository.
     timeout_ms: 1000
     clean_threshold: 0.45       # Balanced threshold: instant ~90ms typing for clean speech, Ollama for real errors.
     fragment_threshold: 0.9

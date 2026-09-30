@@ -43,3 +43,22 @@
 * **Resolution**:
   * Configured `handle_size = 0` and `scrollbar_position = hidden` in `~/.config/terminator/config`.
   * Added CSS overrides in `~/.config/gtk-3.0/gtk.css` targeting `.terminator-terminal-window separator` and `paned > separator` to zero out separator dimensions, borders, and margins.
+
+---
+
+## 4. Voice Journal Recorder Sync & Jev Deprecation
+
+* **Issue — Recorder Not Starting**: Clicking **● Record** in the Whisper Typer floating window immediately failed and returned to idle without recording.
+* **Root Cause**:
+  * When `provider: modernbert` was added to `config.yaml` on September 26, the compiled binary at `~/.local/lib/whisper-typer/voice-journal-recorder` had not been updated since September 18.
+  * The older binary failed validation on launch with `ConfigError("unknown grammar gate provider")`.
+  * Because `recording_session.py` redirected `stderr` to `/dev/null`, the startup error was suppressed.
+* **Fixes & Remediation**:
+  * Rebuilt and deployed the release binary to `~/.local/lib/whisper-typer/voice-journal-recorder` and `~/.local/bin/voice-journal`.
+  * Updated `infra/install.sh` to install `voice-journal-recorder` into `~/.local/lib/whisper-typer/` on deployment so future builds stay synchronized.
+  * Updated `infra/recording_session.py` to pipe `stderr` and surface actionable startup errors in the UI event bridge if the subprocess fails.
+  * Restarted `voice-journal.service` and `whisper-dictation-window.service`.
+* **Deprecation of TypeSafe Jev**:
+  * Replaced Jev defaults and examples in `config.example.yaml`, `config.yaml`, and `src/config.rs` with local ModernBERT (`provider: modernbert`).
+  * Removed obsolete `api_key_file` entries from active configs and updated `README.md` and `docs/ARCHITECTURE.md` to establish local ModernBERT and Ollama as the standard grammar gate.
+* **Verification**: All 61 Rust tests and Python recording lifecycle tests pass cleanly.

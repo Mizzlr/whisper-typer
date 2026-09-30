@@ -169,7 +169,7 @@ impl Default for OllamaConfig {
 #[serde(default)]
 pub struct GrammarGateConfig {
     pub enabled: bool,
-    /// "ollama", "typesafe", or "race" (first valid judgment).
+    /// "modernbert", "ollama", "typesafe", or "race" (first valid judgment).
     pub provider: String,
     /// Ollama output contract: "structured" or the short "pass_repair" classifier.
     pub decision_format: String,
@@ -177,9 +177,9 @@ pub struct GrammarGateConfig {
     pub model: String,
     pub host: String,
     pub timeout_ms: u64,
-    /// Private credential file, never the credential itself.
+    /// Private credential file, never the credential itself (legacy TypeSafe).
     pub api_key_file: String,
-    /// Skip rewriting only when Jev's error probability is at most this value.
+    /// Skip rewriting only when the grammar gate error probability is at most this value.
     pub clean_threshold: f64,
     /// Remove a proposed prefix only with this probability or higher.
     pub fragment_threshold: f64,
@@ -194,7 +194,7 @@ impl Default for GrammarGateConfig {
             model: String::new(),
             host: "http://127.0.0.1:11434".into(),
             timeout_ms: 250,
-            api_key_file: "~/.config/typesafe/api-key".into(),
+            api_key_file: String::new(),
             clean_threshold: 0.2,
             fragment_threshold: 0.9,
         }

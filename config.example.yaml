@@ -42,13 +42,12 @@ ollama:
   background_review: false # Enable after installing the dictation window.
   grammar_gate:
     enabled: false
-    provider: "race"            # Jev races the ollama.model judge.
+    provider: "modernbert"      # Local ModernBERT gate (or "ollama")
     decision_format: "structured" # Use pass_repair for Granite 350M.
-    model: "jev-latest"
-    host: "https://api.typesafe.ai"
-    api_key_file: "~/.config/typesafe/api-key"  # Store the key outside the repo.
-    timeout_ms: 1500
-    clean_threshold: 0.2
+    model: "modernbert-grammar-gate"
+    host: "http://127.0.0.1:8771"
+    timeout_ms: 1000
+    clean_threshold: 0.45
     fragment_threshold: 0.9
 
 typer:

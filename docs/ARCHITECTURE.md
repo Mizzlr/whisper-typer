@@ -86,24 +86,18 @@ mode takes effect on the next utterance and is atomically persisted. Grammar
 correction is advisory: structured output is checked for stutter, large length
 changes, removed URLs/numbers, and protected domain terms. Any failure returns
 the cleaned, punctuated input to that pass. Raw ASR is retained separately in
-history. The optional grammar judge uses TypeSafe Jev's typed probabilities; Rust
-converts them into correction need and approval of a narrowly proposed
-repeated-letter prefix removal. Grammar is evaluated independently on the
-original and candidate texts, and only a confident prefix decision selects the
-candidate. With `provider: race`, Jev and the configured Ollama corrector model judge
-concurrently; the first valid decision wins and the pending request is dropped.
-An early failure waits for the other judge, and both failures fall back to the
-normal corrector. Winner provider and latency are recorded in history.
-The Ollama gate supports the existing structured boolean contract and a short
-`decision_format: pass_repair` contract for Granite 350M. PASS preserves input;
-REPAIR or failure invokes the separately configured corrector. The short
-classifier cannot authorize direct prefix removal. White Wolf keeps both models
-resident with `keep_alive: -1` and a loaded-model limit of two; its warm unit
-loads both at startup. Jev credentials
-are loaded from a private external file and are never logged or configured
-inline. The gate sends text, not audio, to TypeSafe. Clean text
-bypasses rewriting, while flagged or uncertain decisions use the existing
-corrector. Only a proposed prefix edit may be executed directly by Rust.
+history. The optional grammar judge uses a local ModernBERT model (`provider: modernbert`)
+on `http://127.0.0.1:8771/judge` to evaluate whether an utterance needs correction.
+Rust skips rewriting when the error probability is at most `clean_threshold` (0.45).
+Clean text bypasses rewriting and pastes in ~90ms, while flagged or uncertain
+utterances route to the validated Ollama corrector pass.
+
+The Ollama gate also supports a short `decision_format: pass_repair` contract for
+Granite 350M (`provider: ollama`). PASS preserves input; REPAIR or failure invokes
+the separately configured corrector. Legacy `provider: typesafe` (Jev) and
+`provider: race` remain supported for backward compatibility. White Wolf keeps both
+models resident with `keep_alive: -1` and a loaded-model limit of two; its warm unit
+loads both at startup.
 Judge latency and spelling edits are recorded independently. Separate budgets
 bound judging and the full correction including retry.
 
