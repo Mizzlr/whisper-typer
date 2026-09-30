@@ -512,7 +512,14 @@ impl OllamaProcessor {
             Err(reason) => {
                 if matches!(
                     reason,
-                    "wrapped_or_explained_output" | "empty_correction" | "introduced_unknown_token"
+                    "wrapped_or_explained_output"
+                        | "empty_correction"
+                        | "introduced_unknown_token"
+                        | "changed_numeric_fact"
+                        | "changed_personal_reference"
+                        | "changed_url"
+                        | "large_length_change"
+                        | "removed_protected_term"
                 ) {
                     warn!("Rejected Ollama correction ({reason}); falling back immediately without slow retry");
                     return fallback_result(text, reason, Some(result.metadata));
@@ -1036,11 +1043,7 @@ fn validate_standard_correction(original: &str, candidate: &str) -> Result<(), &
         }
     }
 
-    if significant_tokens(original, |token| {
-        token.chars().any(|ch| ch.is_ascii_digit())
-    }) != significant_tokens(candidate, |token| {
-        token.chars().any(|ch| ch.is_ascii_digit())
-    }) {
+    if numeric_tokens(original) != numeric_tokens(candidate) {
         return Err("changed_numeric_fact");
     }
     if significant_tokens(original, |token| {
@@ -1067,10 +1070,109 @@ fn validate_standard_correction(original: &str, candidate: &str) -> Result<(), &
     Ok(())
 }
 
+fn normalize_number_word(word: &str) -> Option<&'static str> {
+    match word {
+        "zero" => Some("0"),
+        "one" | "first" => Some("1"),
+        "two" | "second" => Some("2"),
+        "three" | "third" => Some("3"),
+        "four" | "fourth" => Some("4"),
+        "five" | "fifth" => Some("5"),
+        "six" | "sixth" => Some("6"),
+        "seven" | "seventh" => Some("7"),
+        "eight" | "eighth" => Some("8"),
+        "nine" | "ninth" => Some("9"),
+        "ten" | "tenth" => Some("10"),
+        "eleven" | "eleventh" => Some("11"),
+        "twelve" | "twelfth" => Some("12"),
+        _ => None,
+    }
+}
+
+fn numeric_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for raw in text.split(|ch: char| ch.is_whitespace() || ch == '-' || ch == '—' || ch == '/') {
+        let trimmed = raw.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '.' | ','
+                    | ';'
+                    | ':'
+                    | '!'
+                    | '?'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '\''
+                    | '"'
+                    | '+'
+                    | '_'
+            )
+        });
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let without_commas: String = if lower.contains(',') && lower.chars().any(|c| c.is_ascii_digit()) {
+            lower.replace(',', "")
+        } else {
+            lower
+        };
+
+        let normalized = if let Some(digits) = without_commas
+            .strip_suffix("st")
+            .or_else(|| without_commas.strip_suffix("nd"))
+            .or_else(|| without_commas.strip_suffix("rd"))
+            .or_else(|| without_commas.strip_suffix("th"))
+        {
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                Some(digits.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(canonical) = normalized {
+            tokens.push(canonical);
+        } else if let Some(canonical) = normalize_number_word(&without_commas) {
+            tokens.push(canonical.to_string());
+        } else if without_commas.chars().any(|c| c.is_ascii_digit()) {
+            let mut canon = None;
+            for (name, digit) in [
+                ("zero", "0"),
+                ("one", "1"),
+                ("two", "2"),
+                ("three", "3"),
+                ("four", "4"),
+                ("five", "5"),
+                ("six", "6"),
+                ("seven", "7"),
+                ("eight", "8"),
+                ("nine", "9"),
+            ] {
+                if let Some(rest) = without_commas.strip_prefix(name) {
+                    if rest.starts_with('.') {
+                        canon = Some(format!("{digit}{rest}"));
+                        break;
+                    }
+                }
+            }
+            tokens.push(canon.unwrap_or(without_commas));
+        }
+    }
+    tokens.sort();
+    tokens
+}
+
 // Count reference families, allowing case, contractions and grammatical case
 // repairs (I/me, you/your). Adjacent repeated starts do not count twice.
-fn personal_pronouns(text: &str) -> [usize; 7] {
-    let mut counts = [0; 7];
+fn personal_pronouns(text: &str) -> [usize; 6] {
+    let mut counts = [0; 6];
     let mut previous = None;
     for token in text.split(|ch: char| !ch.is_alphabetic()).filter(|word| !word.is_empty()) {
         let family = match token.to_ascii_lowercase().as_str() {
@@ -1080,7 +1182,6 @@ fn personal_pronouns(text: &str) -> [usize; 7] {
             "he" | "him" | "his" | "himself" => Some(3),
             "she" | "her" | "hers" | "herself" => Some(4),
             "they" | "them" | "their" | "theirs" | "themselves" => Some(5),
-            "it" | "its" | "itself" => Some(6),
             _ => None,
         };
         if let Some(family) = family {
@@ -1621,7 +1722,12 @@ mod tests {
         assert!(validate_correction("I I want you to check this.", "I want you to check this.").is_ok());
         assert!(validate_correction("She have the files.", "She has the files.").is_ok());
         assert_eq!(validate_correction("She has the files.", "He has the files."), Err("changed_personal_reference"));
+        assert!(validate_correction("We can continue it regenerate.", "We can continue to regenerate.").is_ok());
         assert_eq!(validate_correction("It is 12.5% complete.", "It is 12.5 complete."), Err("changed_numeric_fact"));
+        assert!(validate_correction("focus on everything 1st.", "Focus on everything first.").is_ok());
+        assert!(validate_correction("full 14 day window", "full 14-day window").is_ok());
+        assert!(validate_correction("what is that +one.8 and +3.9%", "What is that +1.8 and +3.9%?").is_ok());
+        assert_eq!(validate_correction("Send 28 SOL", "Send 29 SOL"), Err("changed_numeric_fact"));
         assert_eq!(validate_correction("Give me links.", "Give <Unk>me links."), Err("introduced_unknown_token"));
     }
 
