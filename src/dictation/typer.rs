@@ -59,8 +59,8 @@ impl TextTyper {
 
     /// Type text into the currently focused window via clipboard paste.
     pub fn type_text(&mut self, text: &str) {
-        if text.is_empty() {
-            warn!("Empty text, nothing to type");
+        if text.is_empty() || crate::dictation::service::is_backtick_garbage(text) {
+            warn!("Empty text or backtick artifact, nothing to type: '{text}'");
             return;
         }
 

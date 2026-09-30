@@ -14,6 +14,14 @@ import re
 import time
 import tkinter as tk
 from datetime import datetime
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from white_noise import WhiteNoiseClient, PRESETS
+except ImportError:
+    WhiteNoiseClient = None
+    PRESETS = {}
 
 
 def diff_segments(original, corrected):
@@ -237,6 +245,9 @@ class DictationWindow:
         self.event_bridge = None
         self.recordings = None
         self.closing = False
+        self.white_noise_client = WhiteNoiseClient(autostart=True) if WhiteNoiseClient else None
+        self.white_noise_status = None
+        self.white_noise_popover = None
         self.ui_metrics = {}
         self.content_widgets = []
         self.photos = {}
@@ -303,14 +314,22 @@ class DictationWindow:
         self.topmost_button.pack(side='right', padx=5)
         self.clipboard_button = tk.Button(controls, command=lambda: self.toggle_control(self.show_clipboard, self.change_view),
                                          font=(self.FONT, 9), relief='flat', padx=3, pady=0, takefocus=False)
+        self.clipboard_button.pack(side='right', padx=5)
         self.recordings_button=tk.Button(controls,command=lambda:self.toggle_control(self.show_recordings,self.change_view),
                                          font=(self.FONT,9),relief='flat',padx=3,pady=0,takefocus=False)
         self.recordings_button.pack(side='right',padx=5)
         self.dictations_button=tk.Button(controls,command=lambda:self.toggle_control(self.show_dictations,self.change_view),
                                          font=(self.FONT,9),relief='flat',padx=3,pady=0,takefocus=False)
         self.dictations_button.pack(side='right',padx=5)
-        self.clipboard_button.pack(side='right', padx=5)
         self.update_control_buttons()
+        if self.white_noise_client:
+            self.noise_button = tk.Button(controls, text='🌊 Noise', command=self.toggle_white_noise,
+                                          font=(self.FONT, 9), relief='flat', padx=3, pady=0, takefocus=False)
+            self.noise_button.bind('<Button-3>', self.show_white_noise_popover)
+            self.noise_button.pack(side='right', padx=5)
+            self.update_white_noise_button()
+        else:
+            self.noise_button = None
         self.record_button = tk.Button(controls, text='● Record', command=self.toggle_recording, font=(self.FONT,9),
                                       bg=self.BG, fg=self.RECORD, activebackground=self.PANEL, activeforeground=self.RECORD_ACTIVE,
                                       relief='flat', padx=3, pady=0, takefocus=False)
@@ -359,6 +378,9 @@ class DictationWindow:
 
     def moved(self, event):
         if event.widget is self.root:
+            if self.white_noise_popover and self.white_noise_popover.winfo_exists():
+                self.white_noise_popover.destroy()
+                self.white_noise_popover = None
             if self.save_timer is not None:
                 self.root.after_cancel(self.save_timer)
             self.save_timer = self.root.after(750, self.save_settings)
@@ -409,7 +431,7 @@ class DictationWindow:
         command()
 
     def update_control_buttons(self):
-        for button, variable, label in ((self.topmost_button, self.topmost, 'Top'),
+        for button, variable, label in ((self.topmost_button, self.topmost, '📌 Pin'),
                                         (self.clipboard_button, self.show_clipboard, 'Clipboard'),
                                         (self.dictations_button,self.show_dictations,'Dictations'),
                                         (self.recordings_button,self.show_recordings,'Recordings')):
@@ -724,6 +746,186 @@ class DictationWindow:
         state = self.recordings.state if self.recordings else 'idle'
         self.record_button.configure(text='● Record' if state == 'idle' else 'Finishing…' if state == 'finishing' else '■ Stop',
                                      state='disabled' if state == 'finishing' else 'normal')
+
+    def toggle_white_noise(self):
+        if not self.white_noise_client: return
+        try:
+            self.white_noise_status = self.white_noise_client.toggle()
+            self.update_white_noise_button()
+        except Exception: pass
+
+    def sync_white_noise(self):
+        if not self.white_noise_client: return
+        try:
+            self.white_noise_status = self.white_noise_client.status()
+            self.update_white_noise_button()
+        except Exception: pass
+
+    def update_white_noise_button(self):
+        if not self.noise_button: return
+        status = self.white_noise_status or {}
+        playing = status.get('playing', False)
+        preset = status.get('preset', 'river_rain')
+        title = PRESETS.get(preset, {}).get('title', 'Noise') if PRESETS else 'Noise'
+        if playing:
+            self.noise_button.configure(text=f'🌊 {title}',
+                                        bg=self.COPY_BG, fg=self.COPY_FG,
+                                        activebackground=self.COPY_HOVER, activeforeground=self.FG)
+        else:
+            self.noise_button.configure(text='🌊 Noise',
+                                        bg=self.BG, fg=self.MUTED,
+                                        activebackground=self.PANEL, activeforeground=self.FG)
+
+    def show_white_noise_popover(self, event=None):
+        if not self.white_noise_client: return
+        if self.white_noise_popover and self.white_noise_popover.winfo_exists():
+            self.white_noise_popover.destroy()
+            self.white_noise_popover = None
+            return
+
+        status = self.white_noise_status or {}
+        try:
+            status = self.white_noise_client.status()
+            self.white_noise_status = status
+        except Exception: pass
+
+        popover = tk.Toplevel(self.root)
+        self.white_noise_popover = popover
+        popover.wm_overrideredirect(True)
+        popover.attributes('-topmost', True)
+        popover.configure(bg=self.PANEL, highlightthickness=1, highlightbackground=self.LINE)
+
+        self.root.update_idletasks()
+        bx = max(10, self.noise_button.winfo_rootx() - 100)
+        by = self.noise_button.winfo_rooty() + self.noise_button.winfo_height() + 4
+
+        header = tk.Frame(popover, bg=self.PANEL)
+        header.pack(fill='x', padx=8, pady=(6, 4))
+        tk.Label(header, text='White Noise', font=(self.FONT, 9, 'bold'),
+                 bg=self.PANEL, fg=self.FG).pack(side='left')
+
+        close_btn = tk.Button(header, text='×', font=(self.FONT, 10, 'bold'),
+                              bg=self.PANEL, fg=self.MUTED, relief='flat', padx=4, pady=0,
+                              command=lambda: (popover.destroy(), setattr(self, 'white_noise_popover', None)))
+        close_btn.pack(side='right')
+
+        # Preset selection
+        p_frame = tk.Frame(popover, bg=self.PANEL)
+        p_frame.pack(fill='x', padx=8, pady=2)
+        active_preset = status.get('preset', 'river_rain')
+
+        presets_list = [
+            ('river_rain', '🌊 River & Rain'),
+            ('mellow_rain', '🌧️ Mellow Rain'),
+            ('brown', '🟤 Brown Noise'),
+            ('pink', '🌸 Pink Noise'),
+            ('white', '⚪ White Noise'),
+            ('rain', '🌦️ Gentle Rain'),
+        ]
+
+        preset_btns = {}
+        for key, name in presets_list:
+            is_active = (key == active_preset)
+            btn = tk.Button(
+                p_frame, text=name, font=(self.FONT, 8),
+                bg=self.COPY_BG if is_active else self.BG,
+                fg=self.COPY_FG if is_active else self.FG,
+                relief='flat', padx=6, pady=2, anchor='w'
+            )
+            btn.pack(fill='x', pady=1)
+            def on_click(k=key):
+                try:
+                    self.white_noise_status = self.white_noise_client.set_preset(k)
+                    self.update_white_noise_button()
+                    for pk, pb in preset_btns.items():
+                        pb.configure(bg=self.COPY_BG if pk == k else self.BG,
+                                     fg=self.COPY_FG if pk == k else self.FG)
+                except Exception: pass
+            btn.configure(command=on_click)
+            preset_btns[key] = btn
+
+        # Volume slider
+        v_frame = tk.Frame(popover, bg=self.PANEL)
+        v_frame.pack(fill='x', padx=8, pady=(4, 2))
+        vol_val = round(status.get('volume', 0.2) * 100, 1)
+        pct_str = f"{int(vol_val)}%" if vol_val.is_integer() else f"{vol_val:.1f}%"
+        v_lbl = tk.Label(v_frame, text=f'Volume: {pct_str}', font=(self.FONT, 8),
+                         bg=self.PANEL, fg=self.MUTED)
+        v_lbl.pack(side='left')
+
+        from tkinter import ttk
+        slider = ttk.Scale(popover, from_=0, to=100, orient='horizontal')
+        slider.set(vol_val)
+        def on_vol(val):
+            v_pct = round(float(val), 1)
+            pct_text = f"{int(v_pct)}%" if v_pct.is_integer() else f"{v_pct:.1f}%"
+            v_lbl.configure(text=f'Volume: {pct_text}')
+            try: self.white_noise_client.set_volume(round(v_pct / 100.0, 3))
+            except Exception: pass
+        slider.configure(command=on_vol)
+        slider.pack(fill='x', padx=8, pady=(0, 4))
+
+        # Bottom row: Play/Pause button and Dedicated UI launcher
+        b_frame = tk.Frame(popover, bg=self.PANEL)
+        b_frame.pack(fill='x', padx=8, pady=(4, 6))
+
+        is_playing = status.get('playing', False)
+        toggle_btn = tk.Button(
+            b_frame,
+            text='⏸ Pause' if is_playing else '▶ Play',
+            font=(self.FONT, 8, 'bold'),
+            bg=self.COPY_BG if is_playing else self.BG,
+            fg=self.COPY_FG if is_playing else self.FG,
+            relief='flat', padx=6, pady=2,
+        )
+        def on_toggle():
+            self.toggle_white_noise()
+            now_playing = (self.white_noise_status or {}).get('playing', False)
+            toggle_btn.configure(
+                text='⏸ Pause' if now_playing else '▶ Play',
+                bg=self.COPY_BG if now_playing else self.BG,
+                fg=self.COPY_FG if now_playing else self.FG,
+            )
+        toggle_btn.configure(command=on_toggle)
+        toggle_btn.pack(side='left', fill='x', expand=True, padx=(0, 4))
+
+        def open_dedicated_app():
+            popover.destroy()
+            self.white_noise_popover = None
+            import subprocess
+            ui_script = Path(__file__).resolve().parent / 'white_noise_ui.py'
+            subprocess.Popen([sys.executable, str(ui_script)])
+
+        app_btn = tk.Button(
+            b_frame, text='Full UI ↗', font=(self.FONT, 8),
+            bg=self.BG, fg=self.MUTED, relief='flat', padx=6, pady=2,
+            command=open_dedicated_app,
+        )
+        app_btn.pack(side='right')
+
+        popover.geometry(f'205x290+{bx}+{by}')
+
+        def close_popover(e=None):
+            if self.white_noise_popover and self.white_noise_popover.winfo_exists():
+                self.white_noise_popover.destroy()
+                self.white_noise_popover = None
+                try: self.root.unbind_all('<Button-1>')
+                except Exception: pass
+
+        def check_click_outside(e):
+            if not popover.winfo_exists(): return
+            x, y = e.x_root, e.y_root
+            try:
+                px, py = popover.winfo_rootx(), popover.winfo_rooty()
+                pw, ph = popover.winfo_width(), popover.winfo_height()
+                if not (px <= x <= px + pw and py <= y <= py + ph):
+                    close_popover()
+            except Exception:
+                close_popover()
+
+        popover.bind('<Escape>', close_popover)
+        popover.bind('<FocusOut>', lambda e: self.root.after(150, lambda: close_popover() if not popover.winfo_exists() or (self.root.focus_get() is None or str(self.root.focus_get()).find(str(popover)) == -1) else None))
+        self.root.after(200, lambda: self.root.bind_all('<Button-1>', check_click_outside, add='+'))
 
     def hide_tooltip(self, *_):
         if self.tooltip:
@@ -1054,6 +1256,8 @@ class DictationWindow:
                 break
         if changed or expired or self.rendered is None:
             self.render()
+        if self.white_noise_client:
+            self.sync_white_noise()
         self.root.after(5000, self.poll)
 
     def save_settings(self):
@@ -1072,6 +1276,9 @@ class DictationWindow:
     def close(self):
         if self.closing: return
         self.closing = True
+        if self.white_noise_popover and self.white_noise_popover.winfo_exists():
+            self.white_noise_popover.destroy()
+            self.white_noise_popover = None
         self.unzoom_image()
         if self.recordings: self.recordings.close()
         if self.clipboard_monitor: self.clipboard_monitor.close()

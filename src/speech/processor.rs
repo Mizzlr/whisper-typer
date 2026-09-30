@@ -510,6 +510,13 @@ impl OllamaProcessor {
                 },
             },
             Err(reason) => {
+                if matches!(
+                    reason,
+                    "wrapped_or_explained_output" | "empty_correction" | "introduced_unknown_token"
+                ) {
+                    warn!("Rejected Ollama correction ({reason}); falling back immediately without slow retry");
+                    return fallback_result(text, reason, Some(result.metadata));
+                }
                 warn!("Rejected Ollama correction ({reason}); retrying once");
                 let retry_prompt = if contains_sorry(text) {
                     format!("{RETRY_PROMPT_TEMPLATE}\nYour previous answer failed validation ({reason}). Correct the original again. Keep NEW wording AFTER the repair marker; preserve genuine apologies.")
@@ -1006,7 +1013,9 @@ fn validate_standard_correction(original: &str, candidate: &str) -> Result<(), &
     if candidate.matches('%').count() != original.matches('%').count() {
         return Err("changed_numeric_fact");
     }
-    if candidate.contains("```")
+    if candidate.trim().chars().all(|c| c == '`' || c.is_whitespace())
+        || candidate.contains("```")
+        || candidate.matches('`').count() >= 6
         || candidate
             .to_ascii_lowercase()
             .starts_with("corrected_text:")

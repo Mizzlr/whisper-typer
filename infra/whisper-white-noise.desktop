@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Whisper White Noise
+Comment=Local White Noise & Ambient Audio Player (Brown, Pink, River & Rain)
+Exec=/home/mizzlr/.local/bin/whisper-white-noise --ui
+Icon=audio-volume-high
+Terminal=false
+Type=Application
+Categories=Audio;AudioVideo;Utility;
+Keywords=white noise;ambient;rain;river;sound;audio;focus;sleep;
+StartupNotify=true

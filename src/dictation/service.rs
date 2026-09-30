@@ -125,6 +125,31 @@ fn strip_trailing_hallucination(text: &str) -> &str {
     trimmed
 }
 
+/// Check if text is a backtick hallucination or artifact (e.g., "```", "``` ```", "``````", or only backticks/whitespace).
+pub(crate) fn is_backtick_garbage(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Entire text consists only of backticks and whitespace
+    if trimmed.chars().all(|c| c == '`' || c.is_whitespace()) {
+        return true;
+    }
+    // Has multiple backticks and no alphanumeric characters at all
+    if trimmed.contains('`') && !trimmed.chars().any(|c| c.is_alphanumeric()) {
+        return true;
+    }
+    // Contains 6 backticks and only whitespace or punctuation between/around them
+    let backtick_count = trimmed.chars().filter(|c| *c == '`').count();
+    if backtick_count >= 6 {
+        let non_backtick: String = trimmed.chars().filter(|c| *c != '`' && !c.is_whitespace()).collect();
+        if non_backtick.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Clone, Default)]
 pub struct VoiceCorrections {
     replacements: Vec<VoiceReplacement>,
@@ -697,8 +722,8 @@ impl DictationService {
             .map(|text| self.voice_corrections.apply(text));
 
         let selected_text = processed_clean.as_deref().unwrap_or(&raw_clean);
-        if is_pathological_stutter(selected_text) {
-            warn!("Dropping dictation with repeated stutter text: '{selected_text}'");
+        if is_pathological_stutter(selected_text) || is_backtick_garbage(selected_text) {
+            warn!("Dropping dictation with repeated stutter or backtick artifact: '{selected_text}'");
             self.transition_to_idle();
             return;
         }
@@ -713,6 +738,12 @@ impl DictationService {
                 format!("{} [{raw_clean}] ", selected_text)
             }
         };
+
+        if is_backtick_garbage(&final_text) {
+            warn!("Dropping dictation containing backtick artifact: '{final_text}'");
+            self.transition_to_idle();
+            return;
+        }
 
         // --- Type into active window ---
         let t_type_start = Instant::now();
@@ -807,7 +838,7 @@ impl DictationService {
 
 #[cfg(test)]
 mod tests {
-    use super::{VoiceCorrections, VoiceReplacement};
+    use super::{is_backtick_garbage, VoiceCorrections, VoiceReplacement};
     use regex::Regex;
 
     #[test]
@@ -891,5 +922,19 @@ mod tests {
             corrections.apply("Check vitals and white tools host"),
             "Check white wolf and white wolf host"
         );
+    }
+
+    #[test]
+    fn detects_backtick_garbage() {
+        assert!(is_backtick_garbage("```"));
+        assert!(is_backtick_garbage("``````"));
+        assert!(is_backtick_garbage("``` ```"));
+        assert!(is_backtick_garbage("```\n```"));
+        assert!(is_backtick_garbage("  ``` ```  "));
+        assert!(is_backtick_garbage("```` ````"));
+        assert!(is_backtick_garbage("` ` ` ` ` `"));
+        assert!(!is_backtick_garbage("hello world"));
+        assert!(!is_backtick_garbage("code: `let x = 1;`"));
+        assert!(!is_backtick_garbage("```rust\nlet x = 1;\n```"));
     }
 }
