@@ -17,7 +17,7 @@ import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
-from tkinter import ttk
+from tkinter import ttk, font as tkfont
 from urllib.parse import urlparse, unquote
 from PIL import Image, ImageTk
 from tkinterweb import HtmlFrame
@@ -25,7 +25,7 @@ from files import Document, PathResolver, load_document, pasted_paths, image_tex
 from rendering import CSS, rendered_body, theme_colors
 from clipboard import read_clipboard
 from history import History
-from tk_widgets import Table, LIGHT, DARK
+from tk_widgets import Table, LIGHT, DARK, Tooltip
 from syntax import syntax_safe, source_style
 from image_zoom import ImageZoom, ZoomStyle
 
@@ -146,6 +146,14 @@ class Folio:
         for label,callback in [('Paths',self.show_history),('Recent',self.show_recent),('Downloads',self.show_downloads),('Adhoc',self.show_adhoc),('Projects',self.show_projects)]:
             button=self.button(self.switcher,label,callback);button.pack(side='left',padx=3);self.tab_buttons[label]=button
         self.switcher.pack(side='right',padx=7)
+        self.path_label=tk.Label(self.nav,font=(self.font_family,9),anchor='w',cursor='hand2')
+        self.path_label.bind('<Button-1>',lambda e:self.copy_path_click())
+        self.path_label.bind('<Button-3>',self.menu)
+        self.path_label.bind('<Enter>',lambda e:self.path_label.configure(fg=self.palette['fg']),add='+')
+        self.path_label.bind('<Leave>',lambda e:self.path_label.configure(fg=self.palette['muted']),add='+')
+        self.nav.bind('<Configure>',lambda e:self.update_path_display(),add='+')
+        self.path_tooltip=Tooltip(self.path_label,self.get_path_tooltip_text,palette_func=lambda:self.palette,font_func=lambda:self.font_family)
+        self.folder_tooltip=Tooltip(self.folder_button,self.get_folder_tooltip_text,palette_func=lambda:self.palette,font_func=lambda:self.font_family)
         self.input_frame=tk.Frame(self.frame);self.input_frame.pack(fill='x',pady=(0,10))
         self.path_input=tk.Text(self.input_frame,height=2,wrap='word',font=(self.font_family,self.font_size),bd=1,relief='solid',padx=10,pady=8,undo=True)
         self.path_input.pack(fill='x')
@@ -231,6 +239,7 @@ class Folio:
             for child in widget.winfo_children():paint(child)
         self.root.configure(bg=p['bg']);paint(self.frame)
         self.date.configure(fg=p['muted']);self.status.configure(fg=p['muted']);self.gutter.configure(fg=p['muted'])
+        self.path_label.configure(bg=p['bg'],fg=p['muted'])
         self.html.configure(selected_text_highlight_color=p['selected'],selected_text_color=p['selected_fg'])
         self.update_buttons()
 
@@ -269,8 +278,10 @@ class Folio:
         self.font_select_button.configure(font=(family,9))
         self.folder_button.configure(font=(family,9))
         self.prettify_button.configure(font=(family,9))
+        self.path_label.configure(font=(family,9))
         for b in self.tab_buttons.values():b.configure(font=(family,9))
         self.update_gutter()
+        self.update_path_display()
         if self.table:self.table.set_font_family(family)
         for t in self.embedded_tables:t.set_font_family(family)
         if self.view=='document' and self.current and self.current.kind=='markdown':
@@ -369,6 +380,7 @@ class Folio:
 
     def show_list_controls(self):
         self.prettify_button.pack_forget()
+        self.path_label.pack_forget()
         self.root.title('Folio');self.switcher.pack(side='right',padx=7)
         self.date.pack(side='left');self.folder_button.pack(side='left',padx=(8,0),after=self.date)
         self.input_frame.pack(fill='x',before=self.content,pady=(0,10))
@@ -457,6 +469,55 @@ class Folio:
             if (p/'.git').exists() or any((p/marker).exists() for marker in ('Cargo.toml','package.json','pyproject.toml','requirements.txt','Makefile')):
                 other_projects.append(p)
         self.show_context(priority_paths+other_projects,'Projects')
+
+    def get_path_tooltip_text(self):
+        if self.current and self.current.path:
+            return f'{self.current.path.resolve()}\n(Click to copy)'
+        return ''
+
+    def get_folder_tooltip_text(self):
+        folder=self.current_folder
+        if not folder and self.current and self.current.path:
+            folder=self.current.path.parent
+        if folder:
+            return f'Folder: {folder.resolve()}'
+        return ''
+
+    def copy_path_click(self):
+        if self.current and self.current.path:
+            full=str(self.current.path.resolve())
+            self.copy_text(full)
+            self.status.configure(text=f'Copied path: {full}')
+
+    def fit_path_text(self,full_path,font,max_width):
+        if not full_path or max_width<=20:return full_path
+        if font.measure(full_path)<=max_width:return full_path
+        home=str(Path.home())
+        display_path=full_path
+        if full_path.startswith(home):
+            display_path='~'+full_path[len(home):]
+            if font.measure(display_path)<=max_width:return display_path
+        parts=list(Path(display_path).parts)
+        prefix=parts[0].rstrip('/')
+        for i in range(1,len(parts)-1):
+            suffix='/'.join(p.strip('/') for p in parts[i+1:])
+            candidate=f'{prefix}/…/{suffix}'
+            if font.measure(candidate)<=max_width:return candidate
+        fname=Path(full_path).name
+        if font.measure('…/'+fname)<=max_width:return '…/'+fname
+        text=fname
+        while text and font.measure('…'+text)>max_width:
+            text=text[1:]
+        return '…'+text if text else fname
+
+    def update_path_display(self):
+        if not self.current or not self.current.path or self.view!='document':return
+        full_path=str(self.current.path.resolve())
+        width=self.path_label.winfo_width()
+        font=tkfont.Font(font=self.path_label['font'])
+        fitted=self.fit_path_text(full_path,font,width-8) if width>30 else full_path
+        if self.path_label.cget('text')!=fitted:
+            self.path_label.configure(text=fitted)
 
     def update_folder_button(self):
         folder=self.current_folder
@@ -616,6 +677,11 @@ class Folio:
         self.root.title(document.path.name if document.path else 'Folio')
         self.input_frame.pack_forget();self.date.pack_forget();self.switcher.pack_forget()
         self.folder_button.pack(side='left',padx=(0,8))
+        if document.path:
+            self.path_label.pack(side='left',fill='x',expand=True,padx=(4,8),after=self.folder_button)
+            self.update_path_display()
+        else:
+            self.path_label.pack_forget()
         self.back_button.configure(state='normal')
         self.status.configure(text='');self.render_document()
 
@@ -870,6 +936,7 @@ class Folio:
     def close(self):
         if self.closing:return
         self.save_settings();self.closing=True
+        self.path_tooltip.hide();self.folder_tooltip.hide()
         for timer in (self.paste_timer,self.clock_timer,self.tick_timer):
             if timer:self.root.after_cancel(timer)
         self.executor.shutdown(wait=True,cancel_futures=True)

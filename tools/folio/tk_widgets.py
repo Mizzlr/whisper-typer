@@ -242,3 +242,67 @@ class Table(tk.Frame):
         menu.add_command(label='Decrease font',command=lambda:self.zoom(-1))
         menu.add_command(label='Reset font',command=lambda:self.zoom(0))
         menu.tk_popup(event.x_root,event.y_root)
+
+
+class Tooltip:
+    def __init__(self,widget,text_func,palette_func=None,font_func=None,delay_ms=300):
+        self.widget=widget
+        self.text_func=text_func if callable(text_func) else (lambda:text_func)
+        self.palette_func=palette_func
+        self.font_func=font_func
+        self.delay_ms=delay_ms
+        self.tip=None
+        self.timer=None
+        self.widget.bind('<Enter>',self.schedule,add='+')
+        self.widget.bind('<Leave>',self.hide,add='+')
+        self.widget.bind('<ButtonPress>',self.hide,add='+')
+        self.widget.bind('<Destroy>',self.hide,add='+')
+        self.widget.bind('<Unmap>',self.hide,add='+')
+
+    def schedule(self,event=None):
+        self.hide()
+        text=self.text_func()
+        if not text:return
+        self.timer=self.widget.after(self.delay_ms,self.show)
+
+    def show(self):
+        self.timer=None
+        text=self.text_func()
+        if not text or not self.widget.winfo_exists():return
+        self.hide()
+        try:
+            self.tip=tk.Toplevel(self.widget)
+            self.tip.wm_overrideredirect(True)
+            self.tip.wm_attributes('-topmost',True)
+            p=self.palette_func() if self.palette_func else LIGHT
+            family=self.font_func() if self.font_func else 'JetBrains Mono'
+            label=tk.Label(self.tip,text=text,font=(family,9),
+                           bg=p.get('button','#eeeeee'),fg=p.get('fg','#111111'),
+                           highlightbackground=p.get('line','#d0d0d0'),highlightthickness=1,
+                           bd=0,padx=8,pady=4,justify='left')
+            label.pack()
+            self.tip.update_idletasks()
+            w=self.tip.winfo_reqwidth()
+            h=self.tip.winfo_reqheight()
+            screen_w=self.widget.winfo_screenwidth()
+            screen_h=self.widget.winfo_screenheight()
+            x=self.widget.winfo_rootx()
+            y=self.widget.winfo_rooty()+self.widget.winfo_height()+4
+            if x+w>screen_w-8:
+                x=max(8,screen_w-w-8)
+            if y+h>screen_h-8:
+                y=max(8,self.widget.winfo_rooty()-h-4)
+            self.tip.wm_geometry(f'+{x}+{y}')
+        except Exception:
+            self.hide()
+
+    def hide(self,event=None):
+        if self.timer:
+            try:self.widget.after_cancel(self.timer)
+            except Exception:pass
+            self.timer=None
+        if self.tip:
+            try:self.tip.destroy()
+            except Exception:pass
+            self.tip=None
+

@@ -453,6 +453,41 @@ class TkTests(unittest.TestCase):
         settings = json.loads(self.window.settings_path.read_text())
         self.assertEqual(settings['font_family'], 'Google Sans Mono')
 
+    def test_path_label_and_tooltips_in_document_view(self):
+        file = self.path / 'project' / 'nested' / 'test_code.rs'
+        file.parent.mkdir(parents=True)
+        file.write_text('fn main() {}')
+        doc = Document(file, 'text', 'fn main() {}')
+        self.window.select_document(doc)
+        self.root.update()
+        self.assertTrue(self.window.path_label.winfo_ismapped())
+        self.assertIn('test_code.rs', self.window.path_label['text'])
+        self.assertEqual(self.window.path_tooltip.text_func(), f'{file.resolve()}\n(Click to copy)')
+        self.assertEqual(self.window.folder_tooltip.text_func(), f'Folder: {file.parent.resolve()}')
+        self.window.copy_path_click()
+        self.assertEqual(self.root.clipboard_get(), str(file.resolve()))
+        self.assertIn('Copied path', self.window.status['text'])
+        self.window.show_list_controls()
+        self.root.update()
+        self.assertFalse(self.window.path_label.winfo_ismapped())
+        pasted_doc = Document(None, 'markdown', '# Hello')
+        self.window.select_document(pasted_doc)
+        self.root.update()
+        self.assertFalse(self.window.path_label.winfo_ismapped())
+        self.assertEqual(self.window.path_tooltip.text_func(), '')
+
+    def test_fit_path_text(self):
+        import tkinter.font as tkfont
+        font = tkfont.Font(family=self.window.font_family, size=9)
+        path = str(self.path / 'a' / 'b' / 'c' / 'd' / 'very_long_file_name.txt')
+        full = self.window.fit_path_text(path, font, 2000)
+        self.assertEqual(full, path)
+        medium = self.window.fit_path_text(path, font, 300)
+        self.assertIn('very_long_file_name.txt', medium)
+        self.assertTrue(medium.startswith('/…/') or medium.startswith('~/…/'))
+        narrow = self.window.fit_path_text(path, font, 100)
+        self.assertTrue(narrow.startswith('…'))
+
 
 
 
